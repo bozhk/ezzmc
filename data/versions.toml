@@ -1,0 +1,699 @@
+# data/versions.toml — источник истины по версиям (1.5.2 → latest release).
+# Источники: Mojang version_manifest_v2 (даты) + PrismarineJS/minecraft-data protocolVersions.json (protocol, data version).
+# Получено 2026-11-07. Номера protocol сверять с живым сервером при тестах (STATUS → матрица версий).
+# era: pre-netty (≤1.6.4, TCP без Netty-фрейминга) · netty-early (1.7.x) · play · config (≥1.20.2, есть состояние Configuration)
+# Ванильная версия-канон = latest. Записи отсортированы по дате выхода.
+# Нет в источнике protocol: 1.7.3 (по wiki protocol 4 как у 1.7.2) — добавить после проверки, TODO-452.
+
+latest = "26.3"
+
+[[version]]
+name = "1.5.2"
+protocol = 61
+released = "2013-04-25"
+era = "pre-netty"
+config_state = false
+
+[[version]]
+name = "1.6.1"
+protocol = 73
+released = "2013-06-28"
+era = "pre-netty"
+config_state = false
+
+[[version]]
+name = "1.6.2"
+protocol = 74
+released = "2013-07-05"
+era = "pre-netty"
+config_state = false
+
+[[version]]
+name = "1.6.4"
+protocol = 78
+released = "2013-09-19"
+era = "pre-netty"
+config_state = false
+
+[[version]]
+name = "1.7.2"
+protocol = 4
+released = "2013-10-25"
+era = "netty-early"
+config_state = false
+
+[[version]]
+name = "1.7.4"
+protocol = 4
+data_version = 6
+released = "2013-12-09"
+era = "netty-early"
+config_state = false
+
+[[version]]
+name = "1.7.5"
+protocol = 4
+data_version = 7
+released = "2014-02-26"
+era = "netty-early"
+config_state = false
+
+[[version]]
+name = "1.7.6"
+protocol = 5
+data_version = 10
+released = "2014-04-09"
+era = "netty-early"
+config_state = false
+
+[[version]]
+name = "1.7.7"
+protocol = 5
+data_version = 11
+released = "2014-04-09"
+era = "netty-early"
+config_state = false
+
+[[version]]
+name = "1.7.8"
+protocol = 5
+data_version = 12
+released = "2014-04-09"
+era = "netty-early"
+config_state = false
+
+[[version]]
+name = "1.7.9"
+protocol = 5
+data_version = 13
+released = "2014-04-14"
+era = "netty-early"
+config_state = false
+
+[[version]]
+name = "1.7.10"
+protocol = 5
+data_version = 18
+released = "2014-05-14"
+era = "netty-early"
+config_state = false
+
+[[version]]
+name = "1.8"
+protocol = 47
+data_version = 74
+released = "2014-09-02"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.8.1"
+protocol = 47
+data_version = 80
+released = "2014-11-24"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.8.2"
+protocol = 47
+data_version = 88
+released = "2015-02-19"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.8.3"
+protocol = 47
+data_version = 89
+released = "2015-02-20"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.8.4"
+protocol = 47
+data_version = 90
+released = "2015-04-17"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.8.5"
+protocol = 47
+data_version = 91
+released = "2015-05-22"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.8.6"
+protocol = 47
+data_version = 92
+released = "2015-05-25"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.8.7"
+protocol = 47
+data_version = 93
+released = "2015-06-05"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.8.8"
+protocol = 47
+data_version = 94
+released = "2015-07-27"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.8.9"
+protocol = 47
+data_version = 95
+released = "2015-12-03"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.9"
+protocol = 107
+data_version = 169
+released = "2016-02-29"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.9.1"
+protocol = 108
+data_version = 175
+released = "2016-03-30"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.9.2"
+protocol = 109
+data_version = 176
+released = "2016-03-30"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.9.3"
+protocol = 110
+data_version = 183
+released = "2016-05-10"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.9.4"
+protocol = 110
+data_version = 184
+released = "2016-05-10"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.10"
+protocol = 210
+data_version = 510
+released = "2016-06-08"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.10.1"
+protocol = 210
+data_version = 511
+released = "2016-06-22"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.10.2"
+protocol = 210
+data_version = 512
+released = "2016-06-23"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.11"
+protocol = 315
+data_version = 819
+released = "2016-11-14"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.11.1"
+protocol = 316
+data_version = 921
+released = "2016-12-20"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.11.2"
+protocol = 316
+data_version = 922
+released = "2016-12-21"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.12"
+protocol = 335
+data_version = 1139
+released = "2017-06-02"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.12.1"
+protocol = 338
+data_version = 1241
+released = "2017-08-03"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.12.2"
+protocol = 340
+data_version = 1343
+released = "2017-09-18"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.13"
+protocol = 393
+data_version = 1519
+released = "2018-07-18"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.13.1"
+protocol = 401
+data_version = 1628
+released = "2018-08-22"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.13.2"
+protocol = 404
+data_version = 1631
+released = "2018-10-22"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.14"
+protocol = 477
+data_version = 1952
+released = "2019-04-23"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.14.1"
+protocol = 480
+data_version = 1957
+released = "2019-05-13"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.14.2"
+protocol = 485
+data_version = 1963
+released = "2019-05-27"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.14.3"
+protocol = 490
+data_version = 1968
+released = "2019-06-24"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.14.4"
+protocol = 498
+data_version = 1976
+released = "2019-07-19"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.15"
+protocol = 573
+data_version = 2225
+released = "2019-12-09"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.15.1"
+protocol = 575
+data_version = 2227
+released = "2019-12-16"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.15.2"
+protocol = 578
+data_version = 2230
+released = "2020-01-17"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.16"
+protocol = 735
+data_version = 2566
+released = "2020-06-23"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.16.1"
+protocol = 736
+data_version = 2567
+released = "2020-06-24"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.16.2"
+protocol = 751
+data_version = 2578
+released = "2020-08-11"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.16.3"
+protocol = 753
+data_version = 2580
+released = "2020-09-10"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.16.4"
+protocol = 754
+data_version = 2584
+released = "2020-10-29"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.16.5"
+protocol = 754
+data_version = 2586
+released = "2021-01-14"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.17"
+protocol = 755
+data_version = 2724
+released = "2021-06-08"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.17.1"
+protocol = 756
+data_version = 2730
+released = "2021-07-06"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.18"
+protocol = 757
+data_version = 2860
+released = "2021-11-30"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.18.1"
+protocol = 757
+data_version = 2865
+released = "2021-12-10"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.18.2"
+protocol = 758
+data_version = 2975
+released = "2022-02-28"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.19"
+protocol = 759
+data_version = 3105
+released = "2022-06-07"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.19.1"
+protocol = 760
+data_version = 3117
+released = "2022-07-27"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.19.2"
+protocol = 760
+data_version = 3120
+released = "2022-08-05"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.19.3"
+protocol = 761
+data_version = 3218
+released = "2022-12-07"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.19.4"
+protocol = 762
+data_version = 3337
+released = "2023-03-14"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.20"
+protocol = 763
+data_version = 3463
+released = "2023-06-02"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.20.1"
+protocol = 763
+data_version = 3465
+released = "2023-06-12"
+era = "play"
+config_state = false
+
+[[version]]
+name = "1.20.2"
+protocol = 764
+data_version = 3578
+released = "2023-09-20"
+era = "config"
+config_state = true
+
+[[version]]
+name = "1.20.3"
+protocol = 765
+data_version = 3698
+released = "2023-12-04"
+era = "config"
+config_state = true
+
+[[version]]
+name = "1.20.4"
+protocol = 765
+data_version = 3700
+released = "2023-12-07"
+era = "config"
+config_state = true
+
+[[version]]
+name = "1.20.5"
+protocol = 766
+data_version = 3837
+released = "2024-04-23"
+era = "config"
+config_state = true
+
+[[version]]
+name = "1.20.6"
+protocol = 766
+data_version = 3839
+released = "2024-04-29"
+era = "config"
+config_state = true
+
+[[version]]
+name = "1.21"
+protocol = 767
+data_version = 3953
+released = "2024-06-13"
+era = "config"
+config_state = true
+
+[[version]]
+name = "1.21.1"
+protocol = 767
+data_version = 3955
+released = "2024-08-08"
+era = "config"
+config_state = true
+
+[[version]]
+name = "1.21.2"
+protocol = 768
+data_version = 4080
+released = "2024-10-22"
+era = "config"
+config_state = true
+
+[[version]]
+name = "1.21.3"
+protocol = 768
+data_version = 4082
+released = "2024-10-23"
+era = "config"
+config_state = true
+
+[[version]]
+name = "1.21.4"
+protocol = 769
+data_version = 4189
+released = "2024-12-03"
+era = "config"
+config_state = true
+
+[[version]]
+name = "1.21.5"
+protocol = 770
+data_version = 4325
+released = "2025-03-25"
+era = "config"
+config_state = true
+
+[[version]]
+name = "1.21.6"
+protocol = 771
+data_version = 4435
+released = "2025-06-17"
+era = "config"
+config_state = true
+
+[[version]]
+name = "1.21.7"
+protocol = 772
+data_version = 4438
+released = "2025-06-30"
+era = "config"
+config_state = true
+
+[[version]]
+name = "1.21.8"
+protocol = 772
+data_version = 4440
+released = "2025-07-17"
+era = "config"
+config_state = true
+
+[[version]]
+name = "1.21.9"
+protocol = 773
+data_version = 4554
+released = "2025-09-30"
+era = "config"
+config_state = true
+
+[[version]]
+name = "1.21.10"
+protocol = 773
+data_version = 4556
+released = "2025-10-07"
+era = "config"
+config_state = true
+
+[[version]]
+name = "1.21.11"
+protocol = 774
+data_version = 4671
+released = "2025-12-09"
+era = "config"
+config_state = true
+
+[[version]]
+name = "26.1"
+protocol = 775
+data_version = 4786
+released = "2026-03-24"
+era = "config"
+config_state = true
+
+[[version]]
+name = "26.1.1"
+protocol = 775
+data_version = 4788
+released = "2026-04-01"
+era = "config"
+config_state = true
+
+[[version]]
+name = "26.1.2"
+protocol = 775
+data_version = 4790
+released = "2026-04-09"
+era = "config"
+config_state = true
+
+[[version]]
+name = "26.2"
+protocol = 776
+data_version = 4903
+released = "2026-06-16"
+era = "config"
+config_state = true
+
+[[version]]
+name = "26.3"
+protocol = 777
+data_version = 5023
+released = "2026-09-15"
+era = "config"
+config_state = true

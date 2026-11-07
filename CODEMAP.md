@@ -29,9 +29,9 @@
 
 | Тема | Файл / крейт |
 |---|---|
-| Таблица версий и protocol number | `data/versions.toml` |
-| Кодогенерация из `--reports` | `xtask/` (пока нет) |
-| Эталонный исходник (не в git) | `reference/<версия>/`, выжимки — `docs/ref/` |
+| Таблица версий и protocol number | `data/versions.toml` ✅ |
+| Кодогенерация из `--reports` | `xtask/` (пока нет; gen-reports — TODO-017) |
+| Эталонный исходник (не в git) | `reference/<версия>/client/` (`cargo xtask fetch-reference <ver>`), выжимки — `docs/ref/` |
 | Сетевой фрейминг / VarInt | — |
 | Шифрование / компрессия | — |
 | Кодеки пакетов по версиям | — |
@@ -41,41 +41,47 @@
 | Физика / движение | — |
 | Инвентарь / UI | — |
 | Тесты, golden-данные | `tests-integration/` |
-| Бенчмарки | `benches/` |
+| Бенчмарки | `benches/` (`cargo xtask bench`) ✅ |
 
 ---
 
 ## Карта по крейтам
 
 ### Корень
+- `CLAUDE.md` / `AGENTS.md` — входная инструкция агентам (CLAUDE.md главная).
 - `GOAL.md` — цели, ванильность, правила агентов, лимиты и штрафы.
 - `STATUS.md` — журнал: фокус, баги, TODO, решения, матрица версий.
+- `TASKS.md` — бэклог по главам 0–21, нумерация TODO-NNN.
 - `CODEMAP.md` — этот файл.
-- `Cargo.toml` — workspace (📝 ещё не создан, TODO-001).
+- `Cargo.toml` — workspace, профили сборки, `[workspace.dependencies]` внутренних крейтов ✅
+- `benches/` — criterion-бенчи (`benches/smoke.rs`), член workspace ✅
+- `.github/workflows/ci.yml` — fmt + clippy + test ✅
+- `rust-toolchain.toml` — stable + rustfmt/clippy ✅
 
 ### `crates/protocol/`
-(пока нет кода)
+- **Что:** каркас крейта (`src/lib.rs`, пустой). 📝
 
 ### `crates/net/`
-(пока нет кода)
+- **Что:** каркас крейта (`src/lib.rs`, пустой). 📝
 
 ### `crates/world/`
-(пока нет кода)
+- **Что:** каркас крейта (`src/lib.rs`, пустой). 📝
 
 ### `crates/mesh/`
-(пока нет кода)
+- **Что:** каркас крейта (`src/lib.rs`, пустой). 📝
 
 ### `crates/render/`
-(пока нет кода)
+- **Что:** каркас крейта (`src/lib.rs`, пустой). 📝
 
 ### `crates/assets/`
-(пока нет кода)
+- **Что:** каркас крейта (`src/lib.rs`, пустой). 📝
 
 ### `crates/client/`
-(пока нет кода)
+- **Что:** каркас крейта (`src/main.rs`, пустой). 📝
 
 ### `xtask/`
-(пока нет кода)
+- **Что:** `cargo xtask <cmd>` (алиас `.cargo/config.toml`).
+- **Ключевое:** `bench`; `fetch-reference <ver>` (`fetch_reference.rs`: скачивание+remap+decompile; `mappings.rs`: ProGuard→Tiny, тест). 🚧 TODO-016+
 
 ### `tests-integration/`
 (пока нет кода)

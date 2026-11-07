@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/net",
+    "crates/world",
+    "crates/mesh",
+    "crates/render",
+    "crates/assets",
+    "crates/client",
+    "xtask",
+    "benches",
+]
+default-members = ["crates/client"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+
+# Внутренние зависимости крейтов
+[workspace.dependencies]
+ezzmc-protocol = { path = "crates/protocol" }
+ezzmc-net = { path = "crates/net" }
+ezzmc-world = { path = "crates/world" }
+ezzmc-mesh = { path = "crates/mesh" }
+ezzmc-render = { path = "crates/render" }
+ezzmc-assets = { path = "crates/assets" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+# Горячие крейты оптимизируем и в dev, остальное — быстрая сборка
+[profile.dev]
+opt-level = 1
+[profile.dev.package.ezzmc-protocol]
+opt-level = 3
+[profile.dev.package.ezzmc-net]
+opt-level = 3
+[profile.dev.package.ezzmc-world]
+opt-level = 3
+[profile.dev.package.ezzmc-mesh]
+opt-level = 3
+
+[profile.bench]
+inherits = "release"
+debug = false
+strip = "none"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"
