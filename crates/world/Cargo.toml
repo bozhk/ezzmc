@@ -10,3 +10,4 @@ workspace = true
 
 [dependencies]
 ezzmc-protocol.workspace = true
+tracing.workspace = true

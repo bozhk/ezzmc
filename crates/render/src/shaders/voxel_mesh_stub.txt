@@ -1,0 +1,9 @@
+// MeshShaders (заглушка, не компилируется — WGSL-стадий task/mesh в naga 28 нет, нужен SPIR-V/passthrough).
+//
+// TASK shader (workgroup = 32 секции):
+//   thread -> одна секция: frustum-тест AABB + Hi-Z-тест. ЗДЕСЬ происходит culling на этом пути.
+//   выжившие секции -> EmitMeshTasksEXT(n, 1, 1) с payload {section_id[]}.
+// MESH shader (workgroup = 1 секция, до 64 вершин / 126 примитивов на мешлет):
+//   читает u32 VoxelVertex из storage, распаковывает (см. voxel_vertex.rs), SetMeshOutputsEXT.
+//   Back-face culling граней по `face` + позиции камеры — тоже здесь (до растеризации).
+// FRAGMENT: тот же, что у ComputeIndirect.

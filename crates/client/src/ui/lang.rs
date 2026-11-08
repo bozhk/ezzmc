@@ -1,0 +1,54 @@
+//! Переводы: `assets/minecraft/lang/en_us.json` (VANILLA: Language#getOrDefault; нет ключа → сам ключ).
+use std::collections::HashMap;
+
+#[derive(Default)]
+pub struct Lang(HashMap<String, String>);
+
+impl Lang {
+    pub fn load(json: &[u8]) -> Self {
+        Self(serde_json::from_slice(json).unwrap_or_default())
+    }
+
+    pub fn tr(&self, key: &str) -> String {
+        self.0.get(key).cloned().unwrap_or_else(|| key.to_owned())
+    }
+
+    /// VANILLA: `%s` / `%d` подставляются по порядку, `%%` → `%`.
+    pub fn fmt(&self, key: &str, args: &[&str]) -> String {
+        let f = self.tr(key);
+        let mut out = String::new();
+        let mut it = f.chars().peekable();
+        let mut n = 0;
+        while let Some(c) = it.next() {
+            if c != '%' {
+                out.push(c);
+                continue;
+            }
+            match it.next() {
+                Some('%') => out.push('%'),
+                Some('s' | 'd') => {
+                    out.push_str(args.get(n).copied().unwrap_or(""));
+                    n += 1;
+                }
+                Some(o) => {
+                    out.push('%');
+                    out.push(o);
+                }
+                None => out.push('%'),
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_value() {
+        let l = Lang::load(br#"{"options.generic_value":"%s: %s"}"#);
+        assert_eq!(l.fmt("options.generic_value", &["FOV", "70"]), "FOV: 70");
+        assert_eq!(l.tr("missing.key"), "missing.key");
+    }
+}

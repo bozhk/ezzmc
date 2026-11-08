@@ -1,3 +1,6 @@
 /target
 /reference/
 .idea/
+/screenshots/
+/options.txt
+/servers.dat

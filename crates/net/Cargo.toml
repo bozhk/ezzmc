@@ -10,3 +10,9 @@ workspace = true
 
 [dependencies]
 ezzmc-protocol.workspace = true
+libdeflater = "1.26.1"
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+ezzmc-world.workspace = true

@@ -10,3 +10,11 @@ workspace = true
 
 [dependencies]
 ezzmc-world.workspace = true
+ezzmc-assets.workspace = true
+glam = "0.30"
+rayon.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+ezzmc-protocol.workspace = true

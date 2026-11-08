@@ -10,6 +10,7 @@ members = [
     "crates/client",
     "xtask",
     "benches",
+    "tests-integration",
 ]
 default-members = ["crates/client"]
 
@@ -27,6 +28,16 @@ unwrap_used = "warn"
 
 # Внутренние зависимости крейтов
 [workspace.dependencies]
+crossbeam-channel = "0.5"
+rayon = "1"
+wgpu = { version = "28", default-features = false, features = ["wgsl", "vulkan", "gles", "dx12", "metal", "std"] }
+pollster = "0.4"
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter", "ansi"] }
 ezzmc-protocol = { path = "crates/protocol" }
 ezzmc-net = { path = "crates/net" }
 ezzmc-world = { path = "crates/world" }
