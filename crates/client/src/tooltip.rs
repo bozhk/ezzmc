@@ -43,6 +43,8 @@ pub static TRIM_DESC: Mutex<(Vec<Option<Tag>>, Vec<Option<Tag>>)> =
 
 /// F3+H: расширенная подсказка (прочность, id предмета). VANILLA: KeyboardHandler — F3+H → advanced tooltips.
 pub static ADVANCED: AtomicBool = AtomicBool::new(false);
+/// Игрок в креативе (`TooltipFlag#isCreative`): `hide_tooltip` не прячет подсказку.
+pub static CREATIVE: AtomicBool = AtomicBool::new(false);
 
 /// Группы слотов в порядке EquipmentSlotGroup (id 0..10). VANILLA: ItemStack#addAttributeTooltips.
 const SLOT_ORDER: [&str; 11] = [
@@ -576,7 +578,13 @@ fn bundle_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack, out: &mut Vec<(Str
 /// VANILLA: ItemStack#getTooltipLines (часть) + getStyledHoverName/Rarity.
 /// Редкость: компонент `rarity`, иначе по предмету из данных; чары поднимают common/uncommon → rare, rare → epic.
 /// Скрытые компоненты предмета (`tooltip_display`). VANILLA: TooltipDisplay#shows (hiddenComponents).
-/// hide_tooltip не учитывается: в ванили он прячет всю подсказку вне креатива (см. STATUS).
+/// Флаг `hide_tooltip` из `tooltip_display`. VANILLA: ItemStack#getTooltipLines.
+fn hide_tooltip(patch: &ComponentPatch) -> bool {
+    comp(patch, "tooltip_display")
+        .and_then(|b| Reader::new(b).bool().ok())
+        .unwrap_or(false)
+}
+
 fn hidden_components(patch: &ComponentPatch) -> Vec<&'static str> {
     let Some(b) = comp(patch, "tooltip_display") else {
         return Vec::new();
@@ -693,6 +701,11 @@ fn component_count(name: &str, patch: &ComponentPatch) -> usize {
 /// Строки тултипа в порядке `ItemStack#addDetailsToTooltip`.
 pub fn stack_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack) -> Vec<(String, u32)> {
     let name = ITEM.get(s.item as usize).copied().unwrap_or("air");
+    // VANILLA: ItemStack#getTooltipLines — вне креатива hide_tooltip даёт пустую подсказку
+    // (ветка OP_NBT_WARNING не портирована: нужен shouldPrintOpWarning).
+    if hide_tooltip(&s.patch) && !CREATIVE.load(Ordering::Relaxed) {
+        return Vec::new();
+    }
     let hidden = hidden_components(&s.patch);
     let shows = |c: &str| !hidden.contains(&c);
     let ench = ench_list(&s.patch, "enchantments");
@@ -803,6 +816,41 @@ pub fn stack_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack) -> Vec<(String,
     }
     if comp(&s.patch, "unbreakable").is_some() && shows("unbreakable") {
         out.push((lang.tr("item.unbreakable"), 0x5555FF));
+    }
+    // VANILLA: ItemStack#addDetailsToTooltip — OMINOUS_BOTTLE_AMPLIFIER, затем SUSPICIOUS_STEW_EFFECTS.
+    // VANILLA: OminousBottleAmplifier#addToTooltip — Bad Omen на 120000 тиков, уровень = значение.
+    if shows("ominous_bottle_amplifier") {
+        if let Some(b) = comp(&s.patch, "ominous_bottle_amplifier") {
+            let amp = Reader::new(b).var_int().unwrap_or(0);
+            let effs = [Eff {
+                name: "bad_omen".into(),
+                dur: 120_000,
+                amp,
+            }];
+            potion_lines(lang, &effs, 1.0, &mut out);
+        }
+    }
+    // VANILLA: SuspiciousStewEffects#addToTooltip — только при флаге креатива.
+    // Запись: holderRegistry (сырой id, без +1), затем VarInt длительности.
+    if shows("suspicious_stew_effects") && CREATIVE.load(Ordering::Relaxed) {
+        if let Some(b) = comp(&s.patch, "suspicious_stew_effects") {
+            let mut r = Reader::new(b);
+            let n = r.var_int().unwrap_or(0);
+            let mut effs = Vec::new();
+            for _ in 0..n {
+                let (Ok(id), Ok(dur)) = (r.var_int(), r.var_int()) else {
+                    break;
+                };
+                if let Some(nm) = MOB_EFFECT.get(id as usize) {
+                    effs.push(Eff {
+                        name: nm.strip_prefix("minecraft:").unwrap_or(nm).to_owned(),
+                        dur,
+                        amp: 0,
+                    });
+                }
+            }
+            potion_lines(lang, &effs, 1.0, &mut out);
+        }
     }
     // VANILLA: ItemStack#addDetailsToTooltip — спаунер: имя сущности, иначе «Interact with Spawn Egg:».
     // VANILLA: Spawner#appendHoverText.

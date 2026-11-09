@@ -116,6 +116,24 @@ impl App {
         if down && self.menu_active && self.capture_bind(input) {
             return;
         }
+        // Та же логика F3 / F3+H, что в `WindowEvent::KeyboardInput` (main.rs): агентский ввод её обходит.
+        if let Input::Key(KeyCode::F3) = input {
+            if down {
+                self.f3_pending = true;
+            } else if self.f3_pending {
+                self.f3_pending = false;
+                self.debug_on = !self.debug_on;
+            }
+            return;
+        }
+        if down {
+            if let Input::Key(KeyCode::KeyH) = input {
+                if self.f3_pending {
+                    crate::tooltip::ADVANCED.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            self.f3_pending = false;
+        }
         if down {
             let is = |app: &Self, n: &str| app.keys.get(n).is_some_and(|b| b.key == input);
             if let Input::Key(KeyCode::Escape) = input {

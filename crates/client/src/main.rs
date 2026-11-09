@@ -483,6 +483,8 @@ impl App {
             return;
         };
         let (joined, dead) = (v.joined, v.health <= 0.0);
+        // VANILLA: TooltipFlag#isCreative — режим игрока для hide_tooltip (покадрово, не только при открытом инвентаре).
+        tooltip::CREATIVE.store(v.game_mode == 1, std::sync::atomic::Ordering::Relaxed);
         // Захват может не удаться, пока окно без фокуса (Wayland) — повторяем каждый кадр,
         // пока не получится (после этого `grabbed` и ручное освобождение работают как раньше).
         if joined
