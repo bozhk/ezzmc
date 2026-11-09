@@ -54,6 +54,13 @@ const VERTEX_CAPACITY: u32 = 80_000_000;
 const INDEX_ARENA_CAPACITY: u32 = 10_000_000;
 const MAX_SECTIONS: u32 = 65_536;
 const MAX_PENDING: usize = 128;
+/// Повторных попыток загрузки секции в арену при нехватке места, прежде чем сдаться.
+const ARENA_RETRIES: u8 = 3;
+
+/// VANILLA: ItemStack#hasFoil для стека (блеск на 3D-предмете).
+fn foil_of(st: &ezzmc_protocol::item::ItemStack) -> bool {
+    crate::handitem::stack_ctx(st).is_some_and(|(n, _)| crate::hud::has_foil(n, &st.patch))
+}
 
 pub struct WorldView {
     /// 185: зажата ЛКМ (key.attack) — Minecraft#continueAttack.
@@ -109,6 +116,8 @@ pub struct WorldView {
     /// Броня игроков: отдельная текстура-атлас (`armor::ArmorKit`).
     armor_draw: ezzmc_render::particledraw::ParticleDraw,
     armor_kit: crate::armor::ArmorKit,
+    /// Блеск зачарований брони (геометрия брони + текстура блеска).
+    glint_draw: ezzmc_render::particledraw::ParticleDraw,
     /// Атласы для программного превью игрока (блоки — со старта, предметы — лениво).
     preview_blocks: std::rc::Rc<(Vec<u8>, u32, u32)>,
     preview_items: Option<std::rc::Rc<(Vec<u8>, u32, u32)>>,
@@ -156,6 +165,9 @@ pub struct WorldView {
     hand_rm: Option<ezzmc_assets::pack::ResourceManager>,
     hand_item_draw: Option<ezzmc_render::particledraw::ParticleDraw>,
     entity_item_draw: Option<ezzmc_render::particledraw::ParticleDraw>,
+    /// Блеск предметов в руке (камера руки) и в мире.
+    hand_glint_draw: Option<ezzmc_render::particledraw::ParticleDraw>,
+    entity_glint_draw: Option<ezzmc_render::particledraw::ParticleDraw>,
     /// VANILLA: ModelBakery#FIRE_0 / FIRE_1 (пламя горящих сущностей).
     fire_uv: Option<(ezzmc_assets::bake::SpriteUv, ezzmc_assets::bake::SpriteUv)>,
     /// VANILLA: ItemInHandRenderer#mainHandItem (предмет, который сейчас рисуется) и слот.
@@ -188,6 +200,8 @@ pub struct WorldView {
     atlas_size: (u32, u32),
     /// Секции, лежащие в арене.
     resident: HashSet<SectionPos>,
+    /// Сколько раз секцию не удалось загрузить в арену (нехватка места) и её поставили на перестройку.
+    arena_retry: std::collections::HashMap<SectionPos, u8>,
     min_y: i32,
     height: i32,
     view_radius: i32,
@@ -610,12 +624,25 @@ impl WorldView {
             &fog_buf,
             &lightmap.view,
             &atlas_view,
-            Some((
-                armor_kit.rgba.as_slice(),
-                armor_kit.width,
-                armor_kit.height,
-            )),
+            Some((armor_kit.rgba.as_slice(), armor_kit.width, armor_kit.height)),
         );
+        let glint_draw = {
+            let glint = rm
+                .read("assets/minecraft/textures/misc/enchanted_glint_armor.png")
+                .and_then(|d| ezzmc_assets::texture::Image::decode_png(&d).ok())
+                .map(|i| (i.to_rgba8(), i.width, i.height));
+            ezzmc_render::particledraw::ParticleDraw::new_glint(
+                &gpu.device,
+                &gpu.queue,
+                color,
+                DEPTH_FORMAT,
+                &projection_buf,
+                &fog_buf,
+                &lightmap.view,
+                &atlas_view,
+                glint.as_ref().map(|(d, w, h)| (d.as_slice(), *w, *h)),
+            )
+        };
         let arrow_tex = {
             let mut rgba = Vec::new();
             let mut ok = true;
@@ -701,6 +728,33 @@ impl WorldView {
         let hand_rm = ezzmc_assets::install::GameInstall::locate("26.3")
             .ok()
             .and_then(|i| crate::packrepo::build_resource_manager(&i).ok());
+        let item_glint_tex = rm
+            .read("assets/minecraft/textures/misc/enchanted_glint_item.png")
+            .and_then(|d| ezzmc_assets::texture::Image::decode_png(&d).ok())
+            .map(|i| (i.to_rgba8(), i.width, i.height));
+        let (hand_glint_draw, entity_glint_draw) = match &hand_items {
+            Some(h) => {
+                let (rgba, w, hh) = h.items_rgba();
+                let mk = |proj: &wgpu::Buffer| {
+                    ezzmc_render::particledraw::ParticleDraw::new_item_glint(
+                        &gpu.device,
+                        &gpu.queue,
+                        color,
+                        DEPTH_FORMAT,
+                        proj,
+                        &fog_buf,
+                        &lightmap.view,
+                        &atlas_view,
+                        Some((rgba.as_slice(), w, hh)),
+                        item_glint_tex
+                            .as_ref()
+                            .map(|(d, w, h)| (d.as_slice(), *w, *h)),
+                    )
+                };
+                (Some(mk(&hand_proj_buf)), Some(mk(&projection_buf)))
+            }
+            None => (None, None),
+        };
         let (hand_item_draw, entity_item_draw) = match &hand_items {
             Some(h) => {
                 let (rgba, w, hh) = h.items_rgba();
@@ -755,6 +809,7 @@ impl WorldView {
             entity_draw,
             armor_draw,
             armor_kit,
+            glint_draw,
             preview_blocks,
             preview_items: None,
             mobs: crate::mobs::Mobs::default(),
@@ -787,6 +842,8 @@ impl WorldView {
             hand_rm,
             hand_item_draw,
             entity_item_draw,
+            hand_glint_draw,
+            entity_glint_draw,
             fire_uv,
             hand_shown: None,
             off_shown: None,
@@ -800,6 +857,7 @@ impl WorldView {
             depth: None,
             atlas_size: (atlas.width, atlas.height),
             resident: HashSet::default(),
+            arena_retry: std::collections::HashMap::default(),
             min_y: -64,
             height: 384,
             view_radius: 8,
@@ -1153,6 +1211,36 @@ impl WorldView {
                     // VANILLA: ClientPacketListener#handleMovePlayer — позиция сервера всегда применяется
                     // (раньше только первая: после /tp камера оставалась на старом месте и сервер
                     // перестал слать чанки).
+                    tracing::debug!(
+                        target: "dbg",
+                        "server_teleport from={:.3?} to={:.3?} vel={:.3?} ground={} yaw={:.1} pitch={:.1}",
+                        self.player.pos,
+                        pos,
+                        vel,
+                        self.player.on_ground,
+                        yaw,
+                        pitch
+                    );
+                    // Отладка: что клиент видит в клетках под AABB до отката (сервер считал их твёрдыми).
+                    if tracing::enabled!(target: "dbg", tracing::Level::DEBUG) {
+                        let a = self.player.aabb();
+                        let mut cells = Vec::new();
+                        if let Ok(g) = self.net.level.lock() {
+                            if let Some(l) = g.as_ref() {
+                                for x in a[0].floor() as i32..=(a[3] - 1e-6).floor() as i32 {
+                                    for y in a[1].floor() as i32..=(a[4] - 1e-6).floor() as i32 {
+                                        for z in a[2].floor() as i32..=(a[5] - 1e-6).floor() as i32 {
+                                            cells.push(format!(
+                                                "({x},{y},{z})={}",
+                                                l.chunks.block(x, y, z).name()
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        tracing::debug!(target: "dbg", "teleport_cells {}", cells.join(" "));
+                    }
                     self.player.teleport(pos);
                     self.player.vel = vel;
                     self.cam = [pos[0], pos[1] + self.player.eye_height(), pos[2]];
@@ -1560,9 +1648,23 @@ impl WorldView {
             }
             match self.arena.upload(&gpu.queue, r.pos, mesh, self.cam) {
                 Ok(()) => {
+                    self.arena_retry.remove(&r.pos);
                     self.resident.insert(r.pos);
                 }
-                Err(e) => tracing::warn!("арена: {e}"),
+                Err(e) => {
+                    // Старая геометрия осталась на месте; при нехватке места пробуем перестроить позже.
+                    let tries = self.arena_retry.entry(r.pos).or_insert(0);
+                    if *tries < ARENA_RETRIES {
+                        *tries += 1;
+                        self.queue.mark(r.pos);
+                    } else {
+                        self.arena_retry.remove(&r.pos);
+                        tracing::warn!(
+                            "арена: {e}; секция {:?} осталась со старой геометрией",
+                            r.pos
+                        );
+                    }
+                }
             }
         }
         self.sync_atlas(gpu);
@@ -1777,6 +1879,7 @@ impl WorldView {
         use ezzmc_render::humanoid::setup_anim;
         let mut data = Vec::new();
         let mut armor_data = Vec::new();
+        let mut glint_data = Vec::new();
         let mut shadow = Vec::new();
         self.entity_item_visible = false;
         let held_mesh = self.inv.held().cloned().and_then(|st| {
@@ -1786,6 +1889,13 @@ impl WorldView {
             self.hand_items.as_mut()?.get(rm, name, &cx)
         });
         let left_mesh = self.offhand_mesh(true);
+        let held_foil = self.inv.held().is_some_and(foil_of);
+        let left_foil = self
+            .inv
+            .slots
+            .get(crate::inventory::OFFHAND)
+            .and_then(|s| s.as_ref())
+            .is_some_and(foil_of);
         let mut item_data = (Vec::new(), Vec::new());
         if self.perspective != 0 && self.walking && self.have_pos {
             let pt = (self.tick_acc / 0.05).clamp(0.0, 1.0) as f32;
@@ -1818,8 +1928,16 @@ impl WorldView {
             setup_anim(model, parts, &state);
             model.bake(root, [255; 4], light, &mut data);
             let looks = crate::armor::looks_of_menu(&self.inv.slots);
-            self.armor_kit
-                .bake(&looks, &state, root, [255; 4], light, &mut armor_data);
+            self.armor_kit.fall_flying = false;
+            self.armor_kit.bake(
+                &looks,
+                &state,
+                root,
+                [255; 4],
+                light,
+                &mut armor_data,
+                &mut glint_data,
+            );
             // VANILLA: AvatarRenderer — shadowRadius 0.5; тень не рисуется у невидимого.
             if let Ok(Some(l)) = self.net.level.lock().as_deref() {
                 crate::entityshadow::bake(l, pos, self.cam, 0.5, 1.0, self.sky_darken, &mut shadow);
@@ -1834,6 +1952,7 @@ impl WorldView {
                     arm,
                     crate::handitem::View::ThirdPerson,
                     light,
+                    held_foil,
                     &mut item_data.0,
                     &mut item_data.1,
                 );
@@ -1848,13 +1967,20 @@ impl WorldView {
                     arm,
                     crate::handitem::View::ThirdPersonLeft,
                     light,
+                    left_foil,
                     &mut item_data.0,
                     &mut item_data.1,
                 );
                 self.entity_item_visible = true;
             }
         }
-        self.bake_remote_players(&mut data, &mut armor_data, &mut shadow, &mut item_data);
+        self.bake_remote_players(
+            &mut data,
+            &mut armor_data,
+            &mut glint_data,
+            &mut shadow,
+            &mut item_data,
+        );
         if let Ok(g) = self.net.level.lock() {
             if let Some(l) = g.as_ref() {
                 self.mobs.bake(l, self.cam, self.sky_darken, &mut shadow);
@@ -1897,6 +2023,10 @@ impl WorldView {
             .prepare_raw(&gpu.device, &gpu.queue, mv, &data);
         self.armor_draw
             .prepare_raw(&gpu.device, &gpu.queue, mv, &armor_data);
+        self.glint_draw
+            .set_texture_mat(crate::armor::glint_matrix(0.16));
+        self.glint_draw
+            .prepare_raw(&gpu.device, &gpu.queue, mv, &glint_data);
         let mut pdata = Vec::new();
         if let Ok(g) = self.net.level.lock() {
             if let Some(l) = g.as_ref() {
@@ -1921,6 +2051,10 @@ impl WorldView {
         self.shadow_draw
             .prepare_raw(&gpu.device, &gpu.queue, mv, &shadow);
         if let Some(d) = self.entity_item_draw.as_mut() {
+            d.prepare_split(&gpu.device, &gpu.queue, mv, &item_data.0, &item_data.1);
+        }
+        if let Some(d) = self.entity_glint_draw.as_mut() {
+            d.set_texture_mat(crate::armor::glint_matrix(8.0));
             d.prepare_split(&gpu.device, &gpu.queue, mv, &item_data.0, &item_data.1);
         }
     }
@@ -2050,6 +2184,7 @@ impl WorldView {
                     crate::handitem::View::FirstPerson
                 },
                 light,
+                self.hand_shown.as_ref().is_some_and(|(s, _)| foil_of(s)),
                 &mut blocks,
                 &mut items,
             );
@@ -2058,6 +2193,10 @@ impl WorldView {
                 return;
             };
             d.prepare_split(&gpu.device, &gpu.queue, Mat4::IDENTITY, &blocks, &items);
+            if let Some(g) = self.hand_glint_draw.as_mut() {
+                g.set_texture_mat(crate::armor::glint_matrix(8.0));
+                g.prepare_split(&gpu.device, &gpu.queue, Mat4::IDENTITY, &blocks, &items);
+            }
             self.hand_item_visible = true;
         } else if self.hand_shown.is_none() {
             let (model, parts) = &mut self.hand_model;
@@ -2072,6 +2211,10 @@ impl WorldView {
             self.bake_offhand_fp(light, x_bob, y_bob, &mut blocks, &mut items);
             if let Some(d) = self.hand_item_draw.as_mut() {
                 d.prepare_split(&gpu.device, &gpu.queue, Mat4::IDENTITY, &blocks, &items);
+                if let Some(g) = self.hand_glint_draw.as_mut() {
+                    g.set_texture_mat(crate::armor::glint_matrix(8.0));
+                    g.prepare_split(&gpu.device, &gpu.queue, Mat4::IDENTITY, &blocks, &items);
+                }
                 self.hand_item_visible = !blocks.is_empty() || !items.is_empty();
             }
         }
@@ -2108,7 +2251,8 @@ impl WorldView {
             } else {
                 crate::handitem::View::FirstPersonLeft
             };
-            m.bake(root, view, light, b, i);
+            let foil = self.off_shown.as_ref().is_some_and(foil_of);
+            m.bake(root, view, light, foil, b, i);
         }
     }
 
@@ -2148,6 +2292,14 @@ impl WorldView {
             left,
             blocks: self.preview_blocks.clone(),
             items: self.preview_items.clone(),
+            foil: (
+                self.inv.held().is_some_and(foil_of),
+                self.inv
+                    .slots
+                    .get(crate::inventory::OFFHAND)
+                    .and_then(|s| s.as_ref())
+                    .is_some_and(foil_of),
+            ),
         }
     }
 
@@ -2373,6 +2525,7 @@ impl WorldView {
                 continue;
             };
             self.entity_item_visible = true;
+            let foil = foil_of(&d.stack);
             let (min_y, depth) = mesh.ground_bounds();
             let bob_offs =
                 LegacyRandom::new(i64::from(d.id)).next_float() * std::f32::consts::PI * 2.0;
@@ -2394,7 +2547,14 @@ impl WorldView {
             let mut rng = LegacyRandom::new(i64::from(d.stack.item));
             let view = crate::handitem::View::Ground;
             if depth > 0.0625 {
-                mesh.bake(base, view, d.light, &mut item_data.0, &mut item_data.1);
+                mesh.bake(
+                    base,
+                    view,
+                    d.light,
+                    foil,
+                    &mut item_data.0,
+                    &mut item_data.1,
+                );
                 for _ in 1..count {
                     let o = Vec3::new(
                         (rng.next_float() * 2.0 - 1.0) * 0.15,
@@ -2405,6 +2565,7 @@ impl WorldView {
                         base * Mat4::from_translation(o),
                         view,
                         d.light,
+                        foil,
                         &mut item_data.0,
                         &mut item_data.1,
                     );
@@ -2417,7 +2578,7 @@ impl WorldView {
                         0.0,
                         -(off_z * (count - 1) as f32 / 2.0),
                     ));
-                mesh.bake(m, view, d.light, &mut item_data.0, &mut item_data.1);
+                mesh.bake(m, view, d.light, foil, &mut item_data.0, &mut item_data.1);
                 m *= Mat4::from_translation(Vec3::new(0.0, 0.0, off_z));
                 for _ in 1..count {
                     let o = Vec3::new(
@@ -2429,6 +2590,7 @@ impl WorldView {
                         m * Mat4::from_translation(o),
                         view,
                         d.light,
+                        foil,
                         &mut item_data.0,
                         &mut item_data.1,
                     );
@@ -2534,6 +2696,7 @@ impl WorldView {
                 Mat4::from_translation(rel) * orient,
                 crate::handitem::View::Ground,
                 p.light,
+                p.stack.as_ref().is_some_and(foil_of),
                 &mut item_data.0,
                 &mut item_data.1,
             );
@@ -2545,6 +2708,7 @@ impl WorldView {
         &mut self,
         data: &mut Vec<u8>,
         armor_data: &mut Vec<u8>,
+        glint_data: &mut Vec<u8>,
         shadow: &mut Vec<u8>,
         item_data: &mut (Vec<u8>, Vec<u8>),
     ) {
@@ -2622,22 +2786,30 @@ impl WorldView {
             setup_anim(model, parts, &state);
             model.bake(root, [255; 4], light, data);
             let looks = crate::armor::looks_of_entity(&e.armor);
-            self.armor_kit
-                .bake(&looks, &state, root, [255; 4], light, armor_data);
+            self.armor_kit.fall_flying = e.fall_flying();
+            self.armor_kit.bake(
+                &looks, &state, root, [255; 4], light, armor_data, glint_data,
+            );
             crate::entityshadow::bake(level, pos, self.cam, 0.5, 1.0, self.sky_darken, shadow);
             // VANILLA: ItemInHandLayer — рука, X−90°, Y180°, translate(±1/16, 2/16, −10/16).
-            for (mesh, arm_idx, dx, view) in [
+            let (rf, lf) = (
+                e.held.as_ref().is_some_and(foil_of),
+                e.held_off.as_ref().is_some_and(foil_of),
+            );
+            for (mesh, arm_idx, dx, view, foil) in [
                 (
                     right_mesh,
                     parts.right_arm,
                     1.0,
                     crate::handitem::View::ThirdPerson,
+                    rf,
                 ),
                 (
                     left_mesh,
                     parts.left_arm,
                     -1.0,
                     crate::handitem::View::ThirdPersonLeft,
+                    lf,
                 ),
             ] {
                 if let Some(mesh) = mesh {
@@ -2645,7 +2817,7 @@ impl WorldView {
                         * Mat4::from_rotation_x((-90.0f32).to_radians())
                         * Mat4::from_rotation_y(180.0f32.to_radians())
                         * Mat4::from_translation(Vec3::new(dx / 16.0, 0.125, -0.625));
-                    mesh.bake(arm, view, light, &mut item_data.0, &mut item_data.1);
+                    mesh.bake(arm, view, light, foil, &mut item_data.0, &mut item_data.1);
                     self.entity_item_visible = true;
                 }
             }
@@ -2741,7 +2913,8 @@ impl WorldView {
         let aspect = w as f32 / h.max(1) as f32;
         // VANILLA: ChunkMap#setServerViewDistance — сервер меняет радиус (смена renderDistance в настройках).
         if let Ok(Some(l)) = self.net.level.lock().as_deref() {
-            self.view_radius = l.chunks.view_radius();
+            // Туман и дальняя плоскость: не дальше, чем сервер присылает (min серверного и renderDistance клиента).
+            self.view_radius = l.chunks.view_radius().min(self.cfg.render_distance);
         }
         // VANILLA: Camera#update — depthFar = max(renderDistance*16*4, cloudRange*16); cloudRange 64 (fancy).
         let far = ((self.view_radius.max(2) as f32) * 16.0 * 4.0).max(64.0 * 16.0);
@@ -2997,12 +3170,16 @@ impl WorldView {
                 if !compute && layer == RenderLayer::Translucent {
                     self.entity_draw.draw(&mut pass);
                     self.armor_draw.draw(&mut pass);
+                    self.glint_draw.draw(&mut pass);
                     self.mobs.draw(&mut pass);
                     self.arrow_draw.draw(&mut pass);
                     self.piston_draw.draw(&mut pass);
                     self.shadow_draw.draw(&mut pass);
                     if let (true, Some(d)) = (self.entity_item_visible, &self.entity_item_draw) {
                         d.draw(&mut pass);
+                        if let Some(g) = &self.entity_glint_draw {
+                            g.draw(&mut pass);
+                        }
                     }
                     pass.set_bind_group(0, &self.group0, &[]);
                     pass.set_bind_group(1, &self.group1, &[]);
@@ -3110,6 +3287,9 @@ impl WorldView {
             }
             if let (true, Some(d)) = (self.hand_item_visible, &self.hand_item_draw) {
                 d.draw(&mut pass);
+                if let Some(g) = &self.hand_glint_draw {
+                    g.draw(&mut pass);
+                }
             }
         }
         gpu.queue.submit([enc.finish()]);
@@ -3541,6 +3721,24 @@ impl WorldView {
             let held_block = held_name.map(item_block_name);
             let is_block =
                 held_block.is_none_or(|n| ezzmc_protocol::generated::r26_3::BLOCK.contains(&n));
+            let place_cell = held_block.and_then(|n| self.place_target(t.pos, t.face, n));
+            let placeable = place_cell.is_some();
+            // Отладка расхождений (EZZMC_LOG=dbg=debug): почему есть/нет взмаха при постановке.
+            tracing::debug!(
+                target: "dbg",
+                "use_on pos={:?} face={} held={:?} block_click={} is_block={} placeable={} crouch={} ground={} pos={:.3?} vel={:.3?} aabb={:.3?}",
+                t.pos,
+                t.face,
+                held_name,
+                kind.is_some(),
+                is_block,
+                placeable,
+                self.player.crouching,
+                self.player.on_ground,
+                self.player.pos,
+                self.player.vel,
+                self.player.aabb()
+            );
             if let Some(k) = kind {
                 consumed = true;
                 if k == BlockUse::Click {
@@ -3549,30 +3747,17 @@ impl WorldView {
                     self.player.swing();
                     let _ = self.net.cmd.send(crate::netthread::NetCmd::Swing);
                 }
-            } else if is_block
-                && held_name.is_some()
-                && held_block.is_some_and(|n| self.can_place_at(t.pos, t.face, n))
-            {
+            } else if is_block && held_name.is_some() && placeable {
                 consumed = true;
                 self.player.swing();
                 let _ = self.net.cmd.send(crate::netthread::NetCmd::Swing);
                 // VANILLA: BlockItem#place → SoundType.getPlaceSound в клетке постановки.
-                if let Some(n) = held_block {
-                    let d: [i32; 3] = match t.face {
-                        0 => [0, -1, 0],
-                        1 => [0, 1, 0],
-                        2 => [0, 0, -1],
-                        3 => [0, 0, 1],
-                        4 => [-1, 0, 0],
-                        _ => [1, 0, 0],
-                    };
-                    crate::blocksound::place(n, t.pos[0] + d[0], t.pos[1] + d[1], t.pos[2] + d[2]);
+                if let (Some(n), Some(c)) = (held_block, place_cell) {
+                    crate::blocksound::place(n, c[0], c[1], c[2]);
                     if n.ends_with("_door") {
-                        self.predict_door(
-                            n,
-                            [t.pos[0] + d[0], t.pos[1] + d[1], t.pos[2] + d[2]],
-                            t.hit,
-                        );
+                        self.predict_door(n, c, t.hit);
+                    } else {
+                        self.predict_place(n, c);
                     }
                 }
             } else {
@@ -3645,8 +3830,10 @@ impl WorldView {
         }
     }
 
-    /// Клетка постановки блока (цель + грань) свободна: воздух/жидкость/сменяемая трава.
-    fn can_place_at(&self, pos: [i32; 3], face: u8, item: &str) -> bool {
+    /// VANILLA: BlockItem#useOn → BlockPlaceContext: клетка постановки.
+    /// Если кликнутый блок заменяемый (трава, папоротник, снег…) — блок встаёт В НЕГО (`replaceClicked`),
+    /// иначе — в соседнюю клетку по грани. Возвращает клетку, если постановка возможна.
+    fn place_target(&self, pos: [i32; 3], face: u8, item: &str) -> Option<[i32; 3]> {
         let d: [i32; 3] = match face {
             0 => [0, -1, 0],
             1 => [0, 1, 0],
@@ -3655,46 +3842,48 @@ impl WorldView {
             4 => [-1, 0, 0],
             _ => [1, 0, 0],
         };
+        let adjacent = [pos[0] + d[0], pos[1] + d[1], pos[2] + d[2]];
         let Ok(g) = self.net.level.lock() else {
-            return true;
+            return Some(adjacent);
         };
         let Some(l) = g.as_ref() else {
-            return true;
+            return Some(adjacent);
         };
-        let st = l.chunks.block(pos[0] + d[0], pos[1] + d[1], pos[2] + d[2]);
+        let clicked = l.chunks.block(pos[0], pos[1], pos[2]);
+        // VANILLA: BlockBehaviour#canBeReplaced(ctx) — заменяемый и не тот же блок, что в руке.
+        let replace_clicked = is_replaceable(clicked.name()) && clicked.name() != item;
+        let target = if replace_clicked { pos } else { adjacent };
+        let st = l.chunks.block(target[0], target[1], target[2]);
         let free = st.is_air()
             || ezzmc_mesh::blockinfo::fluid(st).is_some()
-            || matches!(
-                st.name(),
-                "short_grass" | "tall_grass" | "fern" | "snow" | "fire" | "vine" | "dead_bush"
-            );
+            || is_replaceable(st.name());
         if !free {
-            return false;
+            return None;
         }
         // VANILLA: BlockItem#canPlace → Level#isUnobstructed(state, pos, collisionContext):
         // коллизия нового блока не должна пересекать сущности (здесь — сам игрок; спектатор не мешает).
         if self.game_mode == 3 {
-            return true;
+            return Some(target);
         }
         let Some(info) = ezzmc_world::generated::b26_3::BLOCKS
             .iter()
             .find(|b| b.name == item)
         else {
-            return true;
+            return Some(target);
         };
         let Some(new) = ezzmc_world::block::BlockState::from_id(info.default_state) else {
-            return true;
+            return Some(target);
         };
         let Some(props) = new.props() else {
-            return true;
+            return Some(target);
         };
         let (bx, by, bz) = (
-            f64::from(pos[0] + d[0]),
-            f64::from(pos[1] + d[1]),
-            f64::from(pos[2] + d[2]),
+            f64::from(target[0]),
+            f64::from(target[1]),
+            f64::from(target[2]),
         );
         let a = self.player.aabb();
-        !ezzmc_mesh::blockinfo::collision_boxes_of(props.collision_shape)
+        let blocked = ezzmc_mesh::blockinfo::collision_boxes_of(props.collision_shape)
             .iter()
             .any(|b| {
                 a[0] < bx + b[3]
@@ -3703,7 +3892,8 @@ impl WorldView {
                     && a[4] > by + b[1]
                     && a[2] < bz + b[5]
                     && a[5] > bz + b[2]
-            })
+            });
+        (!blocked).then_some(target)
     }
 
     /// VANILLA: DoorBlock/TrapDoorBlock#useWithoutItem — переключение `open` (у двери обе половины).
@@ -3810,6 +4000,27 @@ impl WorldView {
         l.predict_block(bp(pos[1] + 1), upper);
     }
 
+    /// VANILLA: BlockItem#place под BlockStatePredictionHandler — клетка меняется сразу, до ответа сервера.
+    /// Без этого игрок входит в клетку, которую сервер уже занял (откаты при постановке в траву).
+    /// Состояние — default_state блока; VANILLA-UNSURE: getStateForPlacement (поворот, ось) пока не считаем.
+    fn predict_place(&self, item: &str, c: [i32; 3]) {
+        let Some(info) = ezzmc_world::generated::b26_3::BLOCKS
+            .iter()
+            .find(|b| b.name == item)
+        else {
+            return;
+        };
+        let Some(state) = ezzmc_world::block::BlockState::from_id(info.default_state) else {
+            return;
+        };
+        if let Ok(mut g) = self.net.level.lock() {
+            if let Some(l) = g.as_mut() {
+                // sequence уже взят у UseItemOn (next_seq), pending_seq тот же.
+                l.predict_block(ezzmc_protocol::types::BlockPos::new(c[0], c[1], c[2]), state);
+            }
+        }
+    }
+
     fn next_seq(&self) -> i32 {
         self.net
             .level
@@ -3833,15 +4044,27 @@ impl WorldView {
         (aim, body)
     }
 
+    /// VANILLA: Item#canDestroyBlock для предмета в основной руке (креатив: TOOL.canDestroyBlocksInCreative).
+    fn held_breaks_creative(&self) -> bool {
+        self.inv.held().map_or(true, |s| {
+            crate::handitem::stack_ctx(s).map_or(true, |(n, _)| crate::dig::breaks_in_creative(n))
+        })
+    }
+
     fn tick_dig(&mut self) {
         let (aim, body) = self.dig_aim();
+        let ok = self.held_breaks_creative();
         let r = self
             .digger
-            .tick(self.attack_held, aim, self.game_mode, body);
+            .tick(self.attack_held, aim, self.game_mode, body, ok);
         if std::mem::take(&mut self.digger.hit_sound) {
             if let Some(a) = aim {
                 crate::blocksound::hit(a.state.name(), a.pos[0], a.pos[1], a.pos[2]);
             }
+        }
+        // VANILLA: continueAttack → player.swing(MAIN_HAND) каждый тик удержания (пакет Punch здесь не реализован).
+        if std::mem::take(&mut self.digger.swing) {
+            self.player.swing();
         }
         self.apply_dig(r);
     }
@@ -3849,7 +4072,8 @@ impl WorldView {
     /// VANILLA: Minecraft#startAttack по блоку — каждый клик = startDestroyBlock (без destroyDelay).
     fn click_dig(&mut self) {
         let (aim, body) = self.dig_aim();
-        let r = self.digger.click(aim, self.game_mode, body);
+        let ok = self.held_breaks_creative();
+        let r = self.digger.click(aim, self.game_mode, body, ok);
         self.apply_dig(r);
     }
 
@@ -4078,6 +4302,43 @@ fn item_block_name(item: &str) -> &str {
         "pitcher_pod" => "pitcher_crop",
         other => other,
     }
+}
+
+/// VANILLA: `.replaceable()` в Blocks.java — блоки, в которые можно поставить блок без очистки.
+/// Цветы сюда не входят (ваниль их не заменяет).
+fn is_replaceable(name: &str) -> bool {
+    const REPLACEABLE: &[&str] = &[
+        "air",
+        "cave_air",
+        "void_air",
+        "water",
+        "lava",
+        "short_grass",
+        "tall_grass",
+        "fern",
+        "large_fern",
+        "dead_bush",
+        "short_dry_grass",
+        "tall_dry_grass",
+        "bush",
+        "seagrass",
+        "tall_seagrass",
+        "snow",
+        "fire",
+        "soul_fire",
+        "vine",
+        "glow_lichen",
+        "hanging_roots",
+        "leaf_litter",
+        "light",
+        "nether_sprouts",
+        "crimson_roots",
+        "warped_roots",
+        "resin_clump",
+        "bubble_column",
+        "structure_void",
+    ];
+    REPLACEABLE.contains(&name)
 }
 
 /// VANILLA: BlockBehaviour#useWithoutItem (SUCCESS / SUCCESS_SERVER) — по имени блока.

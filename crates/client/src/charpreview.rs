@@ -19,6 +19,14 @@ pub struct Snap {
     pub left: Option<std::rc::Rc<crate::handitem::HandMesh>>,
     pub blocks: std::rc::Rc<(Vec<u8>, u32, u32)>,
     pub items: Option<std::rc::Rc<(Vec<u8>, u32, u32)>>,
+    /// ItemStack#hasFoil предметов в правой/левой руке.
+    pub foil: (bool, bool),
+}
+
+/// Текстура блеска и матрица её сдвига (VANILLA: TextureTransform#setupGlintTexturing).
+struct Glint<'a> {
+    tex: (&'a [u8], u32, u32),
+    mat: Mat4,
 }
 
 /// Прямоугольник превью в координатах GUI меню (x0, y0, x1, y1) и размер модели.
@@ -36,11 +44,20 @@ pub struct CharPreview {
     /// Броня на превью (VANILLA: InventoryScreen рисует LocalPlayer целиком, с экипировкой).
     armor: crate::armor::ArmorKit,
     looks: [Option<crate::armor::Look>; 4],
+    /// Блеск брони / предметов (`enchanted_glint_armor/item.png`).
+    glint_armor: Option<(Vec<u8>, u32, u32)>,
+    glint_item: Option<(Vec<u8>, u32, u32)>,
     snap: Option<Snap>,
     /// Отпечаток снимка состояния (поза, предметы).
     snap_hash: u64,
     /// Ключ последней отрисованной текстуры: (масштаб GUI, углы в десятитысячных).
     key: Option<(u32, i32, i32, [i32; 5])>,
+}
+
+fn load_png(rm: &ResourceManager, name: &str) -> Option<(Vec<u8>, u32, u32)> {
+    rm.read(&format!("assets/minecraft/textures/misc/{name}.png"))
+        .and_then(|d| Image::decode_png(&d).ok())
+        .map(|i| (i.to_rgba8(), i.width, i.height))
 }
 
 impl CharPreview {
@@ -57,6 +74,8 @@ impl CharPreview {
             parts,
             armor: crate::armor::ArmorKit::new(rm),
             looks: [None; 4],
+            glint_armor: load_png(rm, "enchanted_glint_armor"),
+            glint_item: load_png(rm, "enchanted_glint_item"),
             snap: None,
             snap_hash: 0,
             key: None,
@@ -68,12 +87,20 @@ impl CharPreview {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         let s = &snap.state;
-        for f in [s.walk_pos, s.walk_speed, s.swim_amount, s.swing, snap.swim.amount] {
+        for f in [
+            s.walk_pos,
+            s.walk_speed,
+            s.swim_amount,
+            s.swing,
+            snap.swim.amount,
+        ] {
             ((f * 1000.0) as i32).hash(&mut h);
         }
         (snap.crouching, snap.swim.in_water, snap.swim.visually).hash(&mut h);
         for m in [&snap.right, &snap.left] {
-            m.as_ref().map(|m| std::rc::Rc::as_ptr(m) as usize).hash(&mut h);
+            m.as_ref()
+                .map(|m| std::rc::Rc::as_ptr(m) as usize)
+                .hash(&mut h);
         }
         let hash = h.finish();
         if hash != self.snap_hash {
@@ -119,7 +146,10 @@ impl CharPreview {
             size as i32,
         ];
         let key = (scale, (xa * 1e4) as i32, (ya * 1e4) as i32, geom);
-        if self.key != Some(key) || !p.has(TEX) {
+        // Блеск анимирован → перерисовка каждый кадр, пока что-то блестит.
+        let foil = self.looks.iter().flatten().any(|l| l.foil)
+            || self.snap.as_ref().is_some_and(|s| s.foil.0 || s.foil.1);
+        if self.key != Some(key) || !p.has(TEX) || foil {
             let (w, h) = (
                 ((rect.2 - rect.0) as u32) * scale,
                 ((rect.3 - rect.1) as u32) * scale,
@@ -177,31 +207,47 @@ impl CharPreview {
         let l0 = Vec3::new(0.2, -1.0, 1.0).normalize();
         let l1 = Vec3::new(-0.2, -1.0, 0.0).normalize();
         // Слой скина, затем слои брони (атлас: v внутри строки → v всего атласа).
-        let mut jobs: Vec<(ezzmc_render::entitymodel::RasterQuad, Option<(u32, [u8; 3])>)> = self
+        let mut jobs: Vec<(
+            ezzmc_render::entitymodel::RasterQuad,
+            Option<(u32, [u8; 3])>,
+        )> = self
             .model
             .quads(root)
             .into_iter()
             .map(|q| (q, None))
             .collect();
+        let (armor_quads, armor_foil) = self.armor.raster(&self.looks, &st, root);
         jobs.extend(
-            self.armor
-                .raster(&self.looks, &st, root)
+            armor_quads
                 .into_iter()
                 .map(|(q, row, tint)| (q, Some((row, tint)))),
         );
         // Предметы в руках. VANILLA: ItemInHandLayer — рука, X−90°, Y180°, translate(±1/16, 2/16, −10/16).
         let mut item_jobs = Vec::new();
+        let mut item_foil: Vec<bool> = Vec::new();
         if let Some(sn) = &snap {
             let mats = self.model.part_matrices(root);
             for (mesh, arm, dx, view) in [
-                (&sn.right, self.parts.right_arm, 1.0, crate::handitem::View::ThirdPerson),
-                (&sn.left, self.parts.left_arm, -1.0, crate::handitem::View::ThirdPersonLeft),
+                (
+                    &sn.right,
+                    self.parts.right_arm,
+                    1.0,
+                    crate::handitem::View::ThirdPerson,
+                ),
+                (
+                    &sn.left,
+                    self.parts.left_arm,
+                    -1.0,
+                    crate::handitem::View::ThirdPersonLeft,
+                ),
             ] {
                 if let Some(mesh) = mesh {
+                    let foil = if dx > 0.0 { sn.foil.0 } else { sn.foil.1 };
                     let m = mats[arm]
                         * Mat4::from_rotation_x((-90.0f32).to_radians())
                         * Mat4::from_rotation_y(180.0f32.to_radians())
                         * Mat4::from_translation(Vec3::new(dx / 16.0, 0.125, -0.625));
+                    item_foil.extend(std::iter::repeat_n(foil, mesh.quad_count()));
                     item_jobs.extend(mesh.raster(m, view));
                 }
             }
@@ -216,7 +262,11 @@ impl CharPreview {
             let (tex, uv, tint) = match arm {
                 None => ((skin.as_slice(), *sw, *sh), quad.uv, [255u8; 3]),
                 Some((row, tint)) => (
-                    (self.armor.rgba.as_slice(), self.armor.width, self.armor.height),
+                    (
+                        self.armor.rgba.as_slice(),
+                        self.armor.width,
+                        self.armor.height,
+                    ),
                     quad.uv.map(|uv| self.armor.atlas_uv(row, uv)),
                     tint,
                 ),
@@ -232,10 +282,11 @@ impl CharPreview {
                     tex,
                     shade,
                     tint,
+                    None,
                 );
             }
         }
-        for q in item_jobs {
+        for q in &item_jobs {
             let Some(sn) = &snap else { break };
             let tex = if q.items {
                 match &sn.items {
@@ -257,7 +308,66 @@ impl CharPreview {
                     (tex.0.as_slice(), tex.1, tex.2),
                     1.0,
                     q.color,
+                    None,
                 );
+            }
+        }
+        // Блеск: повторный проход по той же геометрии, тест глубины «равно», сложение цвета.
+        let white = [255u8; 4];
+        if let Some(g) = &self.glint_armor {
+            let gl = Glint {
+                tex: (g.0.as_slice(), g.1, g.2),
+                mat: crate::armor::glint_matrix(0.16),
+            };
+            for quad in &armor_foil {
+                let v: [Vec3; 4] = quad
+                    .pos
+                    .map(|p| Vec3::new(ox + p.x * k, oy + p.y * k, -p.z));
+                for tri in [[0, 1, 2], [0, 2, 3]] {
+                    fill_tri(
+                        &mut px,
+                        &mut depth,
+                        w,
+                        h,
+                        tri.map(|i| v[i]),
+                        tri.map(|i| quad.uv[i]),
+                        (&white, 1, 1),
+                        1.0,
+                        [255; 3],
+                        Some(&gl),
+                    );
+                }
+            }
+        }
+        if let (Some(g), Some(sn)) = (&self.glint_item, &snap) {
+            let gl = Glint {
+                tex: (g.0.as_slice(), g.1, g.2),
+                mat: crate::armor::glint_matrix(8.0),
+            };
+            for (q, _) in item_jobs.iter().zip(&item_foil).filter(|(_, f)| **f) {
+                let tex = if q.items {
+                    match &sn.items {
+                        Some(t) => t,
+                        None => continue,
+                    }
+                } else {
+                    &sn.blocks
+                };
+                let v: [Vec3; 4] = q.pos.map(|p| Vec3::new(ox + p.x * k, oy + p.y * k, -p.z));
+                for tri in [[0, 1, 2], [0, 2, 3]] {
+                    fill_tri(
+                        &mut px,
+                        &mut depth,
+                        w,
+                        h,
+                        tri.map(|i| v[i]),
+                        tri.map(|i| q.uv[i]),
+                        (tex.0.as_slice(), tex.1, tex.2),
+                        1.0,
+                        [255; 3],
+                        Some(&gl),
+                    );
+                }
             }
         }
         px
@@ -276,6 +386,7 @@ fn fill_tri(
     skin: (&[u8], u32, u32),
     shade: f32,
     tint: [u8; 3],
+    glint: Option<&Glint>,
 ) {
     let area = (v[1].x - v[0].x) * (v[2].y - v[0].y) - (v[2].x - v[0].x) * (v[1].y - v[0].y);
     if area.abs() < 1e-6 {
@@ -318,7 +429,29 @@ fn fill_tri(
             }
             let z = w0 * v[0].z + w1 * v[1].z + w2 * v[2].z;
             let di = (y * w + x) as usize;
-            if z <= depth[di] {
+            // LessEqual, как у GPU: слой трима с той же геометрией ложится поверх брони.
+            if z < depth[di] {
+                continue;
+            }
+            if let Some(g) = glint {
+                // Блеск: форма по альфе, без записи глубины; dst += (glint·0.75)².
+                let u = w0 * uv[0][0] + w1 * uv[1][0] + w2 * uv[2][0];
+                let t = w0 * uv[0][1] + w1 * uv[1][1] + w2 * uv[2][1];
+                let tx = ((u * skin.1 as f32) as i64).clamp(0, i64::from(skin.1) - 1) as u32;
+                let ty = ((t * skin.2 as f32) as i64).clamp(0, i64::from(skin.2) - 1) as u32;
+                if skin.0[((ty * skin.1 + tx) * 4) as usize + 3] < 26 || px[di * 4 + 3] == 0 {
+                    continue;
+                }
+                let m = g.mat.transform_point3(Vec3::new(u, t, 0.0));
+                let (gw, gh) = (g.tex.1, g.tex.2);
+                let gx = ((m.x.rem_euclid(1.0) * gw as f32) as u32).min(gw - 1);
+                let gy = ((m.y.rem_euclid(1.0) * gh as f32) as u32).min(gh - 1);
+                let s = ((gy * gw + gx) * 4) as usize;
+                for c in 0..3 {
+                    let v = f32::from(g.tex.0[s + c]) / 255.0 * 0.75;
+                    let o = di * 4 + c;
+                    px[o] = (f32::from(px[o]) + v * v * 255.0).min(255.0) as u8;
+                }
                 continue;
             }
             let u = w0 * uv[0][0] + w1 * uv[1][0] + w2 * uv[2][0];
@@ -353,6 +486,8 @@ mod tests {
             parts,
             armor: crate::armor::ArmorKit::new(&ResourceManager::new(Vec::new())),
             looks: [None; 4],
+            glint_armor: None,
+            glint_item: None,
             snap: None,
             snap_hash: 0,
             key: None,

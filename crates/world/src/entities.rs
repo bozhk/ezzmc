@@ -263,6 +263,11 @@ impl Entity {
         self.flags & 2 != 0
     }
 
+    /// VANILLA: Entity#isFallFlying (общий флаг 7 → бит 128).
+    pub fn fall_flying(&self) -> bool {
+        self.flags & 128 != 0
+    }
+
     /// VANILLA: Entity#isInvisible (общий флаг 5 → бит 32).
     pub fn invisible(&self) -> bool {
         self.flags & 32 != 0

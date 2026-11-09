@@ -6,7 +6,7 @@ use ezzmc_assets::bake::{bake_elements, ModelState, SpriteGetter, SpriteUv};
 use ezzmc_assets::block_atlas::BlockAtlas;
 use ezzmc_assets::model::{DisplayContext, ModelLoader};
 use ezzmc_assets::pack::ResourceManager;
-use ezzmc_render::particledraw::push_vertex;
+use ezzmc_render::particledraw::push_vertex_raw;
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -69,6 +69,10 @@ impl HandMesh {
         (min_y, max_z - min_z)
     }
 
+    pub fn quad_count(&self) -> usize {
+        self.quads.len()
+    }
+
     /// Квады для программной растеризации превью: (вершины, UV, цвет, из атласа предметов).
     pub fn raster(&self, root: Mat4, view: View) -> Vec<RasterItemQuad> {
         let m = root
@@ -94,9 +98,19 @@ impl HandMesh {
         root: Mat4,
         view: View,
         light: (u8, u8),
+        foil: bool,
         blocks: &mut Vec<u8>,
         items: &mut Vec<u8>,
     ) {
+        let lt = (
+            u16::from(light.0) * 16
+                + if foil {
+                    ezzmc_render::particledraw::FOIL_FLAG as u16
+                } else {
+                    0
+                },
+            u16::from(light.1) * 16,
+        );
         let m = root
             * match view {
                 View::FirstPerson => self.first_person,
@@ -109,21 +123,21 @@ impl HandMesh {
         // нормаль — в мировом пространстве (предмет вращается → освещение меняется).
         let l0 = Vec3::new(0.2, 1.0, -0.7).normalize();
         let l1 = Vec3::new(-0.2, 1.0, 0.7).normalize();
+        // Нормаль — через обратную транспонированную (как normal matrix в entity.vsh), иначе неравномерный масштаб искажает свет.
+        let normal_m = m.inverse().transpose();
         for q in &self.quads {
             let out = if q.items { &mut *items } else { &mut *blocks };
-            let c = if view == View::Ground {
-                let n = m
-                    .transform_vector3(Vec3::from(q.normal))
-                    .normalize_or_zero();
-                let k = ((n.dot(l0).max(0.0) + n.dot(l1).max(0.0)) * 0.6 + 0.4).min(1.0);
-                let f = |v: u8| (f32::from(v) * k) as u8;
-                [f(q.tint[0]), f(q.tint[1]), f(q.tint[2]), 255]
-            } else {
-                [q.color[0], q.color[1], q.color[2], 255]
-            };
+            // VANILLA: все предметы в руке и на земле идут через LEVEL-освещение (minecraft_mix_light по нормали
+            // в пространстве вида). Плоские экструдированные грани без затенения давали яркий «дефолт» в руке.
+            let n = normal_m
+                .transform_vector3(Vec3::from(q.normal))
+                .normalize_or_zero();
+            let k = ((n.dot(l0).max(0.0) + n.dot(l1).max(0.0)) * 0.6 + 0.4).min(1.0);
+            let f = |v: u8| (f32::from(v) * k) as u8;
+            let c = [f(q.tint[0]), f(q.tint[1]), f(q.tint[2]), 255];
             for i in 0..4 {
                 let p = m.transform_point3(Vec3::from(q.pos[i]));
-                push_vertex(out, p.to_array(), q.uv[i], c, light);
+                push_vertex_raw(out, p.to_array(), q.uv[i], c, lt);
             }
         }
     }

@@ -27,7 +27,7 @@ pub fn tick(level: &mut Level) {
         };
         let (mut pos, mut vel, mut ground, age) = (e.pos, e.vel, e.on_ground, e.age);
         // Чанк не загружен — не падаем сквозь мир.
-        if !level.has_chunk((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4) {
+        if !level.has_chunk(pos[0].floor() as i32, pos[2].floor() as i32) {
             continue;
         }
         // baseTick: течение жидкости толкает предмет.

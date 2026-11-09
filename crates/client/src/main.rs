@@ -1,7 +1,7 @@
 mod ambient;
+mod armor;
 mod atlasanim;
 mod audio;
-mod armor;
 mod avatar;
 mod blocksound;
 mod charpreview;
@@ -1416,6 +1416,10 @@ impl ApplicationHandler for App {
                             self.debug_on = !self.debug_on;
                         }
                     } else if event.state == ElementState::Pressed {
+                        // VANILLA: KeyboardHandler — F3+H переключает расширенные подсказки (advanced tooltips).
+                        if k == KeyCode::KeyH && self.f3_pending && !event.repeat {
+                            tooltip::ADVANCED.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
+                        }
                         self.f3_pending = false;
                     }
                     // VANILLA: KeyboardHandler#keyPress — автоповтор (action 2) тоже вызывает
@@ -2130,7 +2134,7 @@ impl ApplicationHandler for App {
                                                 }
                                                 if v.inv.cursor.is_none() {
                                                     if let Some(n) = creativescreen::hover_text(
-                                                        creative, &v.inv, lang, gwf, ghf, mx, my,
+                                                        &*t, creative, &v.inv, lang, gwf, ghf, mx, my,
                                                     ) {
                                                         tooltip::draw_colored(
                                                             t, &n, mx, my, gwf, ghf,
@@ -2191,13 +2195,9 @@ impl ApplicationHandler for App {
                                                     if let Some(st) = invscreen::hover_item(
                                                         invr, &lay, gwf, ghf, mx, my,
                                                     ) {
+                                                        let lines = tooltip::stack_lines(lang, &*t, st);
                                                         tooltip::draw_colored(
-                                                            t,
-                                                            &tooltip::stack_lines(lang, st),
-                                                            mx,
-                                                            my,
-                                                            gwf,
-                                                            ghf,
+                                                            t, &lines, mx, my, gwf, ghf,
                                                         );
                                                     }
                                                 }

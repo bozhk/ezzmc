@@ -76,6 +76,35 @@ impl RangeAllocator {
         Some(start)
     }
 
+    /// Занимает ровно диапазон `[start, start+len)`, если он целиком свободен (нужно для отката).
+    pub fn reserve(&mut self, start: u32, len: u32) -> bool {
+        if len == 0 {
+            return true;
+        }
+        let Some(i) = self
+            .free
+            .iter()
+            .position(|&(s, l)| s <= start && start + len <= s + l)
+        else {
+            return false;
+        };
+        let (s, l) = self.free[i];
+        let (end, fend) = (start + len, s + l);
+        match (start == s, end == fend) {
+            (true, true) => {
+                self.free.remove(i);
+            }
+            (true, false) => self.free[i] = (end, fend - end),
+            (false, true) => self.free[i] = (s, start - s),
+            (false, false) => {
+                self.free[i] = (s, start - s);
+                self.free.insert(i + 1, (end, fend - end));
+            }
+        }
+        self.used += len;
+        true
+    }
+
     pub fn free(&mut self, start: u32, len: u32) {
         if len == 0 {
             return;
@@ -200,31 +229,86 @@ impl ArenaLayout {
         Some(p)
     }
 
-    /// Заменяет секцию (`quads` — число квадов по слоям). Транзакционно: при ошибке старая версия уже удалена,
-    /// но ничего не утекло.
+    /// Заменяет секцию (`quads` — число квадов по слоям). Транзакционно и без лишней памяти:
+    /// старые диапазоны и слот освобождаются/переиспользуются, поэтому замена помещается там же,
+    /// где старая версия (даже при полностью занятой арене). При ошибке старая секция возвращается
+    /// на прежние диапазоны и остаётся доступной без изменений.
     pub fn insert(
         &mut self,
         pos: SectionPos,
         quads: [u32; RenderLayer::COUNT],
     ) -> Result<Placement, ArenaError> {
-        self.remove(pos);
         if let Some(&q) = quads.iter().find(|&&q| q > PATTERN_QUADS) {
             return Err(ArenaError::TooManyQuads(q));
         }
-        let slot = match self.free_slots.pop() {
-            Some(s) => s,
-            None if (self.slots.len() as u32) < self.max_slots => {
-                self.slots.push(None);
-                self.slots.len() as u32 - 1
+        let old = self.sections.get(&pos).copied();
+        if let Some(p) = &old {
+            self.release_ranges(p);
+        }
+        match self.place(quads, old.map(|p| p.slot)) {
+            Ok(p) => {
+                self.slots[p.slot as usize] = Some(pos);
+                self.sections.insert(pos, p);
+                Ok(p)
             }
-            None => return Err(ArenaError::SlotLimit),
+            Err(e) => {
+                if let Some(p) = &old {
+                    // Диапазоны только что освобождены и не заняты (откат `place` их вернул) — резерв не может упасть.
+                    let restored = self.reserve_ranges(p);
+                    debug_assert!(restored, "откат старой секции: диапазоны заняты");
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn release_ranges(&mut self, p: &Placement) {
+        for l in &p.layers {
+            self.vertices.free(l.first_vertex, l.quads * 4);
+        }
+        let t = &p.layers[TRANSLUCENT];
+        self.indices
+            .free(t.first_index - self.index_base, t.quads * 6);
+    }
+
+    fn reserve_ranges(&mut self, p: &Placement) -> bool {
+        let mut ok = true;
+        for l in &p.layers {
+            ok &= self.vertices.reserve(l.first_vertex, l.quads * 4);
+        }
+        let t = &p.layers[TRANSLUCENT];
+        ok &= self
+            .indices
+            .reserve(t.first_index - self.index_base, t.quads * 6);
+        ok
+    }
+
+    /// Выделяет диапазоны всех слоёв и слот (`slot` — переиспользуемый слот старой версии).
+    /// При ошибке откатывает свои выделения; слот, выданный здесь, возвращается.
+    fn place(
+        &mut self,
+        quads: [u32; RenderLayer::COUNT],
+        slot: Option<u32>,
+    ) -> Result<Placement, ArenaError> {
+        let (slot, fresh) = match slot {
+            Some(s) => (s, false),
+            None => match self.free_slots.pop() {
+                Some(s) => (s, true),
+                None if (self.slots.len() as u32) < self.max_slots => {
+                    self.slots.push(None);
+                    (self.slots.len() as u32 - 1, true)
+                }
+                None => return Err(ArenaError::SlotLimit),
+            },
         };
         let mut layers = [LayerPlacement::default(); RenderLayer::COUNT];
         for i in 0..RenderLayer::COUNT {
             let n = quads[i];
             let Some(v) = self.vertices.alloc(n * 4) else {
                 self.rollback(&layers, i);
-                self.free_slots.push(slot);
+                if fresh {
+                    self.free_slots.push(slot);
+                }
                 return Err(ArenaError::VertexSpace(n * 4));
             };
             layers[i] = LayerPlacement {
@@ -237,16 +321,15 @@ impl ArenaLayout {
                     self.vertices.free(v, n * 4);
                     layers[i].quads = 0;
                     self.rollback(&layers, i);
-                    self.free_slots.push(slot);
+                    if fresh {
+                        self.free_slots.push(slot);
+                    }
                     return Err(ArenaError::IndexSpace(n * 6));
                 };
                 layers[i].first_index = self.index_base + ix;
             }
         }
-        self.slots[slot as usize] = Some(pos);
-        let p = Placement { slot, layers };
-        self.sections.insert(pos, p);
-        Ok(p)
+        Ok(Placement { slot, layers })
     }
 
     fn rollback(&mut self, layers: &[LayerPlacement], upto: usize) {
@@ -394,12 +477,14 @@ impl TerrainArena {
         mesh: &SectionMesh,
         camera: [f64; 3],
     ) -> Result<(), ArenaError> {
-        self.sort.remove(&pos);
-        if let Some(old) = self.layout.get(pos).map(|p| p.slot) {
-            self.write_src_cmds(queue, old, None);
-        }
+        // Старую версию трогаем только после успешной вставки: при ошибке она остаётся как была.
+        let old_slot = self.layout.get(pos).map(|p| p.slot);
         let quads = std::array::from_fn(|i| (mesh.layers[i].len() / 4) as u32);
         let p = self.layout.insert(pos, quads)?;
+        self.sort.remove(&pos);
+        if let Some(old) = old_slot.filter(|&s| s != p.slot) {
+            self.write_src_cmds(queue, old, None);
+        }
         let origin = [pos.x * 16, pos.y * 16, pos.z * 16, 0i32];
         let ob: Vec<u8> = origin.iter().flat_map(|v| v.to_le_bytes()).collect();
         queue.write_buffer(&self.origins_buf, u64::from(p.slot) * 16, &ob);
@@ -900,6 +985,93 @@ mod tests {
         l.insert(sp(1), [1, 0, 0, 0]).unwrap();
         assert_eq!(l.insert(sp(2), [1, 0, 0, 0]), Err(ArenaError::SlotLimit));
         assert_eq!(l.used_vertices(), 8);
+    }
+
+    #[test]
+    fn failed_replace_keeps_old_section() {
+        let mut l = ArenaLayout::new(16, 12, 2);
+        let old = l.insert(sp(0), [2, 0, 0, 0]).unwrap();
+        // Неудачная замена (слишком много квадов) не должна трогать старую версию.
+        assert!(l.insert(sp(0), [PATTERN_QUADS + 1, 0, 0, 0]).is_err());
+        assert_eq!(l.get(sp(0)), Some(&old));
+        assert_eq!(l.used_vertices(), 8);
+        // Замена, не помещающаяся рядом со старой версией (вершинного места не хватает), — тоже без потерь.
+        assert_eq!(
+            l.insert(sp(0), [5, 0, 0, 0]),
+            Err(ArenaError::VertexSpace(20))
+        );
+        assert_eq!(l.get(sp(0)), Some(&old));
+        assert_eq!(l.used_vertices(), 8);
+    }
+
+    #[test]
+    fn successful_replace_frees_old_space_and_keeps_slot() {
+        let mut l = ArenaLayout::new(16, 12, 2);
+        let old = l.insert(sp(0), [2, 0, 0, 0]).unwrap();
+        let p = l.insert(sp(0), [1, 0, 0, 0]).unwrap();
+        assert_eq!(l.get(sp(0)), Some(&p));
+        assert_eq!(p.slot, old.slot);
+        assert_eq!(l.slot_pos(p.slot), Some(sp(0)));
+        assert_eq!(l.used_vertices(), 4);
+        assert_eq!(l.slot_count(), 1);
+    }
+
+    #[test]
+    fn replace_in_full_arena_same_size_succeeds() {
+        // Вершинный буфер целиком занят одной секцией; замена тем же размером не требует дополнительной памяти.
+        let mut l = ArenaLayout::new(16, 12, 1);
+        l.insert(sp(0), [4, 0, 0, 0]).unwrap();
+        assert_eq!(l.used_vertices(), 16);
+        let p = l.insert(sp(0), [4, 0, 0, 0]).unwrap();
+        assert_eq!(l.get(sp(0)), Some(&p));
+        assert_eq!(l.used_vertices(), 16);
+        // Меньшая замена тоже проходит и освобождает хвост.
+        l.insert(sp(0), [1, 0, 0, 0]).unwrap();
+        assert_eq!(l.used_vertices(), 4);
+    }
+
+    #[test]
+    fn replace_in_full_arena_two_sections() {
+        let mut l = ArenaLayout::new(16, 12, 2);
+        l.insert(sp(0), [2, 0, 0, 0]).unwrap();
+        let other = l.insert(sp(1), [2, 0, 0, 0]).unwrap();
+        assert_eq!(l.used_vertices(), 16);
+        // Своего места хватает — замена проходит, соседняя секция не трогается.
+        let same = l.insert(sp(0), [2, 0, 0, 0]).unwrap();
+        assert_eq!(l.get(sp(1)), Some(&other));
+        assert_eq!(l.get(sp(0)), Some(&same));
+        // Рост сверх свободного места — ошибка, старая версия на месте.
+        let before = *l.get(sp(0)).unwrap();
+        assert_eq!(
+            l.insert(sp(0), [3, 0, 0, 0]),
+            Err(ArenaError::VertexSpace(12))
+        );
+        assert_eq!(l.get(sp(0)), Some(&before));
+        assert_eq!(l.get(sp(1)), Some(&other));
+        assert_eq!(l.used_vertices(), 16);
+    }
+
+    #[test]
+    fn replace_at_slot_limit_reuses_slot() {
+        let mut l = ArenaLayout::new(64, 12, 1);
+        l.insert(sp(0), [1, 0, 0, 0]).unwrap();
+        // Лимит слотов исчерпан, но замена той же секции слота не требует.
+        assert!(l.insert(sp(0), [2, 0, 0, 0]).is_ok());
+        assert_eq!(l.insert(sp(1), [1, 0, 0, 0]), Err(ArenaError::SlotLimit));
+    }
+
+    #[test]
+    fn replace_translucent_in_full_index_arena() {
+        // Индексная арена (2 квада прозрачного слоя) полностью занята; замена тем же размером проходит.
+        let mut l = ArenaLayout::new(64, 12, 1);
+        l.insert(sp(0), [0, 0, 2, 0]).unwrap();
+        let p = l.insert(sp(0), [0, 0, 2, 0]).unwrap();
+        assert_eq!(l.get(sp(0)), Some(&p));
+        assert_eq!(
+            l.insert(sp(0), [0, 0, 3, 0]),
+            Err(ArenaError::IndexSpace(18))
+        );
+        assert_eq!(l.get(sp(0)), Some(&p));
     }
 
     #[test]

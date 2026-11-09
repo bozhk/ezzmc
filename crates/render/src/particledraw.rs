@@ -82,6 +82,25 @@ pub struct ParticleDraw {
     ib_quads: u32,
     blocks_quads: u32,
     particle_quads: u32,
+    texture_mat: Mat4,
+    /// color_modulator.a: у блеска — GlintAlpha (0.75, Options.glintStrength), иначе 1.
+    alpha: f32,
+    /// Блеск предметов: берутся только квады с битом FOIL_FLAG в свете.
+    foil_only: bool,
+}
+
+/// Бит в `uv2.x` вершины: у предмета есть блеск (шейдер его маскирует `& 4095`).
+pub const FOIL_FLAG: i32 = 8192;
+
+fn only_foil(src: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for q in src.chunks_exact(VERTEX_SIZE * 4) {
+        let l = i32::from_le_bytes([q[24], q[25], q[26], q[27]]);
+        if l & FOIL_FLAG != 0 {
+            out.extend_from_slice(q);
+        }
+    }
+    out
 }
 
 impl ParticleDraw {
@@ -99,7 +118,8 @@ impl ParticleDraw {
         particles: Option<(&[u8], u32, u32)>,
     ) -> Self {
         Self::new_ex(
-            device, queue, color, depth, projection, fog, lightmap, blocks, particles, false, false,
+            device, queue, color, depth, projection, fog, lightmap, blocks, particles, false,
+            false, false, None,
         )
     }
 
@@ -119,6 +139,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, true, false,
+            false, None,
         )
     }
 
@@ -137,7 +158,67 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, true,
+            false, None,
         )
+    }
+
+    /// Блеск зачарований брони/сущностей. VANILLA: RenderTypes#armorEntityGlint — текстура блеска с матрицей
+    /// текстуры (`set_texture_mat`), blend GLINT (SRC_COLOR, ONE), без записи глубины.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_glint(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color: wgpu::TextureFormat,
+        depth: wgpu::TextureFormat,
+        projection: &wgpu::Buffer,
+        fog: &wgpu::Buffer,
+        lightmap: &wgpu::TextureView,
+        blocks: &wgpu::TextureView,
+        texture: Option<(&[u8], u32, u32)>,
+    ) -> Self {
+        Self::new_ex(
+            device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, false,
+            true, None,
+        )
+    }
+
+    /// Блеск на 3D-предметах (рука, выброшенные). VANILLA: RenderTypes#entityGlint — спрайт предмета задаёт
+    /// форму (альфа), текстура блеска сдвигается матрицей текстуры (`set_texture_mat`); UV — атласа предметов.
+    /// `blocks` — атлас блоков, `atlas` — атлас предметов (как у `hand_item_draw`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_item_glint(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color: wgpu::TextureFormat,
+        depth: wgpu::TextureFormat,
+        projection: &wgpu::Buffer,
+        fog: &wgpu::Buffer,
+        lightmap: &wgpu::TextureView,
+        blocks: &wgpu::TextureView,
+        atlas: Option<(&[u8], u32, u32)>,
+        glint: Option<(&[u8], u32, u32)>,
+    ) -> Self {
+        let white = ([255u8; 4], 1u32, 1u32);
+        let g = glint.unwrap_or((&white.0, 1, 1));
+        Self::new_ex(
+            device,
+            queue,
+            color,
+            depth,
+            projection,
+            fog,
+            lightmap,
+            blocks,
+            atlas,
+            false,
+            false,
+            true,
+            Some(g),
+        )
+    }
+
+    pub fn set_texture_mat(&mut self, m: Mat4) {
+        self.texture_mat = m;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -153,6 +234,8 @@ impl ParticleDraw {
         particles: Option<(&[u8], u32, u32)>,
         shadow: bool,
         cull: bool,
+        glint: bool,
+        item_glint: Option<(&[u8], u32, u32)>,
     ) -> Self {
         let vf = wgpu::ShaderStages::VERTEX_FRAGMENT;
         let uni = |binding| wgpu::BindGroupLayoutEntry {
@@ -190,6 +273,13 @@ impl ParticleDraw {
                     count: None,
                 },
                 tex_entry(2),
+                tex_entry(3),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let dyn_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -216,10 +306,27 @@ impl ParticleDraw {
                 },
             ],
         });
+        let (filter, addr) = if glint && !item_glint.is_some() {
+            (wgpu::FilterMode::Linear, wgpu::AddressMode::Repeat)
+        } else {
+            (wgpu::FilterMode::Nearest, wgpu::AddressMode::ClampToEdge)
+        };
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            address_mode_u: addr,
+            address_mode_v: addr,
+            mag_filter: filter,
+            min_filter: filter,
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let item_mode = item_glint.is_some();
+        let (gd, gw, gh) = item_glint.unwrap_or((&[255u8; 4], 1, 1));
+        let gview = make_texture(device, queue, "particle.glint", gd, gw, gh);
+        let gsampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
         let mk_group = |label: &str, view: &wgpu::TextureView| {
@@ -238,6 +345,14 @@ impl ParticleDraw {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: wgpu::BindingResource::TextureView(lightmap),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&gview),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&gsampler),
                     },
                 ],
             })
@@ -293,11 +408,32 @@ impl ParticleDraw {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &module,
-                entry_point: Some("fs_main"),
+                entry_point: Some(if item_mode {
+                    "fs_glint_item"
+                } else if glint {
+                    "fs_glint"
+                } else {
+                    "fs_main"
+                }),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: color,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    blend: Some(if glint {
+                        wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Src,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Zero,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }
+                    } else {
+                        wgpu::BlendState::ALPHA_BLENDING
+                    }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -307,7 +443,7 @@ impl ParticleDraw {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: depth,
-                depth_write_enabled: !shadow,
+                depth_write_enabled: !shadow && !glint,
                 depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: Default::default(),
                 bias: if shadow {
@@ -341,6 +477,9 @@ impl ParticleDraw {
             ib_quads: 0,
             blocks_quads: 0,
             particle_quads: 0,
+            texture_mat: Mat4::IDENTITY,
+            alpha: if glint { 0.75 } else { 1.0 },
+            foil_only: item_mode,
         }
     }
 
@@ -407,9 +546,9 @@ impl ParticleDraw {
             0,
             &DynamicTransformsUniform {
                 model_view_mat: model_view,
-                color_modulator: [1.0; 4],
+                color_modulator: [1.0, 1.0, 1.0, self.alpha],
                 model_offset: [0.0; 3],
-                texture_mat: Mat4::IDENTITY,
+                texture_mat: self.texture_mat,
             }
             .to_bytes(),
         );
@@ -438,6 +577,14 @@ impl ParticleDraw {
     ) {
         self.blocks_quads = 0;
         self.particle_quads = 0;
+        let (fb, fp);
+        let (blocks, particles) = if self.foil_only {
+            fb = only_foil(blocks);
+            fp = only_foil(particles);
+            (&fb[..], &fp[..])
+        } else {
+            (blocks, particles)
+        };
         let nb = (blocks.len() / (VERTEX_SIZE * 4)) as u32;
         let np = (particles.len() / (VERTEX_SIZE * 4)) as u32;
         let n = nb + np;
@@ -485,9 +632,9 @@ impl ParticleDraw {
             0,
             &DynamicTransformsUniform {
                 model_view_mat: model_view,
-                color_modulator: [1.0; 4],
+                color_modulator: [1.0, 1.0, 1.0, self.alpha],
                 model_offset: [0.0; 3],
-                texture_mat: Mat4::IDENTITY,
+                texture_mat: self.texture_mat,
             }
             .to_bytes(),
         );

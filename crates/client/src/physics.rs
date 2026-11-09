@@ -926,6 +926,28 @@ impl Player {
             (self.pos[0] - before[0]) as f32,
             (self.pos[2] - before[2]) as f32,
         );
+        // Отладка (dbg): AABB внутри твёрдого бокса после шага — коллизия такой бокс игнорирует (gap < -EPS).
+        if tracing::enabled!(target: "dbg", tracing::Level::DEBUG) {
+            let a = self.aabb();
+            let region = [a[0] - 0.01, a[1] - 0.01, a[2] - 0.01, a[3] + 0.01, a[4] + 0.01, a[5] + 0.01];
+            for b in gather(w, region) {
+                let ov = [
+                    a[3].min(b[3]) - a[0].max(b[0]),
+                    a[4].min(b[4]) - a[1].max(b[1]),
+                    a[5].min(b[5]) - a[2].max(b[2]),
+                ];
+                if ov.iter().all(|&o| o > 1e-9) {
+                    tracing::debug!(
+                        target: "dbg",
+                        "penetrate pos={:.6?} delta={:.6?} box={:.3?} overlap={:.6?}",
+                        self.pos,
+                        delta,
+                        b,
+                        ov
+                    );
+                }
+            }
+        }
         self.walk_dist += dx.hypot(dz) * 0.6;
         // LocalPlayer#move → updateAutoJump(deltaX, deltaZ) (после обновления on_ground — см. ниже).
         let auto_delta = (
@@ -1945,3 +1967,4 @@ mod tests {
         assert!(p.flying);
     }
 }
+

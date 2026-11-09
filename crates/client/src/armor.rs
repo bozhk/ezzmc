@@ -17,8 +17,24 @@ pub static TRIM_REGISTRY: Mutex<(Vec<String>, Vec<String>)> = Mutex::new((Vec::n
 
 /// VANILLA: assets/minecraft/textures/trims/entity/humanoid — 18 паттернов.
 const PATTERNS: [&str; 18] = [
-    "bolt", "coast", "dune", "eye", "flow", "host", "raiser", "rib", "sentry", "shaper", "silence",
-    "snout", "spire", "tide", "vex", "ward", "wayfinder", "wild",
+    "bolt",
+    "coast",
+    "dune",
+    "eye",
+    "flow",
+    "host",
+    "raiser",
+    "rib",
+    "sentry",
+    "shaper",
+    "silence",
+    "snout",
+    "spire",
+    "tide",
+    "vex",
+    "ward",
+    "wayfinder",
+    "wild",
 ];
 /// VANILLA: assets/minecraft/textures/palettes/trim — 16 палитр.
 const PALETTES: [&str; 16] = [
@@ -69,6 +85,8 @@ pub struct Look {
     pub dye: Option<u32>,
     /// (индекс паттерна, индекс палитры) в `PATTERNS`/`PALETTES`.
     pub trim: Option<(u8, u8)>,
+    /// ItemStack#hasFoil — блеск зачарований.
+    pub foil: bool,
 }
 
 /// VANILLA: ArmorTrim.STREAM_CODEC — Holder(материал), Holder(паттерн); inline-записи (0) не поддержаны.
@@ -108,6 +126,14 @@ fn trim_of(material: &str, patch: &ezzmc_protocol::item::ComponentPatch) -> Opti
 /// Броня по слоту из стека. `slot`: HEAD/CHEST/LEGS/FEET.
 pub fn look_of(slot: usize, st: &ItemStack) -> Option<Look> {
     let name = *ezzmc_protocol::generated::r26_3::ITEM.get(st.item as usize)?;
+    if slot == CHEST && name == "elytra" {
+        return Some(Look {
+            material: "elytra",
+            dye: None,
+            trim: None,
+            foil: crate::hud::has_foil(name, &st.patch),
+        });
+    }
     let base = name.strip_suffix(SUFFIX[slot])?;
     let material = match base {
         "golden" => "gold",
@@ -121,10 +147,12 @@ pub fn look_of(slot: usize, st: &ItemStack) -> Option<Look> {
         .then(|| crate::itemicon::ctx_of(&st.patch).dye)
         .flatten();
     let trim = trim_of(material, &st.patch);
+    let foil = crate::hud::has_foil(name, &st.patch);
     Some(Look {
         material,
         dye,
         trim,
+        foil,
     })
 }
 
@@ -159,6 +187,72 @@ pub struct ArmorKit {
     trims: HashMap<(bool, u8, u8), u32>,
     outer: (Model, HumanoidParts),
     inner: (Model, HumanoidParts),
+    /// VANILLA: ElytraModel — части left_wing (0), right_wing (1).
+    elytra: Model,
+    /// Игрок/моб летит на элитрах (общий флаг 7); выставляет вызывающий перед `bake`.
+    pub fall_flying: bool,
+}
+
+/// VANILLA: ElytraModel#createLayer (64×32).
+fn elytra_mesh() -> Model {
+    let mut m = Model::new([64.0, 32.0]);
+    let q = std::f32::consts::PI / 12.0;
+    let mut p = Pose::offset(5.0, 0.0, 0.0);
+    p.x_rot = q;
+    p.z_rot = -q;
+    m.add(
+        "left_wing",
+        None,
+        p,
+        &[BoxDef::new([22.0, 0.0], [-10.0, 0.0, 0.0], [10.0, 20.0, 2.0]).grow(1.0)],
+    );
+    let mut p = Pose::offset(-5.0, 0.0, 0.0);
+    p.x_rot = q;
+    p.z_rot = q;
+    m.add(
+        "right_wing",
+        None,
+        p,
+        &[BoxDef::new([22.0, 0.0], [0.0, 0.0, 0.0], [10.0, 20.0, 2.0])
+            .grow(1.0)
+            .mirror()],
+    );
+    m
+}
+
+/// VANILLA: ElytraAnimationState (цель без сглаживания) + ElytraModel#setupAnim.
+fn elytra_pose(m: &mut Model, crouching: bool, flying: bool) {
+    use std::f32::consts::PI;
+    // Полёт — горизонтальный (ratio = 1): lerp(1, π/12, π/9), lerp(1, −π/12, −π/2).
+    let (rx, ry, rz) = if flying {
+        (PI / 9.0, 0.0, -PI / 2.0)
+    } else if crouching {
+        (PI * 2.0 / 9.0, 0.087_266_46, -PI / 4.0)
+    } else {
+        (PI / 12.0, 0.0, -PI / 12.0)
+    };
+    let y = if crouching { 3.0 } else { 0.0 };
+    for (i, sign) in [(0usize, 1.0f32), (1, -1.0)] {
+        let part = &mut m.parts[i];
+        part.pose = part.initial;
+        part.pose.y = y;
+        part.pose.x_rot = rx;
+        part.pose.y_rot = ry * sign;
+        part.pose.z_rot = rz * sign;
+        part.visible = true;
+    }
+}
+
+/// UV внутри ячейки → UV атласа в вершинах формата `ParticleDraw` (u,v на байтах 12..20).
+fn remap_uv(verts: &mut [u8], cell: u32, height: u32) {
+    let (cx, cy) = ((cell % COLS) as f32, (cell / COLS) as f32);
+    let rows = (height / 32) as f32;
+    for vert in verts.chunks_exact_mut(32) {
+        let u = f32::from_le_bytes([vert[12], vert[13], vert[14], vert[15]]);
+        let v = f32::from_le_bytes([vert[16], vert[17], vert[18], vert[19]]);
+        vert[12..16].copy_from_slice(&((cx + u) / COLS as f32).to_le_bytes());
+        vert[16..20].copy_from_slice(&((cy + v) / rows).to_le_bytes());
+    }
 }
 
 /// VANILLA: HumanoidModel#createMesh(deformation) (64×32, без hat).
@@ -239,6 +333,10 @@ impl ArmorKit {
                 imgs.push(img.to_rgba8());
             }
         }
+        if let Some(img) = load("assets/minecraft/textures/entity/equipment/wings/elytra.png") {
+            cells.insert((false, "elytra"), imgs.len() as u32);
+            imgs.push(img.to_rgba8());
+        }
         // VANILLA: PaletteMapping — цвет базовой палитры i → цвет целевой палитры i.
         let pal = |path: &str| -> Option<Vec<[u8; 4]>> {
             let img = rm.read(path).and_then(|d| Image::decode_png(&d).ok())?;
@@ -302,6 +400,8 @@ impl ArmorKit {
             // VANILLA: LayerDefinitions — OUTER_ARMOR_DEFORMATION 1.0, INNER_ARMOR_DEFORMATION 0.5.
             outer: armor_mesh(1.0),
             inner: armor_mesh(0.5),
+            elytra: elytra_mesh(),
+            fall_flying: false,
         }
     }
 
@@ -343,12 +443,27 @@ impl ArmorKit {
         color: [u8; 4],
         light: (u8, u8),
         out: &mut Vec<u8>,
+        glint: &mut Vec<u8>,
     ) {
         for (slot, look) in looks.iter().enumerate() {
             let Some(look) = look else { continue };
             // VANILLA: ноги — внутренний слой (leggings), остальное — внешний.
             let inner = slot == LEGS;
             let layers = self.layers(look, inner);
+            if look.material == "elytra" {
+                // VANILLA: WingsLayer — translate(0, 0, 0.125), крылья от корня модели.
+                elytra_pose(&mut self.elytra, state.crouching, self.fall_flying);
+                let r = root * Mat4::from_translation(glam::Vec3::new(0.0, 0.0, 0.125));
+                for (cell, tint) in layers {
+                    let start = out.len();
+                    self.elytra.bake(r, tint, light, out);
+                    remap_uv(&mut out[start..], cell, self.height);
+                }
+                if look.foil {
+                    self.elytra.bake(r, [255; 4], light, glint);
+                }
+                continue;
+            }
             let (model, parts) = if inner {
                 &mut self.inner
             } else {
@@ -379,6 +494,11 @@ impl ArmorKit {
                     vert[16..20].copy_from_slice(&nv.to_le_bytes());
                 }
             }
+            // VANILLA: EquipmentLayerRenderer — блеск поверх всех слоёв, UV модели 0..1 (текстура блеска
+            // с матрицей `glint_matrix`).
+            if look.foil {
+                model.bake(root, [255; 4], light, glint);
+            }
         }
     }
 
@@ -388,12 +508,32 @@ impl ArmorKit {
         looks: &[Option<Look>; 4],
         state: &HumanoidState,
         root: Mat4,
-    ) -> Vec<(ezzmc_render::entitymodel::RasterQuad, u32, [u8; 3])> {
+    ) -> (
+        Vec<(ezzmc_render::entitymodel::RasterQuad, u32, [u8; 3])>,
+        Vec<ezzmc_render::entitymodel::RasterQuad>,
+    ) {
         let mut out = Vec::new();
+        let mut foil = Vec::new();
         for (slot, look) in looks.iter().enumerate() {
             let Some(look) = look else { continue };
             let inner = slot == LEGS;
             let layers = self.layers(look, inner);
+            if look.material == "elytra" {
+                elytra_pose(&mut self.elytra, state.crouching, false);
+                let r = root * Mat4::from_translation(glam::Vec3::new(0.0, 0.0, 0.125));
+                let quads = self.elytra.quads(r);
+                for (cell, tint) in layers {
+                    out.extend(
+                        quads
+                            .iter()
+                            .map(|q| (q.clone(), cell, [tint[0], tint[1], tint[2]])),
+                    );
+                }
+                if look.foil {
+                    foil.extend(quads.iter().cloned());
+                }
+                continue;
+            }
             let (model, parts) = if inner {
                 &mut self.inner
             } else {
@@ -410,9 +550,27 @@ impl ArmorKit {
                         .map(|q| (q.clone(), cell, [tint[0], tint[1], tint[2]])),
                 );
             }
+            if look.foil {
+                foil.extend(quads.iter().cloned());
+            }
         }
-        out
+        (out, foil)
     }
+}
+
+/// VANILLA: TextureTransform#setupGlintTexturing(scale) — translate(−o0, o1)·rotZ(π/18)·scale;
+/// `Util.getMillis() * glintSpeed(0.5) * 8`. Для брони scale 0.16, для сущностей 0.5.
+pub fn glint_matrix(scale: f32) -> Mat4 {
+    let ms = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64) as f64
+        * 0.5
+        * 8.0) as u64;
+    let o0 = (ms % 110_000) as f32 / 110_000.0;
+    let o1 = (ms % 30_000) as f32 / 30_000.0;
+    Mat4::from_translation(glam::Vec3::new(-o0, o1, 0.0))
+        * Mat4::from_rotation_z(std::f32::consts::PI / 18.0)
+        * Mat4::from_scale(glam::Vec3::new(scale, scale, 1.0))
 }
 
 /// VANILLA: ArmorModelSet — видимы только части слота.

@@ -236,6 +236,28 @@ fn run(
             })
             .collect();
     }
+    // Атрибуты для attribute_modifiers подсказки: короткие имена, порядок = holder id.
+    if let (Some(r), Ok(mut g)) = (
+        reg("minecraft:attribute"),
+        crate::tooltip::ATTRIBUTES.lock(),
+    ) {
+        *g = r
+            .entries
+            .iter()
+            .map(|(n, _)| n.strip_prefix("minecraft:").unwrap_or(n.as_str()).to_owned())
+            .collect();
+    }
+    // Пластинки для подсказки: описание jukebox_song, порядок = holder id.
+    if let (Some(r), Ok(mut g)) = (
+        reg("minecraft:jukebox_song"),
+        crate::tooltip::JUKEBOX_DESC.lock(),
+    ) {
+        *g = r
+            .entries
+            .iter()
+            .map(|(_, t)| t.as_ref().and_then(|t| t.get("description")).cloned())
+            .collect();
+    }
     // Трим брони: имена материалов/паттернов в порядке holder id.
     if let Ok(mut g) = crate::armor::TRIM_REGISTRY.lock() {
         let names = |k: &str| {
@@ -243,7 +265,10 @@ fn run(
                 .map(|r| r.entries.iter().map(|(n, _)| n.clone()).collect())
                 .unwrap_or_default()
         };
-        *g = (names("minecraft:trim_material"), names("minecraft:trim_pattern"));
+        *g = (
+            names("minecraft:trim_material"),
+            names("minecraft:trim_pattern"),
+        );
     }
     // Id часов overworld в реестре world_clock (holder = индекс в порядке registry_data).
     let clock_id = reg("minecraft:world_clock").and_then(|r| {
@@ -380,6 +405,13 @@ fn run(
                     ground,
                     hcol,
                 ) {
+                    tracing::debug!(
+                        target: "dbg",
+                        "send_move pos={:.3?} ground={} horiz_col={}",
+                        cur,
+                        ground,
+                        hcol
+                    );
                     h.send_move(&mut c, kind, ground, hcol).map_err(|x| e(&x))?;
                 }
                 h.send_client_tick_end(&mut c).map_err(|x| e(&x))?;

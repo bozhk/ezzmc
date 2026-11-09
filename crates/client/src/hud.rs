@@ -302,12 +302,7 @@ pub fn stack_icon(
     y: f32,
 ) {
     if let Some(name) = ezzmc_protocol::generated::r26_3::ITEM.get(s.item as usize) {
-        let cx = crate::itemicon::dynamic(name, crate::itemicon::ctx_of(&s.patch));
-        name_icon_ctx(p, dev, q, rm, name, &cx, x, y);
-        if has_foil(name, &s.patch) {
-            glint_frame(p, 0.5, 0.75);
-            p.glint(&icon_key(name, &cx), x, y, 16.0, 16.0);
-        }
+        patch_icon(p, dev, q, rm, name, &s.patch, x, y);
         // VANILLA: GuiGraphicsExtractor#itemCooldown — белая полупрозрачная плашка (Integer.MAX_VALUE).
         let cd = crate::cooldown::percent(name);
         if cd > 0.0 {
@@ -323,6 +318,27 @@ pub fn stack_icon(
                 0x7FFF_FFFF,
             );
         }
+    }
+}
+
+/// Иконка предмета с патчем компонентов (тинт, зелья, блеск зачарований) в (x, y), 16×16.
+/// Общая точка для хотбара/инвентаря (`stack_icon`) и сетки креатива — блеск рисуется всюду одинаково.
+#[allow(clippy::too_many_arguments)]
+pub fn patch_icon(
+    p: &mut GuiPainter,
+    dev: &wgpu::Device,
+    q: &wgpu::Queue,
+    rm: &ResourceManager,
+    name: &str,
+    patch: &ezzmc_protocol::item::ComponentPatch,
+    x: f32,
+    y: f32,
+) {
+    let cx = crate::itemicon::dynamic(name, crate::itemicon::ctx_of(patch));
+    name_icon_ctx(p, dev, q, rm, name, &cx, x, y);
+    if has_foil(name, patch) && p.has(&icon_key(name, &cx)) {
+        glint_frame(p, 0.5, 0.75);
+        p.glint(&icon_key(name, &cx), x, y, 16.0, 16.0);
     }
 }
 

@@ -11,6 +11,13 @@ pub const STOP_DESTROY_BLOCK: i32 = 2;
 pub const SURVIVAL: i8 = 0;
 pub const CREATIVE: i8 = 1;
 
+/// VANILLA: Item#canDestroyBlock — в креативе предмет с `Tool.canDestroyBlocksInCreative = false`
+/// не ломает блоки (клиент не предсказывает, сервер откатывает). Такие: мечи (ToolMaterial#applySwordProperties),
+/// мейс (MaceItem), трезубец (TridentItem). Остальные инструменты и предметы без TOOL — ломают.
+pub fn breaks_in_creative(name: &str) -> bool {
+    !(name.ends_with("_sword") || name == "mace" || name == "trident")
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DigCmd {
     pub action: i32,
@@ -45,6 +52,8 @@ pub struct Digger {
     ticks: u32,
     /// Тик копания, на котором играет hit-звук (destroyTicks % 4 == 0).
     pub hit_sound: bool,
+    /// VANILLA: Minecraft#continueAttack — взмах рукой каждый тик, пока continueDestroyBlock вернул true.
+    pub swing: bool,
 }
 
 /// VANILLA: BlockStateBase#getDestroyProgress (рука, без эффектов).
@@ -90,14 +99,17 @@ impl Digger {
     }
 
     /// Один клиентский тик. Возвращает команды серверу и блоки, ломаемые локально (предсказание).
+    /// `creative_ok` — предмет в руке может ломать блоки в креативе (`breaks_in_creative`).
     pub fn tick(
         &mut self,
         held: bool,
         aim: Option<Aim>,
         mode: i8,
         body: Body,
+        creative_ok: bool,
     ) -> (Vec<DigCmd>, Vec<[i32; 3]>) {
         let (mut out, mut broken) = (Vec::new(), Vec::new());
+        self.swing = false;
         // Minecraft#continueAttack: без удержания / без блока — abort; режимы 2,3 не ломают.
         let aim =
             aim.filter(|a| held && !a.state.is_air() && (mode == SURVIVAL || mode == CREATIVE));
@@ -106,6 +118,8 @@ impl Digger {
             self.delay = self.delay.saturating_sub(1);
             return (out, broken);
         };
+        // VANILLA: continueDestroyBlock → true (ожидание destroyDelay, отправка START, прогресс) → swing.
+        self.swing = true;
         if self.delay > 0 {
             self.delay -= 1;
             return (out, broken);
@@ -113,7 +127,9 @@ impl Digger {
         if mode == CREATIVE {
             self.delay = 5;
             out.push(self.cmd(START_DESTROY_BLOCK, a.pos, a.face));
-            broken.push(a.pos);
+            if creative_ok {
+                broken.push(a.pos);
+            }
             return (out, broken);
         }
         if self.destroying && self.pos == a.pos {
@@ -161,6 +177,7 @@ impl Digger {
         aim: Option<Aim>,
         mode: i8,
         body: Body,
+        creative_ok: bool,
     ) -> (Vec<DigCmd>, Vec<[i32; 3]>) {
         let (mut out, mut broken) = (Vec::new(), Vec::new());
         let Some(a) = aim.filter(|a| !a.state.is_air() && (mode == SURVIVAL || mode == CREATIVE))
@@ -170,7 +187,9 @@ impl Digger {
         if mode == CREATIVE {
             self.delay = 5;
             out.push(self.cmd(START_DESTROY_BLOCK, a.pos, a.face));
-            broken.push(a.pos);
+            if creative_ok {
+                broken.push(a.pos);
+            }
         } else if !(self.destroying && self.pos == a.pos) {
             self.begin(&mut out, &mut broken, a, body);
         }
@@ -207,7 +226,7 @@ mod tests {
         let mut ticks = 0;
         loop {
             ticks += 1;
-            let (cmds, broken) = d.tick(true, aim, SURVIVAL, GROUND);
+            let (cmds, broken) = d.tick(true, aim, SURVIVAL, GROUND, true);
             if !broken.is_empty() {
                 assert_eq!(cmds.last().map(|c| c.action), Some(STOP_DESTROY_BLOCK));
                 break;
@@ -225,12 +244,46 @@ mod tests {
             state: state("stone"),
         });
         let mut d = Digger::default();
-        let (c, b) = d.tick(true, aim, CREATIVE, GROUND);
+        let (c, b) = d.tick(true, aim, CREATIVE, GROUND, true);
         assert_eq!((c.len(), b.len()), (1, 1));
         for _ in 0..5 {
-            assert!(d.tick(true, aim, CREATIVE, GROUND).1.is_empty());
+            assert!(d.tick(true, aim, CREATIVE, GROUND, true).1.is_empty());
         }
-        assert_eq!(d.tick(true, aim, CREATIVE, GROUND).1.len(), 1);
+        assert_eq!(d.tick(true, aim, CREATIVE, GROUND, true).1.len(), 1);
+    }
+
+    #[test]
+    fn creative_sword_swings_without_breaking() {
+        // VANILLA: меч в креативе — START_DESTROY уходит, но локально блок не ломается (canDestroy=false).
+        let aim = Some(Aim {
+            pos: [1, 2, 3],
+            face: 0,
+            state: state("stone"),
+        });
+        assert!(!breaks_in_creative("diamond_sword"));
+        assert!(breaks_in_creative("diamond_pickaxe"));
+        let mut d = Digger::default();
+        let (c, b) = d.tick(true, aim, CREATIVE, GROUND, false);
+        assert_eq!((c.len(), b.len()), (1, 0));
+        let (c, b) = d.click(aim, CREATIVE, GROUND, false);
+        assert_eq!((c.len(), b.len()), (1, 0));
+    }
+
+    #[test]
+    fn creative_hold_swings_every_tick() {
+        // VANILLA: continueAttack → swing каждый тик, пока удерживается блок (и во время destroyDelay).
+        let aim = Some(Aim {
+            pos: [1, 2, 3],
+            face: 0,
+            state: state("stone"),
+        });
+        let mut d = Digger::default();
+        for _ in 0..8 {
+            d.tick(true, aim, CREATIVE, GROUND, false);
+            assert!(d.swing);
+        }
+        d.tick(false, aim, CREATIVE, GROUND, false);
+        assert!(!d.swing);
     }
 
     #[test]
@@ -241,8 +294,8 @@ mod tests {
             state: state("stone"),
         });
         let mut d = Digger::default();
-        d.tick(true, aim, SURVIVAL, GROUND);
-        let (c, _) = d.tick(false, aim, SURVIVAL, GROUND);
+        d.tick(true, aim, SURVIVAL, GROUND, true);
+        let (c, _) = d.tick(false, aim, SURVIVAL, GROUND, true);
         assert_eq!(c.first().map(|c| c.action), Some(ABORT_DESTROY_BLOCK));
     }
 }

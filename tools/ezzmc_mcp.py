@@ -94,7 +94,7 @@ TOOLS = {
     "game_mouse": ("Press or release a mouse button (left/right); hold left to break blocks.", S(button=STR, down={"type": "boolean"}), "mouse"),
     "game_slot_click": ("Inventory screen open: click slot (left/right; hover=true only moves the cursor), optionally drag over slots in drag_to (QUICK_CRAFT).", S(slot=INT, button=STR, hover={"type": "boolean"}, drag_to={"type": "array", "items": {"type": "integer"}}), "slot_click"),
     "game_creative_scroll": ("Creative screen open: scroll the item grid by dy wheel notches (negative = down, like the mouse wheel).", S(dy=N), "creative_scroll"),
-    "game_creative_click": ("Creative screen open: click one target — tab (0..), cell (grid 0..44), slot (InventoryMenu index, hotbar 36..44), trash=true, outside=true, or x/y GUI px; button left/right/middle; drag_to = slot indexes.", S(tab=INT, cell=INT, slot=INT, trash={"type": "boolean"}, outside={"type": "boolean"}, x=N, y=N, button=STR, drag_to={"type": "array", "items": {"type": "integer"}}, hold={"type": "boolean"}), "creative_click"),
+    "game_creative_click": ("Creative screen open: click one target — tab (0..), cell (grid 0..44), slot (InventoryMenu index, hotbar 36..44), trash=true, outside=true, or x/y GUI px; button left/right/middle; drag_to = slot indexes; hover=true only moves the cursor (tooltip checks).", S(tab=INT, cell=INT, slot=INT, trash={"type": "boolean"}, outside={"type": "boolean"}, x=N, y=N, button=STR, drag_to={"type": "array", "items": {"type": "integer"}}, hold={"type": "boolean"}, hover={"type": "boolean"}), "creative_click"),
     "game_creative_release": ("Release the mouse button held by game_creative_click hold=true.", S(), "creative_release"),
     "game_creative_search": ("Creative screen, Search tab selected: type text into the search field.", S(text=STR), "creative_search"),
     "game_chat_open": ("Open the chat screen (text='/' like the command key).", S(text=STR), "chat_open"),
@@ -107,6 +107,7 @@ TOOLS = {
     "game_hotbar": ("Select hotbar slot 0-8.", S(slot=INT), "hotbar"),
     "game_sound": ("Play a sound event (e.g. block.stone.break) at the listener; state.audio.started/active shows engine activity.", S(event=STR, volume=N, pitch=N), "sound"),
     "game_inventory": ("Non-empty inventory slots with item names and counts.", S(), "inventory"),
+    "game_tooltip": ("Tooltip lines (text + hex color) of the item in an inventory slot, computed by the client without hovering. slot = InventoryMenu index.", S(slot=INT), "tooltip"),
 }
 
 

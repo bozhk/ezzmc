@@ -9,6 +9,8 @@ use ezzmc_net::session::ClientInformation;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ViewCfg {
     pub fov: f32,
+    /// renderDistance из настроек (или EZZMC_RENDER_DISTANCE): ограничивает радиус тумана и дальней плоскости.
+    pub render_distance: i32,
     pub gamma: f32,
     pub bob_view: bool,
     pub entity_shadows: bool,
@@ -28,6 +30,7 @@ impl Default for ViewCfg {
     fn default() -> Self {
         Self {
             fov: 70.0,
+            render_distance: 12,
             gamma: 0.5,
             bob_view: true,
             entity_shadows: true,
@@ -51,6 +54,7 @@ impl ViewCfg {
         let b = |l: &'static [Def], k: &str| o.get(find(l, k)) == "true";
         Self {
             fov: o.f32(&crate::ui::options::FOV),
+            render_distance: render_distance(o),
             gamma: o.f32(find(VIDEO, "gamma")),
             bob_view: b(VIDEO, "bobView"),
             entity_shadows: b(VIDEO, "entityShadows"),
@@ -97,14 +101,19 @@ pub fn apply_parts(m: &mut ezzmc_render::entitymodel::Model, mask: u8) {
 }
 
 /// VANILLA: Options#buildPlayerInformation.
+/// renderDistance клиента (чанки): переменная EZZMC_RENDER_DISTANCE перекрывает настройку.
+pub fn render_distance(o: &Options) -> i32 {
+    std::env::var("EZZMC_RENDER_DISTANCE")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or_else(|| o.get(&VIDEO[0]).parse::<i32>().unwrap_or(12))
+        .clamp(2, 127)
+}
+
 pub fn client_info(o: &Options) -> ClientInformation {
     let mask = model_mask(o);
-    let rd: i8 = o.get(&VIDEO[0]).parse::<i32>().unwrap_or(12).clamp(2, 127) as i8;
     ClientInformation {
-        view_distance: std::env::var("EZZMC_RENDER_DISTANCE")
-            .ok()
-            .and_then(|v| v.parse::<i8>().ok())
-            .map_or(rd, |v| v.clamp(2, 127)),
+        view_distance: render_distance(o) as i8,
         chat_colors: o.get(&CHAT[0]) == "true",
         model_customisation: mask,
         main_hand: i32::from(o.get(find(SKIN, "mainHand")) != "left"),

@@ -5,6 +5,8 @@
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var tex_sampler: sampler;
 @group(1) @binding(2) var lightmap: texture_2d<f32>;
+@group(1) @binding(3) var glint_tex: texture_2d<f32>;
+@group(1) @binding(4) var glint_sampler: sampler;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -30,7 +32,7 @@ fn vs_main(
     o.uv = uv0;
     // texelFetch(Sampler2, UV2 / 16, 0)
     // Флаг красного оверлея урона (OverlayTexture.RED_OVERLAY_RGBA): uv2.x += 4096.
-    o.hurt = select(0.0, 1.0, uv2.x >= 4096);
+    o.hurt = select(0.0, 1.0, (uv2.x & 4096) != 0);
     let l2 = vec2<i32>(uv2.x & 4095, uv2.y);
     o.color = color;
     o.light = textureLoad(lightmap, l2 / 16, 0);
@@ -50,4 +52,25 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
         discard;
     }
     return apply_fog(color, i.spherical, i.cylindrical, fog.environmental_start, fog.environmental_end, fog.render_distance_start, fog.render_distance_end, fog.color);
+}
+
+// VANILLA: rendertype_armor_entity_glint — текстура блеска с матрицей текстуры; blend SRC_COLOR, ONE:
+// итог = dst + (glint.rgb * GlintAlpha)^2. Сила GlintAlpha (0.75) — в color_modulator.a.
+@fragment
+fn fs_glint(i: VsOut) -> @location(0) vec4<f32> {
+    let uv = (dyn_tf.texture_mat * vec4<f32>(i.uv, 0.0, 1.0)).xy;
+    let g = textureSample(tex, tex_sampler, uv).rgb * dyn_tf.color_modulator.a;
+    return vec4<f32>(g, 0.0);
+}
+
+// VANILLA: rendertype_entity_glint на предмете — форма по альфе спрайта (tex), блеск из glint_tex, UV·texture_mat.
+@fragment
+fn fs_glint_item(i: VsOut) -> @location(0) vec4<f32> {
+    let a = textureSample(tex, tex_sampler, i.uv).a;
+    if (a < 0.1) {
+        discard;
+    }
+    let uv = (dyn_tf.texture_mat * vec4<f32>(i.uv, 0.0, 1.0)).xy;
+    let g = textureSample(glint_tex, glint_sampler, uv).rgb * dyn_tf.color_modulator.a;
+    return vec4<f32>(g, 0.0);
 }

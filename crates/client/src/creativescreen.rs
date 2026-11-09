@@ -1063,6 +1063,7 @@ fn tab_lines(lang: &Lang, s: &ItemStack) -> Vec<String> {
 
 /// Предмет под курсором и его тултип; иначе подсказка вкладки/корзины.
 pub fn hover_text(
+    t: &TextRenderer,
     st: &State,
     inv: &Inventory,
     lang: &Lang,
@@ -1074,7 +1075,7 @@ pub fn hover_text(
     const BLUE: u32 = 0x5555FF;
     const PURPLE: u32 = 0xAA00AA;
     let with_tabs = |s: &ItemStack, creative_cell: bool| {
-        let mut lines = crate::tooltip::stack_lines(lang, s);
+        let mut lines = crate::tooltip::stack_lines(lang, t, s);
         // VANILLA: в категории строки с вкладками у ячеек каталога не добавляются.
         if lines.is_empty() || (creative_cell && st.kind() == Kind::Category) {
             return lines;
@@ -1251,13 +1252,13 @@ pub fn draw_sprites(
         for c in 0..COLS * ROWS {
             if let Some(e) = items.get(st.row * COLS + c) {
                 let name = e.name;
-                hud::name_icon_ctx(
+                hud::patch_icon(
                     p,
                     dev,
                     q,
                     rm,
                     name,
-                    &crate::itemicon::ctx_of(&e.patch),
+                    &e.patch,
                     l + 9.0 + (c % COLS) as f32 * 18.0,
                     t + 18.0 + (c / COLS) as f32 * 18.0,
                 );

@@ -421,6 +421,10 @@ impl App {
                 let (right, left, middle) = (b == "right", b == "left", b == "middle");
                 self.cursor_px = (f64::from(x) * k, f64::from(y) * k);
                 self.inv_cursor_moved();
+                if c["hover"].as_bool() == Some(true) {
+                    // Только навести курсор (проверка подсказок креатива).
+                    return Some(ok(json!({})));
+                }
                 self.inv_mouse(true, right, left, middle);
                 if let Some(to) = c["drag_to"].as_array() {
                     for n in to.iter().filter_map(Value::as_u64) {
@@ -493,6 +497,26 @@ impl App {
                     v.select_slot(slot);
                 }
                 ok(json!({}))
+            }
+            "tooltip" => {
+                // Агент: строки подсказки предмета в слоте инвентаря (без наведения курсора).
+                let Some(v) = &self.view else {
+                    return Some(err("not in game"));
+                };
+                let Some(t) = self.text.as_ref() else {
+                    return Some(err("no text renderer"));
+                };
+                let Some(i) = c["slot"].as_u64().map(|s| s as usize) else {
+                    return Some(err("no slot"));
+                };
+                let Some(Some(s)) = v.inv.slots.get(i) else {
+                    return Some(ok(json!({"lines": []})));
+                };
+                let lines: Vec<Value> = crate::tooltip::stack_lines(&self.item_lang, t, s)
+                    .into_iter()
+                    .map(|(text, color)| json!({"text": text, "color": format!("{color:06X}")}))
+                    .collect();
+                ok(json!({"lines": lines}))
             }
             "inventory" => {
                 let Some(v) = &self.view else {

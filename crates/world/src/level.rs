@@ -378,6 +378,14 @@ impl Level {
             "block_update" => {
                 let pos = BlockPos::read(&mut r)?;
                 let state = read_state(&mut r)?;
+                tracing::debug!(
+                    target: "dbg",
+                    "block_update pos=({},{},{}) state={}",
+                    pos.x,
+                    pos.y,
+                    pos.z,
+                    state.name()
+                );
                 self.set_block_verified(pos, state);
                 LevelEvent::BlocksChanged(vec![pos])
             }

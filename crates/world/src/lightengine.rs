@@ -251,7 +251,7 @@ mod tests {
         biome_global_bits: 6,
     };
 
-    fn world() -> ChunkCache {
+    pub(crate) fn world() -> ChunkCache {
         let mut c = ChunkCache::new(F, 4);
         c.set_center(0, 0);
         for cx in -1..=1 {
@@ -312,5 +312,29 @@ mod tests {
         c.set_block(0, 100, 0, BlockState::AIR);
         assert_eq!(c.light_get(Kind::Sky, 0, 99, 0), Some(15));
         assert_eq!(c.light_get(Kind::Sky, 0, 50, 0), Some(15));
+    }
+}
+
+#[cfg(test)]
+mod track_light {
+    use super::*;
+    use crate::block::BlockState;
+
+    #[test]
+    fn grass_plant_on_dirt_keeps_sky_light() {
+        let mut c = super::tests::world();
+        let st = |n: &str| {
+            (0..crate::generated::b26_3::STATE_COUNT)
+                .filter_map(BlockState::from_id)
+                .find(|s| s.name() == n)
+                .unwrap()
+        };
+        c.set_block(0, 99, 0, st("grass_block"));
+        c.set_block(0, 100, 0, st("short_grass"));
+        let above = c.light_get(Kind::Sky, 0, 100, 0);
+        let above2 = c.light_get(Kind::Sky, 0, 101, 0);
+        let under = c.light_get(Kind::Sky, 0, 98, 0);
+        assert_eq!(above, Some(15));
+        assert_eq!(above2, Some(15));
     }
 }
