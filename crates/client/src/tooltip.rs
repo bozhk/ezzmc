@@ -34,7 +34,12 @@ pub static ENCHANTS: Mutex<Vec<(String, i32)>> = Mutex::new(Vec::new());
 pub static ATTRIBUTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Реестр `minecraft:jukebox_song` (порядок = holder id): компонент `description` каждой пластинки.
-pub static JUKEBOX_DESC: Mutex<Vec<Option<Tag>>> = Mutex::new(Vec::new());
+/// Реестр `minecraft:jukebox_song` (порядок = holder id): (имя без `minecraft:`, компонент `description`).
+pub static JUKEBOX_DESC: Mutex<Vec<(String, Option<Tag>)>> = Mutex::new(Vec::new());
+
+/// Трим: описания материалов и узоров (порядок = holder id) из реестров `trim_material` / `trim_pattern`.
+pub static TRIM_DESC: Mutex<(Vec<Option<Tag>>, Vec<Option<Tag>>)> =
+    Mutex::new((Vec::new(), Vec::new()));
 
 /// F3+H: расширенная подсказка (прочность, id предмета). VANILLA: KeyboardHandler — F3+H → advanced tooltips.
 pub static ADVANCED: AtomicBool = AtomicBool::new(false);
@@ -92,6 +97,10 @@ struct Defaults {
     effect_cat: HashMap<String, String>,
     /// Эффект → модификаторы атрибутов на единицу (амплификатор+1).
     effect_mods: HashMap<String, Vec<AttrMod>>,
+    /// Предмет → имена дефолтных компонентов (для F3+H «N components»).
+    protos: HashMap<String, Vec<String>>,
+    /// Пластинка → ключ песни из дефолтного `jukebox_playable`.
+    song: HashMap<String, String>,
 }
 
 static DEFAULTS: OnceLock<Defaults> = OnceLock::new();
@@ -102,7 +111,15 @@ fn defaults() -> &'static Defaults {
         for l in include_str!("../data/tooltip_data.txt").lines() {
             let f: Vec<&str> = l.split('|').collect();
             match f.as_slice() {
-                ["I", name, rar, max, _] => {
+                ["I", name, rar, max, names] => {
+                    d.protos.insert(
+                        name.to_string(),
+                        names
+                            .split(',')
+                            .filter(|n| !n.is_empty())
+                            .map(str::to_owned)
+                            .collect(),
+                    );
                     let r = match *rar {
                         "uncommon" => 1,
                         "rare" => 2,
@@ -142,8 +159,10 @@ fn defaults() -> &'static Defaults {
                             })
                         })
                         .collect();
-                    d.potions
-                        .insert(pid.to_string(), (lang.to_string(), list));
+                    d.potions.insert(pid.to_string(), (lang.to_string(), list));
+                }
+                ["J", name, song] => {
+                    d.song.insert(name.to_string(), song.to_string());
                 }
                 ["E", eff, cat] => {
                     d.effect_cat.insert(eff.to_string(), cat.to_string());
@@ -501,21 +520,27 @@ fn potion_lines(lang: &Lang, effects: &[Eff], scale: f32, out: &mut Vec<(String,
     }
 }
 
-/// Пластинка: описание из `jukebox_song` (`jukebox_playable`: VarInt holder id+1; 0 = прямая запись).
+/// Пластинка из патча: `jukebox_playable` = VarInt holder id+1 (0 = прямая запись).
 /// VANILLA: JukeboxPlayable#addToTooltip — description с цветом GRAY.
 fn jukebox_line(lang: &Lang, b: &[u8]) -> Option<(String, u32)> {
     let mut r = Reader::new(b);
     let v = r.var_int().ok()?;
     let tag = if v > 0 {
-        JUKEBOX_DESC
-            .lock()
-            .ok()?
-            .get((v - 1) as usize)?
-            .clone()?
+        JUKEBOX_DESC.lock().ok()?.get((v - 1) as usize)?.1.clone()?
     } else {
         nbt::read_network(&mut r).ok()??
     };
     Some((plain(lang, &tag)?, GRAY))
+}
+
+/// Описание песни по ключу реестра (дефолт пластинки из данных). VANILLA: jukebox_song.description.
+fn song_tag(key: &str) -> Option<Tag> {
+    JUKEBOX_DESC
+        .lock()
+        .ok()?
+        .iter()
+        .find(|(n, _)| n == key)
+        .and_then(|(_, t)| t.clone())
 }
 
 /// Пустой бандл: описание серым с переносом по 96 px. VANILLA: ClientBundleTooltip#extractEmptyBundleDescriptionText.
@@ -550,12 +575,24 @@ fn bundle_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack, out: &mut Vec<(Str
 
 /// VANILLA: ItemStack#getTooltipLines (часть) + getStyledHoverName/Rarity.
 /// Редкость: компонент `rarity`, иначе по предмету из данных; чары поднимают common/uncommon → rare, rare → epic.
-pub fn stack_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack) -> Vec<(String, u32)> {
-    let name = ITEM.get(s.item as usize).copied().unwrap_or("air");
-    let mut rarity = comp(&s.patch, "rarity")
-        .and_then(|b| Reader::new(b).var_int().ok())
-        .unwrap_or_else(|| defaults().rarity.get(name).copied().unwrap_or(0));
-    let ench: Vec<(i32, i32)> = comp(&s.patch, "enchantments")
+/// Скрытые компоненты предмета (`tooltip_display`). VANILLA: TooltipDisplay#shows (hiddenComponents).
+/// hide_tooltip не учитывается: в ванили он прячет всю подсказку вне креатива (см. STATUS).
+fn hidden_components(patch: &ComponentPatch) -> Vec<&'static str> {
+    let Some(b) = comp(patch, "tooltip_display") else {
+        return Vec::new();
+    };
+    let mut r = Reader::new(b);
+    let _hide_tooltip = r.bool().unwrap_or(false);
+    let n = r.var_int().unwrap_or(0);
+    (0..n)
+        .filter_map(|_| r.var_int().ok())
+        .filter_map(|id| DATA_COMPONENT_TYPE.get(id as usize).copied())
+        .collect()
+}
+
+/// Список (holder зачарования, уровень) из компонента `enchantments` / `stored_enchantments`.
+fn ench_list(patch: &ComponentPatch, key: &str) -> Vec<(i32, i32)> {
+    comp(patch, key)
         .map(|b| {
             let mut r = Reader::new(b);
             let n = r.var_int().unwrap_or(0);
@@ -563,7 +600,106 @@ pub fn stack_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack) -> Vec<(String,
                 .map_while(|_| Some((r.var_int().ok()?, r.var_int().ok()?)))
                 .collect()
         })
+        .unwrap_or_default()
+}
+
+/// Строки зачарований. VANILLA: ItemEnchantments#addToTooltip — проклятия красным, остальное серым.
+fn enchant_lines(lang: &Lang, ench: &[(i32, i32)], out: &mut Vec<(String, u32)>) {
+    let reg = ENCHANTS.lock().map(|g| g.clone()).unwrap_or_default();
+    for &(h, lvl) in ench {
+        let Some((n, max)) = reg.get(h as usize) else {
+            continue;
+        };
+        let short = n.strip_prefix("minecraft:").unwrap_or(n);
+        let key = format!("enchantment.minecraft.{short}");
+        let mut t = lang.tr(&key);
+        if !(*max == 1 && lvl == 1) {
+            let lk = format!("enchantment.level.{lvl}");
+            let l = lang.tr(&lk);
+            t = format!("{t} {}", if l == lk { lvl.to_string() } else { l });
+        }
+        let curse = matches!(short, "binding_curse" | "vanishing_curse");
+        out.push((t, if curse { 0xFF5555 } else { 0xAAAAAA }));
+    }
+}
+
+/// Имя сущности спаунера из `block_entity_data` (`SpawnData.entity.id`). VANILLA: Spawner#getSpawnEntityDisplayName.
+fn spawner_entity(patch: &ComponentPatch) -> Option<String> {
+    let b = comp(patch, "block_entity_data")?;
+    let mut r = Reader::new(b);
+    // Тип block entity (holder VarInt), затем сам compound.
+    r.var_int().ok()?;
+    let tag = nbt::read_network(&mut r).ok()??;
+    let id = tag.get("SpawnData")?.get("entity")?.get("id")?.as_str()?;
+    Some(id.to_owned())
+}
+
+/// Трим брони: «Upgrade:», узор и материал цветом материала. VANILLA: ArmorTrim#addToTooltip.
+fn trim_lines(lang: &Lang, b: &[u8], out: &mut Vec<(String, u32)>) -> Option<()> {
+    let mut r = Reader::new(b);
+    // Holder на проводе: id+1 (0 = прямая запись, здесь не поддержана).
+    let m = r.var_int().ok()?.checked_sub(1)? as usize;
+    let p = r.var_int().ok()?.checked_sub(1)? as usize;
+    let (mat, pat) = {
+        let g = TRIM_DESC.lock().ok()?;
+        (g.0.get(m)?.clone()?, g.1.get(p)?.clone()?)
+    };
+    let color = Component::from_nbt(&mat)
+        .ok()?
+        .style
+        .color
+        .unwrap_or(0xFFFFFF);
+    out.push((lang.tr("item.minecraft.smithing_template.upgrade"), GRAY));
+    out.push((format!(" {}", plain(lang, &pat)?), color));
+    out.push((format!(" {}", plain(lang, &mat)?), color));
+    Some(())
+}
+
+/// Цвет окраски. VANILLA: DyedItemColor#addToTooltip — при F3+H hex, иначе «Dyed».
+fn dyed_lines(lang: &Lang, b: &[u8], out: &mut Vec<(String, u32)>) {
+    if ADVANCED.load(Ordering::Relaxed) {
+        let rgb = Reader::new(b).i32().unwrap_or(0) as u32;
+        out.push((
+            fill(&lang.tr("item.color"), &[&format!("#{rgb:06X}")]),
+            GRAY,
+        ));
+    } else {
+        out.push((lang.tr("item.dyed"), GRAY));
+    }
+}
+
+/// Число компонентов стака (F3+H). VANILLA: PatchedDataComponentMap#size — дефолты предмета ± патч.
+fn component_count(name: &str, patch: &ComponentPatch) -> usize {
+    let mut set: Vec<&str> = defaults()
+        .protos
+        .get(name)
+        .map(|v| v.iter().map(String::as_str).collect())
         .unwrap_or_default();
+    for (id, _) in &patch.added {
+        if let Some(n) = DATA_COMPONENT_TYPE.get(*id as usize) {
+            if !set.contains(n) {
+                set.push(n);
+            }
+        }
+    }
+    for id in &patch.removed {
+        if let Some(n) = DATA_COMPONENT_TYPE.get(*id as usize) {
+            set.retain(|x| x != n);
+        }
+    }
+    set.len()
+}
+
+/// Строки тултипа в порядке `ItemStack#addDetailsToTooltip`.
+pub fn stack_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack) -> Vec<(String, u32)> {
+    let name = ITEM.get(s.item as usize).copied().unwrap_or("air");
+    let hidden = hidden_components(&s.patch);
+    let shows = |c: &str| !hidden.contains(&c);
+    let ench = ench_list(&s.patch, "enchantments");
+    let stored = ench_list(&s.patch, "stored_enchantments");
+    let mut rarity = comp(&s.patch, "rarity")
+        .and_then(|b| Reader::new(b).var_int().ok())
+        .unwrap_or_else(|| defaults().rarity.get(name).copied().unwrap_or(0));
     if !ench.is_empty() && name != "enchanted_book" {
         rarity = match rarity {
             0 | 1 => 2,
@@ -589,8 +725,7 @@ pub fn stack_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack) -> Vec<(String,
     if name.ends_with("bundle") {
         bundle_lines(lang, t, s, &mut out);
     }
-    // VANILLA: ItemStack#addDetailsToTooltip — порядок: POTION_CONTENTS → JUKEBOX_PLAYABLE → ENCHANTMENTS → …
-    if let Some(pd) = &potion {
+    if let (Some(pd), true) = (&potion, shows("potion_contents")) {
         let mut effs: Vec<Eff> = pd
             .potion
             .and_then(|id| POTION.get(id as usize))
@@ -611,26 +746,36 @@ pub fn stack_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack) -> Vec<(String,
             .unwrap_or(1.0);
         potion_lines(lang, &effs, scale, &mut out);
     }
-    if let Some(l) = comp(&s.patch, "jukebox_playable").and_then(|b| jukebox_line(lang, b)) {
-        out.push(l);
-    }
-    let reg = ENCHANTS.lock().map(|g| g.clone()).unwrap_or_default();
-    for (h, lvl) in ench {
-        let Some((n, max)) = reg.get(h as usize) else {
-            continue;
+    if shows("jukebox_playable") {
+        // Патч: holder id+1 или прямая запись. Нет патча — дефолт предмета (ключ песни из данных).
+        let jb = match comp(&s.patch, "jukebox_playable") {
+            Some(b) => jukebox_line(lang, b),
+            None => defaults()
+                .song
+                .get(name)
+                .and_then(|k| song_tag(k))
+                .and_then(|t| plain(lang, &t))
+                .map(|t| (t, GRAY)),
         };
-        let short = n.strip_prefix("minecraft:").unwrap_or(n);
-        let key = format!("enchantment.minecraft.{short}");
-        let mut t = lang.tr(&key);
-        if !(*max == 1 && lvl == 1) {
-            let lk = format!("enchantment.level.{lvl}");
-            let l = lang.tr(&lk);
-            t = format!("{t} {}", if l == lk { lvl.to_string() } else { l });
-        }
-        let curse = matches!(short, "binding_curse" | "vanishing_curse");
-        out.push((t, if curse { 0xFF5555 } else { 0xAAAAAA }));
+        out.extend(jb);
     }
-    if let Some(b) = comp(&s.patch, "lore") {
+    if shows("trim") {
+        if let Some(b) = comp(&s.patch, "trim") {
+            trim_lines(lang, b, &mut out);
+        }
+    }
+    if shows("stored_enchantments") {
+        enchant_lines(lang, &stored, &mut out);
+    }
+    if shows("enchantments") {
+        enchant_lines(lang, &ench, &mut out);
+    }
+    if shows("dyed_color") {
+        if let Some(b) = comp(&s.patch, "dyed_color") {
+            dyed_lines(lang, b, &mut out);
+        }
+    }
+    if let (Some(b), true) = (comp(&s.patch, "lore"), shows("lore")) {
         let mut r = Reader::new(b);
         let n = r.var_int().unwrap_or(0);
         for _ in 0..n {
@@ -648,25 +793,36 @@ pub fn stack_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack) -> Vec<(String,
             }
         }
     }
-    let names = ATTRIBUTES.lock().map(|g| g.clone()).unwrap_or_default();
-    let mods = match comp(&s.patch, "attribute_modifiers") {
-        Some(b) => parse_attr_patch(lang, b, &names),
-        None => defaults().mods.get(name).cloned().unwrap_or_default(),
-    };
-    attribute_lines(lang, &mods, &mut out);
-    if comp(&s.patch, "unbreakable").is_some() {
+    if shows("attribute_modifiers") {
+        let names = ATTRIBUTES.lock().map(|g| g.clone()).unwrap_or_default();
+        let mods = match comp(&s.patch, "attribute_modifiers") {
+            Some(b) => parse_attr_patch(lang, b, &names),
+            None => defaults().mods.get(name).cloned().unwrap_or_default(),
+        };
+        attribute_lines(lang, &mods, &mut out);
+    }
+    if comp(&s.patch, "unbreakable").is_some() && shows("unbreakable") {
         out.push((lang.tr("item.unbreakable"), 0x5555FF));
     }
-    // VANILLA: ItemStack#addDetailsToTooltip — спаунер без BLOCK_ENTITY_DATA: «Interact with Spawn Egg:».
-    // VANILLA: Spawner#appendHoverText. Имя сущности (при наличии data) пока не выводится.
-    if matches!(name, "monster_spawner" | "trial_spawner")
-        && comp(&s.patch, "block_entity_data").is_none()
-    {
-        out.push((String::new(), GRAY));
-        out.push((lang.tr("block.minecraft.spawner.desc1"), GRAY));
-        out.push((format!(" {}", lang.tr("block.minecraft.spawner.desc2")), BLUE));
+    // VANILLA: ItemStack#addDetailsToTooltip — спаунер: имя сущности, иначе «Interact with Spawn Egg:».
+    // VANILLA: Spawner#appendHoverText.
+    if matches!(name, "monster_spawner" | "trial_spawner") && shows("block_entity_data") {
+        match spawner_entity(&s.patch) {
+            Some(id) => {
+                let (ns, p) = id.split_once(':').unwrap_or(("minecraft", &id));
+                out.push((lang.tr(&format!("entity.{ns}.{p}")), GRAY));
+            }
+            None => {
+                out.push((String::new(), GRAY));
+                out.push((lang.tr("block.minecraft.spawner.desc1"), GRAY));
+                out.push((
+                    format!(" {}", lang.tr("block.minecraft.spawner.desc2")),
+                    BLUE,
+                ));
+            }
+        }
     }
-    // VANILLA: ItemStack#addDetailsToTooltip — при F3+H: прочность и id предмета в конце.
+    // VANILLA: ItemStack#addDetailsToTooltip — при F3+H: прочность, id предмета и число компонентов.
     if ADVANCED.load(Ordering::Relaxed) {
         let damage = comp(&s.patch, "damage")
             .and_then(|b| Reader::new(b).var_int().ok())
@@ -675,7 +831,7 @@ pub fn stack_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack) -> Vec<(String,
             .and_then(|b| Reader::new(b).var_int().ok())
             .or_else(|| defaults().max_damage.get(name).copied())
             .unwrap_or(0);
-        if damage > 0 && max > 0 {
+        if damage > 0 && max > 0 && shows("damage") {
             let tpl = lang.tr("item.durability");
             out.push((
                 fill(&tpl, &[&(max - damage).to_string(), &max.to_string()]),
@@ -683,6 +839,11 @@ pub fn stack_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack) -> Vec<(String,
             ));
         }
         out.push((format!("minecraft:{name}"), DARK_GRAY));
+        let count = component_count(name, &s.patch);
+        if count > 0 {
+            let tpl = lang.tr("item.components");
+            out.push((fill(&tpl, &[&count.to_string()]), DARK_GRAY));
+        }
     }
     out
 }

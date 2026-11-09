@@ -942,6 +942,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)] // тест на собственных буферах: unwrap = assert
     fn stack_roundtrip_and_framing() {
         let item = reg::ITEM
             .iter()

@@ -273,7 +273,8 @@ impl Level {
                 })
             };
             let player_ty = crate::entities::player_type();
-            let others: Vec<(i32, ([f64; 3], [f64; 3]))> = self
+            type Other = (i32, ([f64; 3], [f64; 3]));
+            let others: Vec<Other> = self
                 .entities
                 .map
                 .values()
@@ -841,11 +842,11 @@ impl Level {
                     let x = if rel & 16 != 0 { cx + x_rot } else { x_rot };
                     e.on_ground = on_ground;
                     // VANILLA: PositionMoveRotation#calculate — delta тоже относительный (биты 5..7).
-                    for i in 0..3 {
-                        e.vel[i] = if rel & (1 << (5 + i)) != 0 {
-                            e.vel[i] + delta[i]
+                    for (i, (vel, d)) in e.vel.iter_mut().zip(delta).enumerate() {
+                        *vel = if rel & (1 << (5 + i)) != 0 {
+                            *vel + d
                         } else {
-                            delta[i]
+                            d
                         };
                     }
                     e.set_target(Some(p), Some((y, x)));

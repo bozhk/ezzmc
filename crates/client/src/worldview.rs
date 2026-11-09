@@ -1229,7 +1229,8 @@ impl WorldView {
                             if let Some(l) = g.as_ref() {
                                 for x in a[0].floor() as i32..=(a[3] - 1e-6).floor() as i32 {
                                     for y in a[1].floor() as i32..=(a[4] - 1e-6).floor() as i32 {
-                                        for z in a[2].floor() as i32..=(a[5] - 1e-6).floor() as i32 {
+                                        for z in a[2].floor() as i32..=(a[5] - 1e-6).floor() as i32
+                                        {
                                             cells.push(format!(
                                                 "({x},{y},{z})={}",
                                                 l.chunks.block(x, y, z).name()
@@ -3854,9 +3855,8 @@ impl WorldView {
         let replace_clicked = is_replaceable(clicked.name()) && clicked.name() != item;
         let target = if replace_clicked { pos } else { adjacent };
         let st = l.chunks.block(target[0], target[1], target[2]);
-        let free = st.is_air()
-            || ezzmc_mesh::blockinfo::fluid(st).is_some()
-            || is_replaceable(st.name());
+        let free =
+            st.is_air() || ezzmc_mesh::blockinfo::fluid(st).is_some() || is_replaceable(st.name());
         if !free {
             return None;
         }
@@ -4016,7 +4016,10 @@ impl WorldView {
         if let Ok(mut g) = self.net.level.lock() {
             if let Some(l) = g.as_mut() {
                 // sequence уже взят у UseItemOn (next_seq), pending_seq тот же.
-                l.predict_block(ezzmc_protocol::types::BlockPos::new(c[0], c[1], c[2]), state);
+                l.predict_block(
+                    ezzmc_protocol::types::BlockPos::new(c[0], c[1], c[2]),
+                    state,
+                );
             }
         }
     }

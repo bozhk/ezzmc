@@ -230,8 +230,8 @@ impl Entity {
         self.pos = last;
         if hit {
             // VANILLA: AbstractArrow#onHitBlock — отступ 0.05 против хода, shakeTime = 7.
-            for k in 0..3 {
-                self.pos[k] -= v[k].signum() * 0.05 * f64::from(u8::from(v[k] != 0.0));
+            for (p, vk) in self.pos.iter_mut().zip(v.iter()) {
+                *p -= vk.signum() * 0.05 * f64::from(u8::from(*vk != 0.0));
             }
             self.stuck = true;
             self.vel = [0.0; 3];
@@ -422,54 +422,6 @@ impl Entities {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn projectile_snaps_to_server_position() {
-        // VANILLA: у снарядов NO_OP-интерполяция — позиция из пакета ставится сразу.
-        let arrow = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
-            .iter()
-            .position(|n| *n == "arrow")
-            .unwrap();
-        let mut e = Entity::new(1, 0, arrow, [0.0; 3], 0.0, 0.0, 0.0);
-        e.set_target(Some([1.0, 2.0, 3.0]), Some((90.0, 10.0)));
-        assert_eq!(e.pos, [1.0, 2.0, 3.0]);
-        assert!(!e.interpolating());
-        assert_eq!((e.yaw, e.pitch), (90.0, 10.0));
-    }
-
-    #[test]
-    fn lerps_to_target_in_three_ticks() {
-        let mut e = Entity::new(1, 0, 0, [0.0; 3], 0.0, 0.0, 0.0);
-        e.set_target(Some([3.0, 0.0, 0.0]), Some((90.0, 0.0)));
-        e.tick();
-        assert!((e.pos[0] - 1.0).abs() < 1e-9);
-        e.tick();
-        e.tick();
-        assert!((e.pos[0] - 3.0).abs() < 1e-9);
-        assert!((e.yaw - 90.0).abs() < 1e-4);
-        assert!((e.prev_pos[0] - 2.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn yaw_takes_short_way() {
-        let mut e = Entity::new(1, 0, 0, [0.0; 3], 170.0, 0.0, 170.0);
-        e.set_target(None, Some((-170.0, 0.0)));
-        for _ in 0..3 {
-            e.tick();
-        }
-        assert!((wrap(e.yaw - 190.0)).abs() < 1e-3);
-    }
-
-    #[test]
-    fn unpack() {
-        assert_eq!(unpack_degrees(64), 90.0);
-        assert_eq!(unpack_degrees(-128), -180.0);
-    }
-}
-
 /// Типы без выбираемого хитбокса (Entity#isPickable = false / не цель луча).
 const NOT_PICKABLE: &[&str] = &[
     "item",
@@ -507,5 +459,53 @@ impl Entity {
             [p[0] - r, p[1], p[2] - r],
             [p[0] + r, p[1] + f64::from(h), p[2] + r],
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projectile_snaps_to_server_position() {
+        // VANILLA: у снарядов NO_OP-интерполяция — позиция из пакета ставится сразу.
+        let arrow = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+            .iter()
+            .position(|n| *n == "arrow")
+            .expect("arrow есть в реестре 26.3");
+        let mut e = Entity::new(1, 0, arrow, [0.0; 3], 0.0, 0.0, 0.0);
+        e.set_target(Some([1.0, 2.0, 3.0]), Some((90.0, 10.0)));
+        assert_eq!(e.pos, [1.0, 2.0, 3.0]);
+        assert!(!e.interpolating());
+        assert_eq!((e.yaw, e.pitch), (90.0, 10.0));
+    }
+
+    #[test]
+    fn lerps_to_target_in_three_ticks() {
+        let mut e = Entity::new(1, 0, 0, [0.0; 3], 0.0, 0.0, 0.0);
+        e.set_target(Some([3.0, 0.0, 0.0]), Some((90.0, 0.0)));
+        e.tick();
+        assert!((e.pos[0] - 1.0).abs() < 1e-9);
+        e.tick();
+        e.tick();
+        assert!((e.pos[0] - 3.0).abs() < 1e-9);
+        assert!((e.yaw - 90.0).abs() < 1e-4);
+        assert!((e.prev_pos[0] - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn yaw_takes_short_way() {
+        let mut e = Entity::new(1, 0, 0, [0.0; 3], 170.0, 0.0, 170.0);
+        e.set_target(None, Some((-170.0, 0.0)));
+        for _ in 0..3 {
+            e.tick();
+        }
+        assert!((wrap(e.yaw - 190.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn unpack() {
+        assert_eq!(unpack_degrees(64), 90.0);
+        assert_eq!(unpack_degrees(-128), -180.0);
     }
 }

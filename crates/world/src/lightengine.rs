@@ -327,13 +327,12 @@ mod track_light {
             (0..crate::generated::b26_3::STATE_COUNT)
                 .filter_map(BlockState::from_id)
                 .find(|s| s.name() == n)
-                .unwrap()
+                .expect("блок есть в реестре 26.3")
         };
         c.set_block(0, 99, 0, st("grass_block"));
         c.set_block(0, 100, 0, st("short_grass"));
         let above = c.light_get(Kind::Sky, 0, 100, 0);
         let above2 = c.light_get(Kind::Sky, 0, 101, 0);
-        let under = c.light_get(Kind::Sky, 0, 98, 0);
         assert_eq!(above, Some(15));
         assert_eq!(above2, Some(15));
     }

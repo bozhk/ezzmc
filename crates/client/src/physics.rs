@@ -929,7 +929,14 @@ impl Player {
         // Отладка (dbg): AABB внутри твёрдого бокса после шага — коллизия такой бокс игнорирует (gap < -EPS).
         if tracing::enabled!(target: "dbg", tracing::Level::DEBUG) {
             let a = self.aabb();
-            let region = [a[0] - 0.01, a[1] - 0.01, a[2] - 0.01, a[3] + 0.01, a[4] + 0.01, a[5] + 0.01];
+            let region = [
+                a[0] - 0.01,
+                a[1] - 0.01,
+                a[2] - 0.01,
+                a[3] + 0.01,
+                a[4] + 0.01,
+                a[5] + 0.01,
+            ];
             for b in gather(w, region) {
                 let ov = [
                     a[3].min(b[3]) - a[0].max(b[0]),
@@ -1967,4 +1974,3 @@ mod tests {
         assert!(p.flying);
     }
 }
-

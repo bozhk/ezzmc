@@ -12,3 +12,6 @@
 
 # Дампы профайлера
 profile.json.gz
+
+# Python-кэш генераторов
+__pycache__/

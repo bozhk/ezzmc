@@ -2134,7 +2134,8 @@ impl ApplicationHandler for App {
                                                 }
                                                 if v.inv.cursor.is_none() {
                                                     if let Some(n) = creativescreen::hover_text(
-                                                        &*t, creative, &v.inv, lang, gwf, ghf, mx, my,
+                                                        &*t, creative, &v.inv, lang, gwf, ghf, mx,
+                                                        my,
                                                     ) {
                                                         tooltip::draw_colored(
                                                             t, &n, mx, my, gwf, ghf,
@@ -2195,7 +2196,8 @@ impl ApplicationHandler for App {
                                                     if let Some(st) = invscreen::hover_item(
                                                         invr, &lay, gwf, ghf, mx, my,
                                                     ) {
-                                                        let lines = tooltip::stack_lines(lang, &*t, st);
+                                                        let lines =
+                                                            tooltip::stack_lines(lang, &*t, st);
                                                         tooltip::draw_colored(
                                                             t, &lines, mx, my, gwf, ghf,
                                                         );

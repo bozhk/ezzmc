@@ -7,7 +7,6 @@ Potions.java + PotionIds.java (эффекты зелий).
   I|имя|редкость|max_damage или -|компонент,компонент,...
   M|предмет|атрибут|сумма|операция|слот|id модификатора
   J|предмет|песня (дефолтный jukebox_playable, ключ реестра без minecraft:)
-  D|предмет|компонент,компонент (дефолтный tooltip_display: скрытые компоненты)
   A|атрибут|сентимент (POSITIVE/NEUTRAL/NEGATIVE)
   E|эффект|категория (BENEFICIAL/HARMFUL/NEUTRAL)
   T|эффект|атрибут|сумма|операция|id модификатора
@@ -90,10 +89,6 @@ def main():
         jp = comps.get("minecraft:jukebox_playable")
         if isinstance(jp, str):
             lines.append(f"J|{name}|{short(jp)}")
-        td = comps.get("minecraft:tooltip_display")
-        if isinstance(td, dict) and td.get("hidden_components"):
-            hidden = ",".join(short(h) for h in td["hidden_components"])
-            lines.append(f"D|{name}|{hidden}")
         for mod in comps.get("minecraft:attribute_modifiers", []):
             lines.append(
                 f"M|{name}|{short(mod['type'])}|{mod['amount']!r}|{mod['operation']}|{mod['slot']}|{short(mod['id'])}"

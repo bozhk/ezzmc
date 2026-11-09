@@ -244,7 +244,11 @@ fn run(
         *g = r
             .entries
             .iter()
-            .map(|(n, _)| n.strip_prefix("minecraft:").unwrap_or(n.as_str()).to_owned())
+            .map(|(n, _)| {
+                n.strip_prefix("minecraft:")
+                    .unwrap_or(n.as_str())
+                    .to_owned()
+            })
             .collect();
     }
     // Пластинки для подсказки: описание jukebox_song, порядок = holder id.
@@ -255,7 +259,14 @@ fn run(
         *g = r
             .entries
             .iter()
-            .map(|(_, t)| t.as_ref().and_then(|t| t.get("description")).cloned())
+            .map(|(n, t)| {
+                (
+                    n.strip_prefix("minecraft:")
+                        .unwrap_or(n.as_str())
+                        .to_owned(),
+                    t.as_ref().and_then(|t| t.get("description")).cloned(),
+                )
+            })
             .collect();
     }
     // Трим брони: имена материалов/паттернов в порядке holder id.
@@ -268,6 +279,23 @@ fn run(
         *g = (
             names("minecraft:trim_material"),
             names("minecraft:trim_pattern"),
+        );
+    }
+    // Описания трима (цвет материала, текст узора) для подсказки брони.
+    if let Ok(mut g) = crate::tooltip::TRIM_DESC.lock() {
+        let descs = |k: &str| -> Vec<Option<ezzmc_protocol::nbt::Tag>> {
+            reg(k)
+                .map(|r| {
+                    r.entries
+                        .iter()
+                        .map(|(_, t)| t.as_ref().and_then(|t| t.get("description")).cloned())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        *g = (
+            descs("minecraft:trim_material"),
+            descs("minecraft:trim_pattern"),
         );
     }
     // Id часов overworld в реестре world_clock (holder = индекс в порядке registry_data).
