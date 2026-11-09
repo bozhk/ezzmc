@@ -31,6 +31,10 @@ pub trait Collider {
     fn boxes(&self, x: i32, y: i32, z: i32) -> &'static [[f64; 6]];
     /// Имя блока без пространства имён (`"air"` для пустоты).
     fn name(&self, x: i32, y: i32, z: i32) -> &'static str;
+    /// Динамические боксы (движущийся поршень) в координатах блока.
+    fn extra_boxes(&self, _x: i32, _y: i32, _z: i32) -> Vec<[f64; 6]> {
+        Vec::new()
+    }
     /// Загружен ли чанк (для `travelInAir`).
     fn has_chunk(&self, x: i32, z: i32) -> bool;
     /// Высота воды в блоке (0 — воды нет; 1 — полный блок или вода сверху).
@@ -56,6 +60,14 @@ impl Collider for Level {
         let s = self.chunks.block(x, y, z);
         s.props()
             .map_or(&[], |p| bi::collision_boxes_of(p.collision_shape))
+    }
+    fn extra_boxes(&self, x: i32, y: i32, z: i32) -> Vec<[f64; 6]> {
+        match self.pistons.get(&(x, y, z)) {
+            Some(e) if self.chunks.block(x, y, z).name() == "moving_piston" => {
+                crate::pistonview::collision_boxes(e, None)
+            }
+            _ => Vec::new(),
+        }
     }
     fn name(&self, x: i32, y: i32, z: i32) -> &'static str {
         self.chunks.block(x, y, z).name()
@@ -95,6 +107,62 @@ fn fluid_flow_of(level: &Level, x: i32, y: i32, z: i32, lava: bool) -> [f64; 3] 
     ezzmc_mesh::fluid::flow3(&g, [x, y, z], &fl)
 }
 
+/// VANILLA: EntityFluidInteraction#update для произвольного бокса: (высота, поток·0.014/0.0023333
+/// усреднённый) отдельно для воды и лавы. Возвращает `[(height, push); 2]` (вода, лава).
+pub fn fluid_interaction(level: &Level, b: [f64; 6]) -> [(f64, [f64; 3]); 2] {
+    let d = 0.001;
+    let bx = [b[0] + d, b[1] + d, b[2] + d, b[3] - d, b[4] - d, b[5] - d];
+    let lo = [
+        bx[0].floor() as i32,
+        bx[1].floor() as i32,
+        bx[2].floor() as i32,
+    ];
+    let hi = [
+        bx[3].ceil() as i32 - 1,
+        bx[4].ceil() as i32 - 1,
+        bx[5].ceil() as i32 - 1,
+    ];
+    let mut acc = [FluidAcc::default(), FluidAcc::default()];
+    for x in lo[0]..=hi[0] {
+        for y in lo[1]..=hi[1] {
+            for z in lo[2]..=hi[2] {
+                for (i, lava) in [false, true].into_iter().enumerate() {
+                    let hh = fluid_height_of(level, x, y, z, lava);
+                    if hh <= 0.0 {
+                        continue;
+                    }
+                    let top = f64::from(y) + f64::from(hh);
+                    if top < bx[1] {
+                        continue;
+                    }
+                    let a = &mut acc[i];
+                    a.height = a.height.max(top - b[1]);
+                    let mut fv = fluid_flow_of(level, x, y, z, lava);
+                    a.cur_h = a.cur_h.max(a.height);
+                    if a.cur_h < 0.4 {
+                        fv = fv.map(|c| c * a.cur_h);
+                    }
+                    for (t, c) in a.cur.iter_mut().zip(fv) {
+                        *t += c;
+                    }
+                    a.n += 1;
+                }
+            }
+        }
+    }
+    let push = |a: &FluidAcc, scale: f64| -> [f64; 3] {
+        if a.n == 0 || len_sq(a.cur) < f64::from(1.0e-5f32) {
+            return [0.0; 3];
+        }
+        let k = scale / f64::from(a.n);
+        a.cur.map(|c| c * k)
+    };
+    [
+        (acc[0].height, push(&acc[0], 0.014)),
+        (acc[1].height, push(&acc[1], 0.007 / 3.0)),
+    ]
+}
+
 /// Состояние клавиш на тик.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Input {
@@ -108,10 +176,17 @@ pub struct Input {
 }
 
 impl Input {
-    /// VANILLA: KeyboardInput#calculateImpulse → Vec2(left, forward).
+    /// VANILLA: KeyboardInput#calculateImpulse → Vec2(left, forward), нормализованный.
     fn move_vector(self) -> (f32, f32) {
         let f = |p: bool, m: bool| f32::from(u8::from(p)) - f32::from(u8::from(m));
-        (f(self.left, self.right), f(self.forward, self.back))
+        // VANILLA: KeyboardInput#tick — new Vec2(left, forward).normalized() (dist < 1e-4 → ZERO).
+        let (x, y) = (f(self.left, self.right), f(self.forward, self.back));
+        let d = (x * x + y * y).sqrt();
+        if d < 1.0e-4 {
+            (0.0, 0.0)
+        } else {
+            (x / d, y / d)
+        }
     }
 }
 
@@ -123,6 +198,8 @@ pub struct Player {
     pub on_ground: bool,
     pub horizontal_collision: bool,
     pub crouching: bool,
+    /// VANILLA: LivingEntity#isUsingItem (еда/питьё: ввод ×0.2, спринт не стартует).
+    pub using_item: bool,
     /// VANILLA: Pose.SWIMMING вне воды — ползание под 1.5-блочным потолком (isVisuallyCrawling).
     pub crawling: bool,
     pub sprinting: bool,
@@ -142,7 +219,6 @@ pub struct Player {
     /// VANILLA: FirstPersonHandsAndItems#mainHandHeight (+old) и Player#itemSwapTicker.
     pub hand_h: f32,
     pub hand_h_o: f32,
-    swap_ticker: u32,
     /// VANILLA: Entity#getFluidHeight(WATER) по AABB.
     fluid_h: f64,
     lava_h: f64,
@@ -152,10 +228,20 @@ pub struct Player {
     pub fall_distance: f64,
     /// VANILLA: Entity#stuckSpeedMultiplier.
     stuck: [f64; 3],
+    piston_deltas: [f64; 3],
+    piston_time: i64,
     no_jump_delay: u8,
     jump_trigger_time: u8,
     sprint_trigger_time: u8,
+    /// VANILLA: Options#sprintWindow (по умолчанию 7, 0 — двойное нажатие выключено).
+    pub sprint_window: u8,
     was_jump: bool,
+    /// VANILLA: Options#autoJump, LocalPlayer#autoJumpTime.
+    pub auto_jump: bool,
+    auto_jump_time: u8,
+    /// Последний ввод движения (left, forward) и yaw — для updateAutoJump.
+    last_move: (f32, f32),
+    last_yaw: f32,
     had_forward: bool,
     /// VANILLA: ClientAvatarState walkDist/walkDistO/bob/bobO (боббинг камеры).
     walk_dist: f32,
@@ -177,6 +263,7 @@ impl Player {
             on_ground: false,
             horizontal_collision: false,
             crouching: false,
+            using_item: false,
             crawling: false,
             sprinting: false,
             flying: false,
@@ -191,17 +278,23 @@ impl Player {
             y_bob_o: 0.0,
             hand_h: 0.0,
             hand_h_o: 0.0,
-            swap_ticker: 0,
             fluid_h: 0.0,
             lava_h: 0.0,
             mayfly: false,
             fly_speed: 0.05,
             fall_distance: 0.0,
             stuck: [0.0; 3],
+            piston_deltas: [0.0; 3],
+            piston_time: i64::MIN,
             no_jump_delay: 0,
             jump_trigger_time: 0,
             sprint_trigger_time: 0,
+            sprint_window: 7,
             was_jump: false,
+            auto_jump: false,
+            auto_jump_time: 0,
+            last_move: (0.0, 0.0),
+            last_yaw: 0.0,
             had_forward: false,
             walk_dist: 0.0,
             walk_dist_o: 0.0,
@@ -240,7 +333,33 @@ impl Player {
         }
     }
 
-    fn aabb(&self) -> [f64; 6] {
+    pub fn aabb_pub(&self) -> [f64; 6] {
+        self.aabb()
+    }
+
+    /// VANILLA: Entity#move(MoverType.PISTON) + limitPistonMovement (0.51 за тик по оси).
+    pub fn piston_move(&mut self, w: &dyn Collider, mut m: [f64; 3], game_time: i64) {
+        if self.piston_time != game_time {
+            self.piston_deltas = [0.0; 3];
+            self.piston_time = game_time;
+        }
+        if len_sq(m) > 1.0e-8 {
+            for (mi, pd) in m.iter_mut().zip(self.piston_deltas.iter_mut()) {
+                if *mi != 0.0 {
+                    let c = (*mi + *pd).clamp(-0.51, 0.51);
+                    *mi = c - *pd;
+                    *pd = c;
+                }
+            }
+        }
+        if m == [0.0; 3] {
+            return;
+        }
+        let r = self.collide(w, m);
+        self.pos = [self.pos[0] + r[0], self.pos[1] + r[1], self.pos[2] + r[2]];
+    }
+
+    pub(crate) fn aabb(&self) -> [f64; 6] {
         aabb_at(self.pos, self.height())
     }
 
@@ -263,7 +382,7 @@ impl Player {
     pub fn post_tick(&mut self, yaw: f32, pitch: f32) {
         self.eye_h_o = self.eye_h;
         self.eye_h += (self.eye_height() - self.eye_h) * 0.5;
-        self.anim.swimming = self.swimming;
+        self.anim.swimming = self.swimming || self.crawling; // VANILLA: Entity#isVisuallySwimming (Pose.SWIMMING)
         self.anim.in_water = self.in_water;
         self.anim.tick(self.pos, self.prev_pos, yaw, pitch);
         // LocalPlayer#aiStep: xBob/yBob += (rot − bob)·0.5.
@@ -271,18 +390,10 @@ impl Player {
         self.x_bob_o = self.x_bob;
         self.x_bob += (pitch - self.x_bob) * 0.5;
         self.y_bob += (yaw - self.y_bob) * 0.5;
-        // Player#aiStep: itemSwapTicker++; FirstPersonHandsAndItems#tick (пустая рука, delay = 5 тиков).
-        self.swap_ticker += 1;
-        self.hand_h_o = self.hand_h;
-        let scale = ((self.swap_ticker as f32 + 1.0) / 5.0).clamp(0.0, 1.0);
-        let target = scale * scale * scale;
-        self.hand_h += (target - self.hand_h).clamp(-0.4, 0.4);
     }
 
     /// VANILLA: LivingEntity#swing(MAIN_HAND).
     pub fn swing(&mut self) {
-        // MultiPlayerGameMode/Minecraft#startAttack: resetAttackStrengthTicker (itemSwapTicker = 0).
-        self.swap_ticker = 0;
         self.anim.swing();
     }
 
@@ -298,6 +409,16 @@ impl Player {
 
     /// VANILLA: LocalPlayer#aiStep (порядок как в ванили).
     pub fn tick(&mut self, w: &dyn Collider, input: Input, yaw: f32) {
+        let mut input = input;
+        // VANILLA: LocalPlayer#aiStep — autoJumpTime → input.makeJump().
+        let mut was_auto_jump = false;
+        if self.auto_jump_time > 0 {
+            self.auto_jump_time -= 1;
+            was_auto_jump = true;
+            input.jump = true;
+        }
+        self.last_yaw = yaw;
+        self.last_move = input.move_vector();
         self.prev_pos = self.pos;
         self.update_fluid_state(w);
         // ClientAvatarState#tick + AbstractClientPlayer#updateBob
@@ -329,22 +450,25 @@ impl Player {
         self.crouching = want && !self.crawling;
 
         // спринт
-        if input.sneak || input.back {
+        // VANILLA: LocalPlayer#aiStep — isSlowDueToUsingItem обнуляет sprintTriggerTime.
+        if input.sneak || input.back || self.using_item {
             self.sprint_trigger_time = 0;
         }
         let moving_slowly = self.crouching || self.crawling;
         let shallow = self.in_water && !self.under_water;
         if !self.sprinting
-            && fwd >= 0.8
+            && fwd > 1.0e-5 // VANILLA: ClientInput#hasForwardImpulse
             && (!shallow || self.flying)
             && (!moving_slowly || self.under_water)
+            && !self.using_item
+        // VANILLA: canStartSprinting → !isSlowDueToUsingItem
         {
             if !had_forward {
                 if self.sprint_trigger_time > 0 {
                     self.sprinting = true;
                 } else {
-                    // VANILLA: options.sprintWindow (по умолчанию 7)
-                    self.sprint_trigger_time = 7;
+                    // VANILLA: options.sprintWindow
+                    self.sprint_trigger_time = self.sprint_window;
                 }
             }
             if input.sprint {
@@ -367,7 +491,7 @@ impl Player {
         }
 
         // творческий полёт: двойное нажатие прыжка
-        if self.mayfly && !was_jump && input.jump {
+        if self.mayfly && !was_jump && input.jump && !was_auto_jump {
             if self.jump_trigger_time == 0 {
                 self.jump_trigger_time = 7;
             } else if !self.swimming {
@@ -397,7 +521,7 @@ impl Player {
         }
 
         // applyInput
-        let (xxa, zza) = modify_input((left, fwd), moving_slowly);
+        let (xxa, zza) = modify_input((left, fwd), moving_slowly, self.using_item);
 
         // LocalPlayer#aiStep: sneak в воде → goDownInWater.
         if self.in_water && input.sneak {
@@ -770,6 +894,7 @@ impl Player {
     /// VANILLA: Entity#move (MoverType.SELF).
     fn do_move(&mut self, w: &dyn Collider, delta: [f64; 3]) {
         let before = self.pos;
+        let before_xz = (self.pos[0], self.pos[2]);
         // VANILLA: Entity#move — stuckSpeedMultiplier (паутина/ягоды): движение умножается, скорость обнуляется.
         let mut delta = delta;
         if len_sq(self.stuck) > 1.0e-7 {
@@ -793,6 +918,11 @@ impl Player {
             (self.pos[2] - before[2]) as f32,
         );
         self.walk_dist += dx.hypot(dz) * 0.6;
+        // LocalPlayer#move → updateAutoJump(deltaX, deltaZ) (после обновления on_ground — см. ниже).
+        let auto_delta = (
+            (self.pos[0] - before_xz.0) as f32,
+            (self.pos[2] - before_xz.1) as f32,
+        );
         let x_col = !mth_equal(delta[0], m[0]);
         let z_col = !mth_equal(delta[2], m[2]);
         self.horizontal_collision = x_col || z_col;
@@ -845,6 +975,138 @@ impl Player {
         }
         self.honey_slide(w);
         self.stuck = self.inside_stuck(w);
+        self.update_auto_jump(w, auto_delta.0, auto_delta.1);
+    }
+
+    /// VANILLA: LocalPlayer#updateAutoJump + canAutoJump (26.3). Jump Boost не отслеживается (jumpHeight = 1.2).
+    fn update_auto_jump(&mut self, w: &dyn Collider, xa: f32, za: f32) {
+        let (mx, mz) = self.last_move;
+        // canAutoJump: !isPassenger не нужно (пассажира нет); isStayingOnGroundSurface = приседание.
+        if !(self.auto_jump
+            && self.auto_jump_time == 0
+            && self.on_ground
+            && !self.crouching
+            && mx * mx + mz * mz > 0.0
+            && block_jump_factor(w, self.pos) >= 1.0)
+        {
+            return;
+        }
+        let speed = self.speed();
+        let (mut dx, mut dz) = (f64::from(xa), f64::from(za));
+        let mut dist_sq = xa * xa + za * za;
+        if dist_sq <= 0.001 {
+            let (ixa, iza) = (speed * mx, speed * mz);
+            let rad = self.last_yaw * (std::f32::consts::PI / 180.0);
+            let (sin, cos) = (rad.sin(), rad.cos());
+            dx = f64::from(ixa * cos - iza * sin);
+            dz = f64::from(iza * cos + ixa * sin);
+            dist_sq = (dx * dx + dz * dz) as f32;
+            if dist_sq <= 0.001 {
+                return;
+            }
+        }
+        let inv = 1.0 / dist_sq.sqrt();
+        let dir = [dx * f64::from(inv), 0.0, dz * f64::from(inv)];
+        // getForward (только x/z).
+        let (yr, xr) = (
+            self.last_yaw * (std::f32::consts::PI / 180.0),
+            self.pitch * (std::f32::consts::PI / 180.0),
+        );
+        let (fx, fz) = (
+            f64::from(-yr.sin() * xr.cos()),
+            f64::from(yr.cos() * xr.cos()),
+        );
+        if ((fx * dir[0] + fz * dir[2]) as f32) < -0.15 {
+            return;
+        }
+        let bb = self.aabb();
+        let solid = |x: i32, y: i32, z: i32| !w.boxes(x, y, z).is_empty();
+        let (px, pz) = (self.pos[0].floor() as i32, self.pos[2].floor() as i32);
+        let mut ceil_y = bb[4].floor() as i32;
+        if solid(px, ceil_y, pz) {
+            return;
+        }
+        ceil_y += 1;
+        if solid(px, ceil_y, pz) {
+            return;
+        }
+        let jump_height = 1.2f32;
+        let look = (speed * 7.0).max(1.0 / inv);
+        let begin = self.pos;
+        let end = [
+            self.pos[0] + f64::from(xa) + dir[0] * f64::from(look),
+            self.pos[1],
+            self.pos[2] + f64::from(za) + dir[2] * f64::from(look),
+        ];
+        let (pw, ph) = (WIDTH, bb[4] - bb[1]);
+        let pw_f = f64::from(pw as f32);
+        let test = [
+            begin[0].min(end[0]) - pw_f,
+            begin[1].min(end[1]),
+            begin[2].min(end[2]) - pw_f,
+            begin[0].max(end[0]) + pw_f,
+            begin[1].max(end[1]) + ph,
+            begin[2].max(end[2]) + pw_f,
+        ];
+        let y51 = f64::from(0.51f32);
+        // right = dir × (0,1,0) = (-dir.z, 0, dir.x)
+        let off = [-dir[2] * pw_f * 0.5, dir[0] * pw_f * 0.5];
+        let seg = |sx: f64, sz: f64| -> [f64; 6] {
+            let (ex, ez) = (end[0] + sx, end[2] + sz);
+            let (bx, bz) = (begin[0] + sx, begin[2] + sz);
+            [
+                bx.min(ex),
+                begin[1] + y51,
+                bz.min(ez),
+                bx.max(ex),
+                begin[1] + y51,
+                bz.max(ez),
+            ]
+        };
+        let left = seg(-off[0], -off[1]);
+        let right = seg(off[0], off[1]);
+        // AABB#intersects(Vec3, Vec3) — нестрогое по краям не нужно: строгое пересечение.
+        let hit = |b: &[f64; 6], s: &[f64; 6]| {
+            b[0] < s[3] && b[3] > s[0] && b[1] < s[4] && b[4] > s[1] && b[2] < s[5] && b[5] > s[2]
+        };
+        let mut obstacle = f32::MIN_POSITIVE;
+        let mut ceiling = ceil_y;
+        for b in gather(w, test) {
+            if !(hit(&b, &left) || hit(&b, &right)) {
+                continue;
+            }
+            obstacle = b[4] as f32;
+            let (cx, cy, cz) = (
+                ((b[0] + b[3]) * 0.5).floor() as i32,
+                ((b[1] + b[4]) * 0.5).floor() as i32,
+                ((b[2] + b[5]) * 0.5).floor() as i32,
+            );
+            let mut steps = 1;
+            while (steps as f32) < jump_height {
+                let (ay, shape) = (cy + steps, w.boxes(cx, cy + steps, cz));
+                if !shape.is_empty() {
+                    let max_y = shape.iter().map(|s| s[4]).fold(0.0f64, f64::max);
+                    obstacle = (max_y + f64::from(ay)) as f32;
+                    if obstacle - self.pos[1] as f32 > jump_height {
+                        return;
+                    }
+                }
+                if steps > 1 {
+                    ceiling += 1;
+                    if solid(px, ceiling, pz) {
+                        return;
+                    }
+                }
+                steps += 1;
+            }
+            break;
+        }
+        if obstacle != f32::MIN_POSITIVE {
+            let ydelta = obstacle - self.pos[1] as f32;
+            if ydelta > 0.5 && ydelta <= jump_height {
+                self.auto_jump_time = 1;
+            }
+        }
     }
 
     /// VANILLA: HoneyBlock#entityInside → isSlidingDown/doSlideMovement.
@@ -1012,11 +1274,15 @@ impl Player {
 }
 
 /// VANILLA: LocalPlayer#modifyInput (0.98, подкрадывание, «квадратное» движение).
-fn modify_input(i: (f32, f32), slow: bool) -> (f32, f32) {
+fn modify_input(i: (f32, f32), slow: bool, using: bool) -> (f32, f32) {
     if i.0 * i.0 + i.1 * i.1 == 0.0 {
         return i;
     }
     let mut v = (i.0 * 0.98, i.1 * 0.98);
+    // VANILLA: LocalPlayer#modifyInput — itemUseSpeedMultiplier (UseEffects.DEFAULT 0.2).
+    if using {
+        v = (v.0 * 0.2, v.1 * 0.2);
+    }
     if slow {
         v = (v.0 * SNEAKING_SPEED, v.1 * SNEAKING_SPEED);
     }
@@ -1073,7 +1339,7 @@ fn shift(b: [f64; 6], x: f64, y: f64, z: f64) -> [f64; 6] {
 }
 
 /// VANILLA: AABB#expandTowards.
-fn expand_towards(b: [f64; 6], d: [f64; 3]) -> [f64; 6] {
+pub(crate) fn expand_towards(b: [f64; 6], d: [f64; 3]) -> [f64; 6] {
     let mut r = b;
     for i in 0..3 {
         if d[i] < 0.0 {
@@ -1090,14 +1356,15 @@ fn overlaps(a: &[f64; 6], b: &[f64; 6]) -> bool {
 }
 
 /// Боксы коллизии всех блоков, пересекающих `region` (мировые координаты).
-fn gather(w: &dyn Collider, region: [f64; 6]) -> Vec<[f64; 6]> {
+pub(crate) fn gather(w: &dyn Collider, region: [f64; 6]) -> Vec<[f64; 6]> {
     let lo = |v: f64| (v - EPS).floor() as i32 - 1;
     let hi = |v: f64| (v + EPS).floor() as i32 + 1;
     let mut out = Vec::new();
     for x in lo(region[0])..=hi(region[3]) {
         for y in lo(region[1])..=hi(region[4]) {
             for z in lo(region[2])..=hi(region[5]) {
-                for b in w.boxes(x, y, z) {
+                let extra = w.extra_boxes(x, y, z);
+                for b in w.boxes(x, y, z).iter().chain(extra.iter()) {
                     let wb = [
                         b[0] + f64::from(x),
                         b[1] + f64::from(y),
@@ -1145,7 +1412,7 @@ fn collide_axis(ax: usize, bb: [f64; 6], shapes: &[[f64; 6]], mut d: f64) -> f64
 }
 
 /// VANILLA: Entity#collideWithShapes — порядок осей Direction#axisStepOrder (Y, затем большая из X/Z).
-fn collide_with(m: [f64; 3], bb: [f64; 6], shapes: &[[f64; 6]]) -> [f64; 3] {
+pub(crate) fn collide_with(m: [f64; 3], bb: [f64; 6], shapes: &[[f64; 6]]) -> [f64; 3] {
     if shapes.is_empty() {
         return m;
     }
@@ -1181,7 +1448,7 @@ fn block_pos(p: [f64; 3]) -> [i32; 3] {
 }
 
 /// VANILLA: Block#getFriction (Blocks.java).
-fn block_friction_of(name: &str) -> f32 {
+pub(crate) fn block_friction_of(name: &str) -> f32 {
     match name {
         "slime_block" => 0.8,
         "ice" | "packed_ice" | "frosted_ice" => 0.98,
@@ -1294,6 +1561,25 @@ mod tests {
         fn has_chunk(&self, _: i32, _: i32) -> bool {
             true
         }
+    }
+
+    #[test]
+    fn auto_jump_climbs_one_block_step() {
+        let w = Flat {
+            extra: (3..30)
+                .flat_map(|z| (-1..=1).map(move |x| [x, 0, z]))
+                .collect(),
+        };
+        let run = |auto: bool| {
+            let mut p = Player::new([0.5, 0.0, 0.5]);
+            p.auto_jump = auto;
+            for _ in 0..40 {
+                p.tick(&w, fwd(), 0.0);
+            }
+            p.pos
+        };
+        assert!(run(true)[1] >= 1.0 && run(true)[2] > 3.0);
+        assert!(run(false)[1] < 0.1);
     }
 
     #[test]

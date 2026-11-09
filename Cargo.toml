@@ -73,3 +73,10 @@ strip = "none"
 inherits = "release"
 debug = true
 strip = "none"
+
+# Быстрая сборка для повседневной проверки: `cargo build --profile fast -p ezzmc-client`
+[profile.fast]
+inherits = "release"
+lto = "off"
+codegen-units = 16
+incremental = true

@@ -28,6 +28,10 @@ pub struct HumanoidState {
     pub swing_arm: Arm,
     /// Прогресс позы плавания 0..1 (`swimAmount`).
     pub swim_amount: f32,
+    /// Предмет в правой руке (ArmPose.ITEM).
+    pub item_right: bool,
+    /// Предмет в левой руке.
+    pub item_left: bool,
 }
 
 /// Индексы основных частей гуманоида.
@@ -240,6 +244,13 @@ pub fn setup_anim(m: &mut Model, p: &HumanoidParts, s: &HumanoidState) {
     // speedValue = 1 для игрока.
     m.parts[p.right_arm].pose.x_rot = (pos * 0.6662 + PI).cos() * 2.0 * spd * 0.5;
     m.parts[p.left_arm].pose.x_rot = (pos * 0.6662).cos() * 2.0 * spd * 0.5;
+    // VANILLA: HumanoidModel#poseRightArm (ITEM): xRot = xRot·0.5 − π/10.
+    if s.item_left {
+        m.parts[p.left_arm].pose.x_rot = m.parts[p.left_arm].pose.x_rot * 0.5 - PI / 10.0;
+    }
+    if s.item_right {
+        m.parts[p.right_arm].pose.x_rot = m.parts[p.right_arm].pose.x_rot * 0.5 - PI / 10.0;
+    }
     m.parts[p.right_leg].pose.x_rot = (pos * 0.6662).cos() * 1.4 * spd;
     m.parts[p.left_leg].pose.x_rot = (pos * 0.6662 + PI).cos() * 1.4 * spd;
     m.parts[p.right_leg].pose.y_rot = 0.005;

@@ -48,6 +48,14 @@ impl Padded {
         Padded { blocks, light }
     }
 
+    /// VANILLA: MovingBlockRenderState#getBlockState — воздух везде, кроме `p`; свет остаётся из мира.
+    pub fn isolate(&mut self, p: [i32; 3], state: BlockState) {
+        self.blocks.fill(BlockState::AIR);
+        if Self::inside(p[0], p[1], p[2]) {
+            self.blocks[Self::idx(p[0], p[1], p[2])] = state;
+        }
+    }
+
     /// Для тестов: заполнить по локальным координатам.
     pub fn from_fn(f: impl Fn(i32, i32, i32) -> BlockState) -> Padded {
         let mut blocks = vec![BlockState::AIR; N * N * N];

@@ -10,6 +10,8 @@ pub enum Kind {
     Slider(f32, f32, f32),
     /// (значение в файле, ключ перевода).
     Cycle(&'static [(&'static str, &'static str)]),
+    /// Логарифмический слайдер: целый шаг min..max, значение = 10^(шаг/100) (Options#logMouse).
+    Log(i32, i32),
 }
 
 pub struct Def {
@@ -28,7 +30,12 @@ const fn d(key: &'static str, lang: &'static str, kind: Kind, default: &'static 
     }
 }
 
-use Kind::{Cycle, Slider, Toggle};
+use Kind::{Cycle, Log, Slider, Toggle};
+
+const HOLD_TOGGLE: &[(&str, &str)] = &[
+    ("false", "options.key.hold"),
+    ("true", "options.key.toggle"),
+];
 
 pub const FOV: Def = d("fov", "options.fov", Slider(30.0, 110.0, 1.0), "70.0");
 
@@ -244,6 +251,58 @@ pub const CHAT: &[Def] = &[
     ),
 ];
 
+/// VANILLA: MouseSettingsScreen#options.
+pub const MOUSE: &[Def] = &[
+    d(
+        "mouseSensitivity",
+        "options.sensitivity",
+        Slider(0.0, 1.0, 0.0),
+        "0.5",
+    ),
+    d(
+        "mouseWheelSensitivity",
+        "options.mouseWheelSensitivity",
+        Log(-200, 100),
+        "1.0",
+    ),
+    d(
+        "discrete_mouse_scroll",
+        "options.discrete_mouse_scroll",
+        Toggle,
+        "false",
+    ),
+    d("invertXMouse", "options.invertMouseX", Toggle, "false"),
+    d("invertYMouse", "options.invertMouseY", Toggle, "false"),
+    d(
+        "allowCursorChanges",
+        "options.allowCursorChanges",
+        Toggle,
+        "true",
+    ),
+];
+
+/// VANILLA: ControlsScreen#options (после кнопок Mouse Settings / Key Binds).
+pub const CONTROLS: &[Def] = &[
+    d("toggleCrouch", "key.sneak", Cycle(HOLD_TOGGLE), "false"),
+    d("toggleSprint", "key.sprint", Cycle(HOLD_TOGGLE), "false"),
+    d("toggleAttack", "key.attack", Cycle(HOLD_TOGGLE), "false"),
+    d("toggleUse", "key.use", Cycle(HOLD_TOGGLE), "false"),
+    d("autoJump", "options.autoJump", Toggle, "false"),
+    d(
+        "sprintWindow",
+        "options.sprintWindow",
+        Slider(0.0, 10.0, 1.0),
+        "7",
+    ),
+    d("quitShortcuts", "options.quitShortcuts", Toggle, "true"),
+    d(
+        "operatorItemsTab",
+        "options.operatorItemsTab",
+        Toggle,
+        "false",
+    ),
+];
+
 pub const ACCESSIBILITY: &[Def] = &[
     d("showSubtitles", "options.showSubtitles", Toggle, "false"),
     d(
@@ -279,10 +338,28 @@ impl Options {
             .filter_map(|l| l.split_once(':'))
             .map(|(k, v)| (k.to_owned(), v.to_owned()))
             .collect();
-        Self {
+        let o = Self {
             path: path.to_owned(),
             kv,
+        };
+        o.apply_audio();
+        o
+    }
+
+    /// VANILLA: SoundManager#updateSourceVolume — громкость категорий из options.txt.
+    pub fn apply_audio(&self) {
+        use crate::audio::Cat::*;
+        let cats = [
+            Master, Music, Records, Weather, Blocks, Hostile, Neutral, Players, Ambient, Voice,
+        ];
+        for (def, cat) in SOUND.iter().zip(cats) {
+            crate::audio::set_volume(cat, self.f32(def));
         }
+    }
+
+    /// Все пары `ключ:значение` (для ключей клавиш `key_*`).
+    pub fn pairs(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.kv.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
     pub fn get(&self, def: &Def) -> &str {
@@ -292,10 +369,21 @@ impl Options {
             .map_or(def.default, |(_, v)| v)
     }
 
+    /// Значение произвольного ключа (вне таблиц `Def`).
+    pub fn raw(&self, key: &str) -> Option<&str> {
+        self.kv
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
     pub fn set(&mut self, key: &str, value: String) {
         match self.kv.iter_mut().find(|(k, _)| k == key) {
             Some(e) => e.1 = value,
             None => self.kv.push((key.to_owned(), value)),
+        }
+        if key.starts_with("soundCategory") {
+            self.apply_audio();
         }
     }
 

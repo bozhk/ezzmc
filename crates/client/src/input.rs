@@ -40,8 +40,16 @@ pub struct Mouse {
     dx: f64,
     dy: f64,
     pub grabbed: bool,
+    /// Захват только что запрошен: на Wayland блокировка активируется после входа указателя в окно.
+    pub fresh: bool,
+    /// Получен CursorGrabMode::Locked (иначе Confined — курсор надо прятать и возвращать в центр).
+    locked: bool,
     pub sensitivity: f64,
+    pub invert_x: bool,
     pub invert_y: bool,
+    pub wheel_sens: f64,
+    pub discrete_scroll: bool,
+    scroll_acc: f64,
 }
 
 impl Default for Mouse {
@@ -50,8 +58,14 @@ impl Default for Mouse {
             dx: 0.0,
             dy: 0.0,
             grabbed: false,
+            fresh: false,
+            locked: false,
             sensitivity: DEFAULT_SENSITIVITY,
+            invert_x: false,
             invert_y: false,
+            wheel_sens: 1.0,
+            discrete_scroll: false,
+            scroll_acc: 0.0,
         }
     }
 }
@@ -65,12 +79,30 @@ impl Mouse {
         }
     }
 
+    /// VANILLA: MouseHandler#onScroll — discrete → signum, × mouseWheelSensitivity, накопление до целого шага.
+    pub fn scroll_steps(&mut self, y: f64) -> i32 {
+        let y = if self.discrete_scroll {
+            y.signum() * f64::from(u8::from(y != 0.0))
+        } else {
+            y
+        };
+        let off = y * self.wheel_sens;
+        if self.scroll_acc != 0.0 && off.signum() != self.scroll_acc.signum() {
+            self.scroll_acc = 0.0;
+        }
+        self.scroll_acc += off;
+        let w = self.scroll_acc as i32;
+        self.scroll_acc -= f64::from(w);
+        w
+    }
+
     /// Забрать накопленное движение за кадр как поворот.
     pub fn take_turn(&mut self) -> Turn {
         let k = sensitivity_factor(self.sensitivity) * TURN_SCALE;
+        let sx = if self.invert_x { -1.0 } else { 1.0 };
         let sy = if self.invert_y { -1.0 } else { 1.0 };
         let t = Turn {
-            yaw: self.dx * k,
+            yaw: self.dx * k * sx,
             pitch: self.dy * k * sy,
         };
         self.dx = 0.0;
@@ -83,13 +115,37 @@ impl Mouse {
         if self.grabbed {
             return;
         }
-        let ok = w.set_cursor_grab(CursorGrabMode::Locked).is_ok()
-            || w.set_cursor_grab(CursorGrabMode::Confined).is_ok();
+        self.locked = w.set_cursor_grab(CursorGrabMode::Locked).is_ok();
+        let ok = self.locked || w.set_cursor_grab(CursorGrabMode::Confined).is_ok();
         if ok {
             w.set_cursor_visible(false);
             self.grabbed = true;
+            self.fresh = true;
             self.dx = 0.0;
             self.dy = 0.0;
+        }
+    }
+
+    /// Каждый кадр при захвате: курсор скрыт (X11 мог проигнорировать раннее скрытие), а при
+    /// Confined (X11) возвращается в центр окна — аналог GLFW_CURSOR_DISABLED.
+    pub fn maintain(&self, w: &Window) {
+        if !self.grabbed {
+            return;
+        }
+        w.set_cursor_visible(false);
+        if !self.locked {
+            let s = w.inner_size();
+            let _ =
+                w.set_cursor_position(winit::dpi::PhysicalPosition::new(s.width / 2, s.height / 2));
+        }
+    }
+
+    /// Повторный запрос захвата (указатель вошёл в окно / первое движение после захвата).
+    pub fn regrab(&mut self, w: &Window) {
+        if self.grabbed {
+            self.release(w);
+            self.grab(w);
+            self.fresh = false;
         }
     }
 

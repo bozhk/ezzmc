@@ -84,18 +84,22 @@ pub struct ClientClock {
 
 use crate::entities::{unpack_degrees, Entity};
 
-/// VANILLA: LpVec3#read — только пропуск (movement спавна не используется).
-fn read_lp_vec3(r: &mut Reader) -> ProtocolResult<()> {
+/// VANILLA: LpVec3#read.
+fn read_lp_vec3(r: &mut Reader) -> ProtocolResult<[f64; 3]> {
     let lowest = r.u8()?;
     if lowest == 0 {
-        return Ok(());
+        return Ok([0.0; 3]);
     }
-    r.u8()?;
-    r.i32()?;
+    let middle = u64::from(r.u8()?);
+    let high = u64::from(r.i32()? as u32);
+    let buf = high << 16 | middle << 8 | u64::from(lowest);
+    let mut scale = u64::from(lowest & 3);
     if lowest & 4 != 0 {
-        r.var_int()?;
+        scale |= u64::from(r.var_int()? as u32) << 2;
     }
-    Ok(())
+    let scale = scale as f64;
+    let un = |shift: u32| (((buf >> shift) & 32767).min(32766) as f64) * 2.0 / 32766.0 - 1.0;
+    Ok([un(3) * scale, un(18) * scale, un(33) * scale])
 }
 
 /// Id `lightning_bolt` в реестре `entity_type` (26.3).
@@ -104,6 +108,35 @@ static LIGHTNING_BOLT_TYPE: std::sync::LazyLock<Option<usize>> = std::sync::Lazy
         .iter()
         .position(|n| *n == "lightning_bolt")
 });
+
+/// Id `tnt` в реестре `entity_type` (26.3).
+static PEARL_TYPE: std::sync::LazyLock<Option<usize>> = std::sync::LazyLock::new(|| {
+    ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+        .iter()
+        .position(|n| *n == "ender_pearl")
+});
+static TNT_TYPE: std::sync::LazyLock<Option<usize>> = std::sync::LazyLock::new(|| {
+    ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+        .iter()
+        .position(|n| *n == "tnt")
+});
+
+/// Id `item` в реестре `entity_type` (26.3).
+static ITEM_TYPE: std::sync::LazyLock<Option<usize>> = std::sync::LazyLock::new(|| {
+    ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+        .iter()
+        .position(|n| *n == "item")
+});
+
+/// VANILLA: ItemPickupParticle (EntityRenderState предмета заморожен в момент пакета).
+pub struct Pickup {
+    pub id: i32,
+    pub target: i32,
+    pub pos: [f64; 3],
+    pub age: f32,
+    pub stack: ezzmc_protocol::item::ItemStack,
+    pub life: u32,
+}
 
 pub struct Level {
     pub chunks: ChunkCache,
@@ -130,11 +163,21 @@ pub struct Level {
     pub thunder_level: f32,
     /// Молнии (`lightning_bolt`) — единственные сущности, которые клиент пока заводит.
     pub bolts: crate::lightning::Bolts,
+    /// Позиции ударов молнии, ждущие звука (клиент забирает `take`).
+    pub thunder: Vec<[f64; 3]>,
     pub entities: crate::entities::Entities,
+    /// VANILLA: ItemPickupParticle — анимация подбора (3 тика).
+    pub pickups: Vec<Pickup>,
+    /// Места попадания жемчуга Энда (частицы portal); забирает клиент.
+    pub pearl_hits: Vec<[f64; 3]>,
     /// VANILLA: ClientLevel#skyFlashTime (молния ставит 2, каждый тик −1).
     pub sky_flash_time: i32,
     /// VANILLA: DimensionType#skybox (Overworld/End/None) — что рисовать вместо неба.
     pub skybox: crate::dimension::Skybox,
+    /// Звуковые атрибуты dimension_type (музыка, mood).
+    pub audio: crate::audio_attr::AudioAttrs,
+    /// VANILLA: PistonMovingBlockEntity по позиции блока `moving_piston`.
+    pub pistons: std::collections::HashMap<(i32, i32, i32), crate::piston::MovingPiston>,
 }
 
 impl Level {
@@ -156,9 +199,14 @@ impl Level {
             rain_level: 0.0,
             thunder_level: 0.0,
             bolts: Default::default(),
+            thunder: Vec::new(),
             entities: Default::default(),
+            pickups: Vec::new(),
+            pearl_hits: Vec::new(),
             sky_flash_time: 0,
             skybox: crate::dimension::Skybox::Overworld,
+            audio: Default::default(),
+            pistons: Default::default(),
         }
     }
 
@@ -190,8 +238,34 @@ impl Level {
             self.sky_flash_time -= 1;
         }
         self.entities.tick();
-        if self.bolts.tick().flash {
+        {
+            let chunks = &self.chunks;
+            let solid = |x: f64, y: f64, z: f64| {
+                let (bx, by, bz) = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
+                let st = chunks.block(bx, by, bz);
+                let boxes = st
+                    .props()
+                    .and_then(|p| crate::generated::p26_3::SHAPES.get(usize::from(p.collision_shape)).copied())
+                    .unwrap_or(&[]);
+                let (fx, fy, fz) = (x - f64::from(bx), y - f64::from(by), z - f64::from(bz));
+                boxes.iter().any(|b| {
+                    fx >= b[0] && fx <= b[3] && fy >= b[1] && fy <= b[4] && fz >= b[2] && fz <= b[5]
+                })
+            };
+            for e in self.entities.map.values_mut() {
+                e.tick_projectile(&solid);
+            }
+        }
+        for p in &mut self.pickups {
+            p.life += 1;
+        }
+        self.pickups.retain(|p| p.life < 3);
+        let bt = self.bolts.tick();
+        if bt.flash {
             self.sky_flash_time = 2;
+        }
+        if !bt.strikes.is_empty() {
+            self.thunder.extend(bt.strikes);
         }
     }
 
@@ -395,15 +469,45 @@ impl Level {
                     self.bolts.spawn(id, pos);
                 }
                 if let Ok(ty) = usize::try_from(ty) {
-                    let rots = read_lp_vec3(&mut r).and_then(|()| Ok((r.i8()?, r.i8()?, r.i8()?)));
-                    if let Ok((x_rot, y_rot, head)) = rots {
+                    let rots =
+                        read_lp_vec3(&mut r).and_then(|v| Ok((v, r.i8()?, r.i8()?, r.i8()?)));
+                    if let Ok((vel, x_rot, y_rot, head)) = rots {
                         let (yaw, pitch, head) = (
                             unpack_degrees(y_rot),
                             unpack_degrees(x_rot),
                             unpack_degrees(head),
                         );
-                        self.entities
-                            .add(Entity::new(id, uuid, ty, pos, yaw, pitch, head));
+                        let mut e = Entity::new(id, uuid, ty, pos, yaw, pitch, head);
+                        e.vel = vel;
+                        e.snap = ITEM_TYPE.is_some_and(|t| t == ty);
+                        // VANILLA: PrimedTnt#DATA_FUSE_ID по умолчанию 80.
+                        if TNT_TYPE.is_some_and(|t| t == ty) {
+                            e.fuse = 80;
+                        }
+                        self.entities.add(e);
+                    }
+                }
+                LevelEvent::None
+            }
+            "take_item_entity" => {
+                // VANILLA: handleTakeItemEntity: ItemPickupParticle + shrink(amount); пустой стак → removeEntity.
+                let (item, target, amount) = (r.var_int()?, r.var_int()?, r.var_int()?);
+                if let Some(e) = self.entities.map.get_mut(&item) {
+                    if let Some(stack) = e.item.clone() {
+                        self.pickups.push(Pickup {
+                            id: item,
+                            target,
+                            pos: e.pos,
+                            age: e.age as f32 + 1.0,
+                            stack,
+                            life: 0,
+                        });
+                    }
+                    if let Some(st) = e.item.as_mut() {
+                        st.count -= amount;
+                        if st.count <= 0 {
+                            self.entities.remove(item);
+                        }
                     }
                 }
                 LevelEvent::None
@@ -414,20 +518,63 @@ impl Level {
                 for _ in 0..n.clamp(0, 4096) {
                     let id = r.var_int()?;
                     self.bolts.remove(id);
+                    if let Some(e) = self.entities.map.get(&id) {
+                        if PEARL_TYPE.is_some_and(|t| t == e.ty) {
+                            self.pearl_hits.push(e.pos);
+                        }
+                    }
                     self.entities.remove(id);
                 }
                 LevelEvent::None
             }
             "set_entity_data" => {
                 // VANILLA: ClientboundSetEntityDataPacket: id, затем записи (индекс u8, тип VarInt,
-                // значение), конец — 0xFF. Разбираем только запись #0 (общие флаги, тип BYTE = 0):
-                // записи идут по возрастанию индекса, поэтому она первая; остальные пропускаем.
+                // значение), конец — 0xFF. Читаем #0 (флаги) и #8 (ItemEntity#DATA_ITEM, ITEM_STACK = 7);
+                // значения базовых типов пропускаем, на неизвестном типе разбор останавливается.
                 // VANILLA-UNSURE: прочие метаданные (поза, имя и т.д.) пока не читаются.
                 let id = r.var_int()?;
-                if r.u8()? == 0 && r.var_int()? == 0 {
-                    let flags = r.u8()?;
-                    if let Some(e) = self.entities.map.get_mut(&id) {
-                        e.flags = flags;
+                loop {
+                    let idx = r.u8()?;
+                    if idx == 0xFF {
+                        break;
+                    }
+                    let ty = r.var_int()?;
+                    match ty {
+                        0 => {
+                            let v = r.u8()?;
+                            if idx == 0 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    e.flags = v;
+                                }
+                            }
+                        }
+                        1 | 20 => {
+                            let v = r.var_int()?;
+                            if ty == 1 && idx == 8 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    if e.fuse >= 0 {
+                                        e.fuse = v;
+                                    }
+                                }
+                            }
+                        }
+                        8 => {
+                            r.u8()?;
+                        }
+                        6 => {
+                            if r.bool()? {
+                                break;
+                            }
+                        }
+                        7 => {
+                            let st = ezzmc_protocol::item::read_stack(&mut r)?;
+                            if idx == 8 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    e.item = st;
+                                }
+                            }
+                        }
+                        _ => break,
                     }
                 }
                 LevelEvent::None
@@ -478,7 +625,7 @@ impl Level {
                 // VANILLA: handleTeleportEntity: PositionMoveRotation + Set<Relative> + onGround.
                 let id = r.var_int()?;
                 let pos = [r.f64()?, r.f64()?, r.f64()?];
-                let _delta = [r.f64()?, r.f64()?, r.f64()?];
+                let delta = [r.f64()?, r.f64()?, r.f64()?];
                 let (y_rot, x_rot) = (r.f32()?, r.f32()?);
                 let rel = r.i32()?;
                 let on_ground = r.bool()?;
@@ -495,7 +642,27 @@ impl Level {
                     let y = if rel & 8 != 0 { cy + y_rot } else { y_rot };
                     let x = if rel & 16 != 0 { cx + x_rot } else { x_rot };
                     e.on_ground = on_ground;
+                    // VANILLA: PositionMoveRotation#calculate — delta тоже относительный (биты 5..7).
+                    for i in 0..3 {
+                        e.vel[i] = if rel & (1 << (5 + i)) != 0 {
+                            e.vel[i] + delta[i]
+                        } else {
+                            delta[i]
+                        };
+                    }
                     e.set_target(Some(p), Some((y, x)));
+                }
+                LevelEvent::None
+            }
+            "set_entity_motion" => {
+                // VANILLA: handleSetEntityMotion → Entity#lerpMotion.
+                let id = r.var_int()?;
+                let v = read_lp_vec3(&mut r)?;
+                if let Some(e) = self.entities.map.get_mut(&id) {
+                    e.vel = v;
+                    if v != [0.0; 3] {
+                        e.stuck = false;
+                    }
                 }
                 LevelEvent::None
             }

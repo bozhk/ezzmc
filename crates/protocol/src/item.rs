@@ -1,6 +1,6 @@
 //! Грамматика ItemStack/DataComponentPatch (26.3): значения компонентов не имеют длины,
 //! поэтому для разбора стека нужна форма каждого компонента.
-// FROM: pomme/pomme-protocol/src/item.rs (таблицы форм компонентов; проверено по исходнику 26.3).
+// Таблицы форм компонентов (проверено по исходнику 26.3).
 
 use crate::error::{ProtocolError, ProtocolResult};
 use crate::generated::r26_3 as reg;
@@ -735,6 +735,24 @@ fn component(id: u32) -> ProtocolResult<&'static Shape> {
         .get(id as usize)
         .copied()
         .ok_or_else(|| bad("unknown data component type"))
+}
+
+/// `ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC` (DELIMITED: значение компонента с префиксом длины).
+pub fn write_stack_untrusted(w: &mut Writer, stack: Option<&ItemStack>) {
+    let Some(s) = stack else {
+        w.var_int(0);
+        return;
+    };
+    w.var_int(s.count)
+        .var_int(s.item as i32)
+        .var_int(s.patch.added.len() as i32)
+        .var_int(s.patch.removed.len() as i32);
+    for (id, v) in &s.patch.added {
+        w.var_int(*id as i32).var_int(v.len() as i32).bytes(v);
+    }
+    for id in &s.patch.removed {
+        w.var_int(*id as i32);
+    }
 }
 
 /// `DataComponentPatch.STREAM_CODEC`.

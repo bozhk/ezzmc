@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ezzmc": {
+      "command": "python3",
+      "args": ["tools/ezzmc_mcp.py"]
+    }
+  }
+}

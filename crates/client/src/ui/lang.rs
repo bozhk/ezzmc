@@ -9,6 +9,10 @@ impl Lang {
         Self(serde_json::from_slice(json).unwrap_or_default())
     }
 
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).map(String::as_str)
+    }
+
     pub fn tr(&self, key: &str) -> String {
         self.0.get(key).cloned().unwrap_or_else(|| key.to_owned())
     }

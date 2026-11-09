@@ -29,6 +29,11 @@ pub const TEXTURES: &[(&str, &str)] = &[
     ("list_bg", "menu_list_background"),
     ("header_sep", "header_separator"),
     ("footer_sep", "footer_separator"),
+    ("menu_bg", "menu_background"),
+    ("iw_menu_bg", "inworld_menu_background"),
+    ("iw_list_bg", "inworld_menu_list_background"),
+    ("iw_header_sep", "inworld_header_separator"),
+    ("iw_footer_sep", "inworld_footer_separator"),
     ("icon_language", "sprites/icon/language"),
     ("icon_access", "sprites/icon/accessibility"),
     ("panorama_0", "title/background/panorama_0"),
@@ -47,6 +52,8 @@ pub enum Page {
     Chat,
     Accessibility,
     Controls,
+    Mouse,
+    KeyBinds,
     Language,
     ResourcePacks,
     Telemetry,
@@ -62,6 +69,8 @@ impl Page {
             Page::Chat => "options.chat.title",
             Page::Accessibility => "options.accessibility.title",
             Page::Controls => "controls.title",
+            Page::Mouse => "options.mouse_settings.title",
+            Page::KeyBinds => "controls.keybinds.title",
             Page::Language => "options.language.title",
             Page::ResourcePacks => "resourcePack.title",
             Page::Telemetry => "telemetry_info.screen.title",
@@ -76,6 +85,8 @@ impl Page {
             Page::Skin => options::SKIN,
             Page::Chat => options::CHAT,
             Page::Accessibility => options::ACCESSIBILITY,
+            Page::Controls => options::CONTROLS,
+            Page::Mouse => options::MOUSE,
             _ => &[],
         }
     }
@@ -107,6 +118,8 @@ pub enum Action {
     Resume,
     /// Выйти с сервера в главное меню.
     Disconnect,
+    /// Набор ресурспаков изменён — перезагрузить ресурсы (перезапуск процесса).
+    ReloadResources,
 }
 
 struct State {
@@ -120,6 +133,14 @@ struct State {
     confirm_delete: bool,
     servers_path: PathBuf,
     splash: String,
+    /// Список доступных ресурспаков (скан `resourcepacks/` при входе на экран).
+    packs_avail: Option<Vec<crate::packrepo::PackInfo>>,
+    /// Строка поиска, пак на подтверждении (несовместимый), выбор при входе на экран, ввод кадра.
+    pack_search: String,
+    pack_confirm: Option<String>,
+    pack_initial: Option<String>,
+    pack_typed: String,
+    pack_bs: bool,
 }
 
 pub struct Gui {
@@ -136,6 +157,21 @@ pub struct Gui {
     pending_text: String,
     spin: f32,
     in_game: bool,
+    /// Строки экрана привязок клавиш (App обновляет, пока `wants_binds`).
+    pub binds: Vec<BindRow>,
+    /// Привязка, ожидающая нажатия клавиши/кнопки (её ловит App).
+    pub listening: Option<&'static str>,
+    pub reset_keys: bool,
+    pub reset_one: Option<&'static str>,
+}
+
+/// Строка экрана привязок. `key` — ключ перевода (`key.keyboard.w`).
+pub struct BindRow {
+    pub name: &'static str,
+    pub category: &'static str,
+    pub key: String,
+    pub conflict: bool,
+    pub default: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -178,6 +214,18 @@ impl Gui {
             Ok("options") => stack.push(Screen::Options),
             Ok("video") => stack.extend([Screen::Options, Screen::Page(Page::Video)]),
             Ok("sound") => stack.extend([Screen::Options, Screen::Page(Page::Sound)]),
+            Ok("controls") => stack.extend([Screen::Options, Screen::Page(Page::Controls)]),
+            Ok("keybinds") => stack.extend([
+                Screen::Options,
+                Screen::Page(Page::Controls),
+                Screen::Page(Page::KeyBinds),
+            ]),
+            Ok("mouse") => stack.extend([
+                Screen::Options,
+                Screen::Page(Page::Controls),
+                Screen::Page(Page::Mouse),
+            ]),
+            Ok("packs") => stack.extend([Screen::Options, Screen::Page(Page::ResourcePacks)]),
             Ok("multiplayer") => stack.push(Screen::Multiplayer),
             _ => {}
         }
@@ -193,6 +241,12 @@ impl Gui {
                 confirm_delete: false,
                 servers_path,
                 splash,
+                packs_avail: None,
+                pack_search: String::new(),
+                pack_confirm: None,
+                pack_initial: None,
+                pack_typed: String::new(),
+                pack_bs: false,
             },
             lang: Lang::load(lang_json),
             opts: Options::load(&dir.join("options.txt")),
@@ -206,7 +260,15 @@ impl Gui {
             pending_text: String::new(),
             spin: 0.0,
             in_game: false,
+            binds: Vec::new(),
+            listening: None,
+            reset_keys: false,
+            reset_one: None,
         }
+    }
+
+    pub fn wants_binds(&self) -> bool {
+        cur(&self.st) == Screen::Page(Page::Controls)
     }
 
     /// VANILLA: Minecraft#pauseGame — меню паузы поверх мира.
@@ -245,6 +307,13 @@ impl Gui {
         self.pending_keys.push(k);
     }
 
+    /// Файл брошен в окно (VANILLA: PackSelectionScreen#onFilesDrop) — только на экране паков.
+    pub fn on_drop(&mut self, p: &std::path::Path) {
+        if cur(&self.st) == Screen::Page(Page::ResourcePacks) && crate::packrepo::import(p) {
+            self.st.packs_avail = None;
+        }
+    }
+
     pub fn on_text(&mut self, s: &str) {
         self.pending_text
             .extend(s.chars().filter(|c| !c.is_control()));
@@ -255,6 +324,7 @@ impl Gui {
         self.st.scroll = 0.0;
         self.st.sel = None;
         self.st.confirm_delete = false;
+        self.st.packs_avail = None;
     }
 
     fn pop(&mut self) {
@@ -263,6 +333,7 @@ impl Gui {
         }
         self.st.scroll = 0.0;
         self.st.confirm_delete = false;
+        self.st.packs_avail = None;
         self.opts.save();
     }
 
@@ -291,6 +362,36 @@ impl Gui {
         let mut action = Action::None;
         let keys = std::mem::take(&mut self.pending_keys);
         let typed = std::mem::take(&mut self.pending_text);
+        if cur(&self.st) == Screen::Page(Page::ResourcePacks) {
+            let st = &mut self.st;
+            if st.packs_avail.is_none() {
+                let list = crate::packrepo::scan();
+                for pk in &list {
+                    if let Some((px, iw, ih)) = &pk.icon {
+                        p.add_texture(
+                            dev,
+                            queue,
+                            &format!("packicon:{}", pk.id),
+                            px,
+                            *iw,
+                            *ih,
+                            false,
+                        );
+                    }
+                }
+                st.packs_avail = Some(list);
+            }
+            if st.pack_initial.is_none() {
+                st.pack_initial = Some(
+                    self.opts
+                        .raw("resourcePacks")
+                        .unwrap_or("[\"vanilla\"]")
+                        .to_owned(),
+                );
+            }
+            st.pack_typed = typed.clone();
+            st.pack_bs = keys.iter().any(|k| matches!(k, UiKey::Backspace));
+        }
         let wheel = std::mem::take(&mut self.wheel);
         let click = std::mem::take(&mut self.click);
         let mut esc = false;
@@ -307,6 +408,7 @@ impl Gui {
                 id: 0,
                 w: gw,
                 h: gh,
+                in_game: self.in_game,
             };
             let st = &mut self.st;
             let opts = &mut self.opts;
@@ -324,7 +426,13 @@ impl Gui {
                 );
             }
             if screen != Screen::Title {
-                f.t.fill(0.0, 0.0, gw, gh, 0x70000000);
+                // VANILLA: Screen#extractMenuBackground — тайл 32×32 (menu_background / inworld_).
+                let bg = if self.in_game {
+                    "iw_menu_bg"
+                } else {
+                    "menu_bg"
+                };
+                f.p.tile(bg, 0.0, 0.0, gw, gh, 32.0, 0xFFFFFFFF);
             }
             let mut next: Option<Screen> = None;
             let mut back = false;
@@ -378,9 +486,25 @@ impl Gui {
                 }
                 Screen::Pause => pause(&mut f, &mut next, &mut action),
                 Screen::Options => options_hub(&mut f, st, opts, &mut next, &mut back),
-                Screen::Page(pg) => page(&mut f, st, opts, pg, wheel, &mut back),
+                Screen::Page(Page::KeyBinds) => controls(
+                    &mut f,
+                    st,
+                    &self.binds,
+                    &mut self.listening,
+                    &mut self.reset_keys,
+                    &mut self.reset_one,
+                    wheel,
+                    &mut back,
+                ),
+                Screen::Page(Page::ResourcePacks) => {
+                    resource_packs(&mut f, st, opts, wheel, &mut back)
+                }
+                Screen::Page(pg) => page(&mut f, st, opts, pg, wheel, &mut next, &mut back),
             }
-            if keys.iter().any(|k| matches!(k, UiKey::Escape)) && screen != Screen::Title {
+            if keys.iter().any(|k| matches!(k, UiKey::Escape))
+                && screen != Screen::Title
+                && self.listening.is_none()
+            {
                 if screen == Screen::Pause {
                     action = Action::Resume;
                 } else {
@@ -393,6 +517,15 @@ impl Gui {
                     prepare_form(&mut self.st, n);
                 }
             } else if back || esc {
+                if screen == Screen::Page(Page::ResourcePacks) {
+                    let now = self.opts.raw("resourcePacks").unwrap_or("[\"vanilla\"]");
+                    if self.st.pack_initial.as_deref().is_some_and(|i| i != now) {
+                        action = Action::ReloadResources;
+                    }
+                    self.st.pack_initial = None;
+                    self.st.pack_search.clear();
+                    self.st.pack_confirm = None;
+                }
                 self.pop();
             }
         }
@@ -437,6 +570,7 @@ struct Frame<'a> {
     id: u32,
     w: f32,
     h: f32,
+    in_game: bool,
 }
 
 impl Frame<'_> {
@@ -456,6 +590,13 @@ impl Frame<'_> {
 
     /// VANILLA: Button — спрайты button / highlighted / disabled (nine_slice 200×20, граница 3).
     fn button(&mut self, x: f32, y: f32, w: f32, h: f32, label: &str, active: bool) -> bool {
+        if self.hover(x, y, w, h) {
+            crate::cursor::request(if active {
+                crate::cursor::Kind::PointingHand
+            } else {
+                crate::cursor::Kind::NotAllowed
+            });
+        }
         let hov = self.hover(x, y, w, h) && active;
         let sprite = if !active {
             "button_off"
@@ -472,6 +613,8 @@ impl Frame<'_> {
             .draw(label, x + (w - tw) / 2.0, y + (h - 8.0) / 2.0, col, true);
         if hov && self.click {
             self.click = false;
+            // VANILLA: AbstractButton#playDownSound → SimpleSoundInstance.forUI(UI_BUTTON_CLICK, 1.0F).
+            crate::audio::play_ui("ui.button.click", crate::audio::Cat::Master, 0.25, 1.0);
             return true;
         }
         false
@@ -481,8 +624,16 @@ impl Frame<'_> {
     fn slider(&mut self, x: f32, y: f32, w: f32, h: f32, label: &str, v: &mut f32) -> bool {
         self.id += 1;
         let hov = self.hover(x, y, w, h);
+        if hov || *self.drag == Some(self.id) {
+            crate::cursor::request(if *self.drag == Some(self.id) && self.down {
+                crate::cursor::Kind::ResizeEw
+            } else {
+                crate::cursor::Kind::PointingHand
+            });
+        }
         if hov && self.click {
             self.click = false;
+            crate::audio::play_ui("ui.button.click", crate::audio::Cat::Master, 0.25, 1.0);
             *self.drag = Some(self.id);
         }
         let mut changed = false;
@@ -524,11 +675,23 @@ impl Frame<'_> {
     /// Фон списка между шапкой и подвалом (VANILLA: menu_list_background + separators).
     fn list_bg(&mut self, top: f32, bottom: f32) {
         let (w, h) = (self.w, bottom - top);
-        self.p.tile("list_bg", 0.0, top, w, h, 16.0, 0xFFFFFFFF);
-        self.p
-            .tile("header_sep", 0.0, top - 2.0, w, 2.0, 32.0, 0xFFFFFFFF);
-        self.p
-            .tile("footer_sep", 0.0, bottom, w, 2.0, 32.0, 0xFFFFFFFF);
+        // VANILLA: AbstractSelectionList#extractListBackground/Separators (texture 32×32 → ячейка 32).
+        let (lb, hs, fs) = if self.in_game {
+            ("iw_list_bg", "iw_header_sep", "iw_footer_sep")
+        } else {
+            ("list_bg", "header_sep", "footer_sep")
+        };
+        self.p.tile(lb, 0.0, top, w, h, 32.0, 0xFFFFFFFF);
+        // Разделители — текстуры 32×2: по вертикали UV 0..1 (обе строки), по горизонтали тайл 32.
+        for (tex, y) in [(hs, top - 2.0), (fs, bottom)] {
+            let mut cx = 0.0;
+            while cx < w {
+                let cw = 32.0_f32.min(w - cx);
+                self.p
+                    .blit(tex, cx, y, cw, 2.0, [0.0, 0.0, cw / 32.0, 1.0], 0xFFFFFFFF);
+                cx += 32.0;
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -556,6 +719,9 @@ impl Frame<'_> {
         if focused && caret {
             let cx = x + 4.0 + self.t.text_width(&s);
             self.t.fill(cx, y + 2.0, cx + 1.0, y + h - 2.0, 0xFFD0D0D0);
+        }
+        if self.hover(x, y, w, h) {
+            crate::cursor::request(crate::cursor::Kind::Ibeam);
         }
         let hit = self.hover(x, y, w, h) && self.click;
         if hit {
@@ -999,23 +1165,142 @@ fn options_hub(
 }
 
 /// VANILLA: OptionsSubScreen — шапка 33 px, прокручиваемый список в 2 колонки, «Done».
-fn page(f: &mut Frame, st: &mut State, opts: &mut Options, pg: Page, wheel: f32, back: &mut bool) {
+/// VANILLA: KeyBindsScreen/KeyBindsList — категории, кнопка клавиши (75), Reset (50).
+#[allow(clippy::too_many_arguments)]
+fn controls(
+    f: &mut Frame,
+    st: &mut State,
+    binds: &[BindRow],
+    listening: &mut Option<&'static str>,
+    reset_all: &mut bool,
+    reset_one: &mut Option<&'static str>,
+    wheel: f32,
+    back: &mut bool,
+) {
+    let (w, h) = (f.w, f.h);
+    let (top, bottom) = (33.0, h - 33.0);
+    f.list_bg(top, bottom);
+    // Высота: заголовок категории 20, строка 24.
+    let mut total = 4.0;
+    let mut last = "";
+    for b in binds {
+        if b.category != last {
+            total += 20.0;
+            last = b.category;
+        }
+        total += 24.0;
+    }
+    let max_scroll = (total - (bottom - top)).max(0.0);
+    st.scroll = (st.scroll - wheel * 12.0).clamp(0.0, max_scroll);
+    let mut y = top + 4.0 - st.scroll;
+    let mut last = "";
+    for b in binds {
+        if b.category != last {
+            last = b.category;
+            if y >= top - 10.0 && y + 10.0 <= bottom {
+                let s = f.lang.tr(b.category);
+                f.center_raw(&s, y + 9.0, WHITE);
+            }
+            y += 20.0;
+        }
+        if y >= top && y + 20.0 <= bottom {
+            let label = f.lang.tr(b.name);
+            let ty = y + 6.0;
+            f.t.draw(&label, w / 2.0 - 155.0, ty, WHITE, true);
+            if f.button(
+                w / 2.0 + 105.0,
+                y,
+                50.0,
+                20.0,
+                &f.lang.tr("controls.reset"),
+                !b.default,
+            ) {
+                *reset_one = Some(b.name);
+            }
+            // VANILLA: InputConstants.Type.KEYBOARD#displayTextSupplier — один символ → заглавная буква.
+            let key = match b.key.strip_prefix("key.keyboard.") {
+                Some(c) if c.chars().count() == 1 => c.to_uppercase(),
+                _ => f.lang.tr(&b.key),
+            };
+            let label = if *listening == Some(b.name) {
+                format!("§e> §f{key}§e <")
+            } else if b.conflict {
+                format!("§c[ §f{key}§c ]")
+            } else {
+                key
+            };
+            if f.button(w / 2.0 + 25.0, y, 75.0, 20.0, &label, true) {
+                *listening = Some(b.name);
+            }
+        }
+        y += 24.0;
+    }
+    f.center("controls.keybinds.title", 15.0, WHITE);
+    if f.button(
+        w / 2.0 - 155.0,
+        h - 27.0,
+        150.0,
+        20.0,
+        &f.lang.tr("controls.resetAll"),
+        true,
+    ) {
+        *reset_all = true;
+    }
+    if f.button(
+        w / 2.0 + 5.0,
+        h - 27.0,
+        150.0,
+        20.0,
+        &f.lang.tr("gui.done"),
+        true,
+    ) {
+        *listening = None;
+        *back = true;
+    }
+}
+
+fn page(
+    f: &mut Frame,
+    st: &mut State,
+    opts: &mut Options,
+    pg: Page,
+    wheel: f32,
+    next: &mut Option<Screen>,
+    back: &mut bool,
+) {
     let (w, h) = (f.w, f.h);
     let (top, bottom) = (33.0, h - 33.0);
     f.list_bg(top, bottom);
     let defs = pg.defs();
-    let rows = defs.len().div_ceil(2) as f32;
+    // VANILLA: ControlsScreen — первая строка: Mouse Settings / Key Binds, дальше опции.
+    let head = usize::from(pg == Page::Controls) * 2;
+    let rows = (defs.len() + head).div_ceil(2) as f32;
     let max_scroll = (rows * 24.0 + 4.0 - (bottom - top)).max(0.0);
     st.scroll = (st.scroll - wheel * 12.0).clamp(0.0, max_scroll);
+    for (n, (key, target)) in [
+        ("options.mouse_settings", Page::Mouse),
+        ("controls.keybinds", Page::KeyBinds),
+    ]
+    .into_iter()
+    .take(head)
+    .enumerate()
+    {
+        let x = w / 2.0 + if n == 0 { -155.0 } else { 5.0 };
+        let y = top + 4.0 - st.scroll;
+        if y >= top && y + 20.0 <= bottom && f.button(x, y, 150.0, 20.0, &f.lang.tr(key), true) {
+            *next = Some(Screen::Page(target));
+        }
+    }
     for (i, d) in defs.iter().enumerate() {
-        let y = top + 4.0 - st.scroll + (i / 2) as f32 * 24.0;
+        let c = i + head;
+        let y = top + 4.0 - st.scroll + (c / 2) as f32 * 24.0;
         if y < top || y + 20.0 > bottom {
             continue;
         }
-        let x = w / 2.0 + if i % 2 == 0 { -155.0 } else { 5.0 };
+        let x = w / 2.0 + if c % 2 == 0 { -155.0 } else { 5.0 };
         option_row(f, opts, d, x, y, 150.0);
     }
-    if defs.is_empty() {
+    if defs.is_empty() && head == 0 {
         f.center_raw("-", h / 2.0 - 4.0, GRAY);
     }
     f.center(pg.title(), 15.0, WHITE);
@@ -1028,6 +1313,302 @@ fn page(f: &mut Frame, st: &mut State, opts: &mut Options, pg: Page, wheel: f32,
         true,
     ) {
         *back = true;
+    }
+}
+
+/// Обрезка строки по ширине с «...».
+fn clip(f: &Frame, s: &str, max: f32) -> String {
+    if f.t.text_width(s) <= max {
+        return s.to_owned();
+    }
+    let mut o: String = s.to_owned();
+    while !o.is_empty() && f.t.text_width(&format!("{o}...")) > max {
+        o.pop();
+    }
+    format!("{o}...")
+}
+
+/// VANILLA: PackSelectionScreen — «Available» слева, «Selected» справа (сверху — высший приоритет).
+/// Клик по доступному — включить; по выбранному — выключить; ^/v — порядок. Применяется после перезапуска.
+fn resource_packs(f: &mut Frame, st: &mut State, opts: &mut Options, wheel: f32, back: &mut bool) {
+    use crate::packrepo::{self as pr, PackInfo};
+    let (w, h) = (f.w, f.h);
+    let (top, bottom) = (64.0, h - 48.0);
+    let avail_all = st.packs_avail.clone().unwrap_or_default();
+    // Ввод в поле поиска (VANILLA: PackSelectionScreen — EditBox фильтрует оба списка).
+    if st.pack_bs {
+        st.pack_search.pop();
+    }
+    if st.pack_search.chars().count() < 64 {
+        let typed = std::mem::take(&mut st.pack_typed);
+        st.pack_search.push_str(&typed);
+    }
+    let q = st.pack_search.to_lowercase();
+    let matches = |title: &str, desc: &str| {
+        q.is_empty() || title.to_lowercase().contains(&q) || desc.to_lowercase().contains(&q)
+    };
+    let mut sel = pr::parse_selected(opts.raw("resourcePacks").unwrap_or("[\"vanilla\"]"));
+    sel.retain(|id| id == pr::VANILLA || avail_all.iter().any(|p| &p.id == id));
+    let avail: Vec<&PackInfo> = avail_all
+        .iter()
+        .filter(|p| !sel.contains(&p.id) && matches(&p.title, &p.desc))
+        .collect();
+    let vanilla_name = f.lang.tr("resourcePack.vanilla.name");
+    let vanilla_desc = f.lang.tr("resourcePack.vanilla.description");
+    let shown_sel: Vec<usize> = (0..sel.len())
+        .rev()
+        .filter(|&i| {
+            let id = &sel[i];
+            if id == pr::VANILLA {
+                matches(&vanilla_name, &vanilla_desc)
+            } else {
+                avail_all
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .is_some_and(|p| matches(&p.title, &p.desc))
+            }
+        })
+        .collect();
+    let modal = st.pack_confirm.is_some();
+    let mclick = f.click && modal;
+    if modal {
+        f.click = false;
+    }
+    let rows = avail.len().max(shown_sel.len()) as f32;
+    let max_scroll = (rows * 36.0 + 4.0 - (bottom - top)).max(0.0);
+    st.scroll = (st.scroll - wheel * 12.0).clamp(0.0, max_scroll);
+    f.list_bg(top, bottom);
+    let (lx, rx, cw) = (w / 2.0 - 205.0, w / 2.0 + 5.0, 200.0);
+    let draw_row =
+        |f: &mut Frame, x: f32, y: f32, icon: &str, title: &str, desc: &str, red: bool| {
+            f.t.fill(x, y, x + cw, y + 32.0, 0x80000000);
+            let icon = if f.p.has(icon) { icon } else { "pack_unknown" };
+            f.p.blit(icon, x, y, 32.0, 32.0, [0.0, 0.0, 1.0, 1.0], 0xFFFFFFFF);
+            f.t.draw(
+                &clip(f, title, cw - 36.0 - 28.0),
+                x + 36.0,
+                y + 3.0,
+                WHITE,
+                true,
+            );
+            let col = if red { 0xFF5555 } else { GRAY };
+            f.t.draw(&clip(f, desc, cw - 40.0), x + 36.0, y + 15.0, col, true);
+        };
+    let compat_text = |f: &Frame, p: &PackInfo| match p.compat {
+        Some(ezzmc_assets::pack::Compat::TooOld) => (f.lang.tr("pack.incompatible.old"), true),
+        Some(ezzmc_assets::pack::Compat::TooNew) => (f.lang.tr("pack.incompatible.new"), true),
+        None => (f.lang.tr("pack.incompatible.unknown"), true),
+        _ => (p.desc.clone(), false),
+    };
+    let compatible = |p: &PackInfo| {
+        !matches!(
+            p.compat,
+            Some(ezzmc_assets::pack::Compat::TooOld)
+                | Some(ezzmc_assets::pack::Compat::TooNew)
+                | None
+        )
+    };
+    let mut new_sel: Option<Vec<String>> = None;
+    for (i, p) in avail.iter().enumerate() {
+        let y = top + 4.0 - st.scroll + i as f32 * 36.0;
+        if y < top || y + 32.0 > bottom {
+            continue;
+        }
+        let (d, red) = compat_text(f, p);
+        let src = f.lang.tr("pack.source.local");
+        draw_row(
+            f,
+            lx,
+            y,
+            &format!("packicon:{}", p.id),
+            &f.lang.fmt("pack.nameAndSource", &[&p.title, &src]),
+            &d,
+            red,
+        );
+        if !modal && f.hover(lx, y, cw, 32.0) {
+            crate::cursor::request(crate::cursor::Kind::PointingHand);
+            if f.click {
+                f.click = false;
+                if compatible(p) {
+                    let mut s = sel.clone();
+                    s.push(p.id.clone());
+                    new_sel = Some(s);
+                } else {
+                    // VANILLA: PackSelectionScreen — подтверждение несовместимого пака.
+                    st.pack_confirm = Some(p.id.clone());
+                }
+            }
+        }
+    }
+    // Выбранные: сверху — последний в списке (высший приоритет).
+    for (n, &idx) in shown_sel.iter().enumerate() {
+        let y = top + 4.0 - st.scroll + n as f32 * 36.0;
+        if y < top || y + 32.0 > bottom {
+            continue;
+        }
+        let id = sel[idx].clone();
+        if id == pr::VANILLA {
+            let src = f.lang.tr("pack.source.builtin");
+            draw_row(
+                f,
+                rx,
+                y,
+                "pack_vanilla",
+                &f.lang.fmt("pack.nameAndSource", &[&vanilla_name, &src]),
+                &vanilla_desc,
+                false,
+            );
+            continue;
+        }
+        let Some(p) = avail_all.iter().find(|p| p.id == id) else {
+            continue;
+        };
+        let (d, red) = compat_text(f, p);
+        let src = f.lang.tr("pack.source.local");
+        draw_row(
+            f,
+            rx,
+            y,
+            &format!("packicon:{}", p.id),
+            &f.lang.fmt("pack.nameAndSource", &[&p.title, &src]),
+            &d,
+            red,
+        );
+        // Кнопки порядка: ^ — выше (к концу списка), v — ниже (но не под vanilla).
+        let (bx, by) = (rx + cw - 22.0, y + 1.0);
+        let up_ok = idx + 1 < sel.len();
+        let down_ok = idx > 1;
+        if f.button(bx, by, 10.0, 14.0, "^", up_ok) && up_ok {
+            let mut s = sel.clone();
+            s.swap(idx, idx + 1);
+            new_sel = Some(s);
+        }
+        if f.button(bx + 11.0, by, 10.0, 14.0, "v", down_ok) && down_ok {
+            let mut s = sel.clone();
+            s.swap(idx, idx - 1);
+            new_sel = Some(s);
+        }
+        if f.hover(rx, y + 16.0, cw, 16.0) && f.click {
+            f.click = false;
+            let mut s = sel.clone();
+            s.remove(idx);
+            new_sel = Some(s);
+        }
+    }
+    // Шапка: заголовок, подсказка про drag-and-drop, поиск, заголовки колонок.
+    f.center("resourcePack.title", 8.0, WHITE);
+    f.center_raw(&f.lang.tr("pack.dropInfo"), 20.0, GRAY);
+    let caret = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis())
+        / 500)
+        % 2
+        == 0;
+    if st.pack_search.is_empty() {
+        let hint = f.lang.tr("gui.packSelection.search");
+        f.t.fill(
+            w / 2.0 - 100.0 - 1.0,
+            31.0,
+            w / 2.0 + 101.0,
+            47.0,
+            0xFFA0A0A0,
+        );
+        f.t.fill(w / 2.0 - 100.0, 32.0, w / 2.0 + 100.0, 46.0, 0xFF000000);
+        f.t.draw(&hint, w / 2.0 - 96.0, 35.0, 0x707070, true);
+    } else {
+        f.edit_box(
+            w / 2.0 - 100.0,
+            32.0,
+            200.0,
+            14.0,
+            &st.pack_search,
+            true,
+            caret,
+        );
+    }
+    for (x, key) in [(lx, "pack.available.title"), (rx, "pack.selected.title")] {
+        let t = f.lang.tr(key);
+        let tx = x + (cw - f.t.text_width(&t)) / 2.0;
+        f.t.draw(&t, tx, 51.0, WHITE, true);
+    }
+    // VANILLA: PackSelectionScreen — футер: «Open Pack Folder» (Blaze3D.openPath) + «Done», по 150 px, зазор 8.
+    f.center_raw(&f.lang.tr("pack.folderInfo"), h - 40.0, GRAY);
+    if f.button(
+        w / 2.0 - 154.0,
+        h - 27.0,
+        150.0,
+        20.0,
+        &f.lang.tr("pack.openFolder"),
+        !modal,
+    ) && !modal
+    {
+        let dir = pr::dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+    }
+    if f.button(
+        w / 2.0 + 4.0,
+        h - 27.0,
+        150.0,
+        20.0,
+        &f.lang.tr("gui.done"),
+        !modal,
+    ) && !modal
+    {
+        *back = true;
+    }
+    if let Some(id) = st.pack_confirm.clone() {
+        // Модальный диалог (VANILLA: ConfirmScreen).
+        f.click = mclick;
+        f.t.fill(0.0, 0.0, w, h, 0xC0101010);
+        let msg_key = match avail_all.iter().find(|p| p.id == id).and_then(|p| p.compat) {
+            Some(ezzmc_assets::pack::Compat::TooOld) => "pack.incompatible.confirm.old",
+            Some(ezzmc_assets::pack::Compat::TooNew) => "pack.incompatible.confirm.new",
+            _ => "pack.incompatible.confirm.unknown",
+        };
+        f.center("pack.incompatible.confirm.title", h / 2.0 - 40.0, WHITE);
+        // Перенос по словам (VANILLA: ConfirmScreen — MultiLineLabel).
+        let (msg, mut line, mut ly) = (f.lang.tr(msg_key), String::new(), h / 2.0 - 26.0);
+        for word in msg.split(' ') {
+            let try_line = if line.is_empty() {
+                word.to_owned()
+            } else {
+                format!("{line} {word}")
+            };
+            if f.t.text_width(&try_line) > w - 40.0 && !line.is_empty() {
+                f.center_raw(&line, ly, WHITE);
+                ly += 10.0;
+                line = word.to_owned();
+            } else {
+                line = try_line;
+            }
+        }
+        f.center_raw(&line, ly, WHITE);
+        if f.button(
+            w / 2.0 - 155.0,
+            h / 2.0 + 4.0,
+            150.0,
+            20.0,
+            &f.lang.tr("gui.yes"),
+            true,
+        ) {
+            let mut s = sel.clone();
+            s.push(id);
+            new_sel = Some(s);
+            st.pack_confirm = None;
+        } else if f.button(
+            w / 2.0 + 5.0,
+            h / 2.0 + 4.0,
+            150.0,
+            20.0,
+            &f.lang.tr("gui.no"),
+            true,
+        ) {
+            st.pack_confirm = None;
+        }
+    }
+    if let Some(s) = new_sel {
+        opts.set("resourcePacks", pr::encode_selected(&s));
     }
 }
 
@@ -1044,7 +1625,13 @@ fn value_text(lang: &Lang, d: &Def, raw: &str) -> String {
             .iter()
             .find(|(val, _)| *val == raw)
             .map_or_else(|| raw.to_owned(), |(_, k)| lang.tr(k)),
+        Kind::Log(..) => format!("{v:.2}"),
         Kind::Slider(min, max, step) => match d.key {
+            // VANILLA: Options#sensitivity — 0 «*yawn*», 1 «HYPERSPEED!!!», иначе 2·value в процентах.
+            "mouseSensitivity" if v <= 0.0 => lang.tr("options.sensitivity.min"),
+            "mouseSensitivity" if v >= 1.0 => lang.tr("options.sensitivity.max"),
+            "mouseSensitivity" => format!("{}%", (2.0 * v * 100.0).round()),
+            "sprintWindow" if v <= 0.0 => lang.tr("options.off"),
             "fov" if v == 70.0 => lang.tr("options.fov.min"),
             "fov" if v >= max => lang.tr("options.fov.max"),
             "maxFps" if v >= max => lang.tr("options.framerateLimit.max"),
@@ -1078,6 +1665,14 @@ fn option_row(f: &mut Frame, opts: &mut Options, d: &Def, x: f32, y: f32, w: f32
             if f.button(x, y, w, 20.0, &label, true) {
                 let i = c.iter().position(|(v, _)| *v == raw).map_or(0, |i| i + 1) % c.len();
                 opts.set(d.key, c[i].0.to_owned());
+            }
+        }
+        Kind::Log(min, max) => {
+            let cur = (f64::from(opts.f32(d)).max(1e-3).log10() * 100.0).round() as f32;
+            let mut n = ((cur - min as f32) / (max - min) as f32).clamp(0.0, 1.0);
+            if f.slider(x, y, w, 20.0, &label, &mut n) {
+                let s = (min as f32 + n * (max - min) as f32).round();
+                opts.set(d.key, format!("{}", 10f64.powf(f64::from(s) / 100.0)));
             }
         }
         Kind::Slider(min, max, step) => {

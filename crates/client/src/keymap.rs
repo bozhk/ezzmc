@@ -75,6 +75,8 @@ pub struct Binding {
     pub category: Category,
     down: bool,
     clicks: u32,
+    /// VANILLA: ToggleKeyMapping — нажатие переключает состояние, отпускание игнорируется.
+    toggle: bool,
 }
 
 impl Binding {
@@ -162,6 +164,7 @@ impl Default for KeyBindings {
                 category,
                 down: false,
                 clicks: 0,
+                toggle: false,
             })
             .collect();
         let index = list.iter().enumerate().map(|(i, b)| (b.name, i)).collect();
@@ -216,7 +219,22 @@ impl KeyBindings {
     /// VANILLA: KeyMapping.set — состояние down у всех биндингов на этом вводе.
     pub fn set(&mut self, input: Input, down: bool) {
         for b in self.list.iter_mut().filter(|b| b.key == input) {
-            b.down = down;
+            // VANILLA: ToggleKeyMapping#setDown.
+            if !b.toggle {
+                b.down = down;
+            } else if down {
+                b.down = !b.down;
+            }
+        }
+    }
+    /// VANILLA: Options#toggleCrouch/toggleSprint/toggleAttack/toggleUse.
+    pub fn set_toggle(&mut self, name: &str, toggle: bool) {
+        if let Some(&i) = self.index.get(name) {
+            let b = &mut self.list[i];
+            if b.toggle != toggle {
+                b.toggle = toggle;
+                b.down = false;
+            }
         }
     }
     /// VANILLA: KeyMapping.click — нажатие считается для consume_click.
@@ -354,5 +372,21 @@ mod tests {
             kb2.get("key.jump").map(|b| b.key),
             Some(Input::Key(KeyCode::KeyJ))
         );
+    }
+
+    #[test]
+    fn toggle_mapping_flips_on_press_and_ignores_release() {
+        let mut kb = KeyBindings::default();
+        kb.set_toggle("key.sneak", true);
+        let shift = Input::Key(KeyCode::ShiftLeft);
+        kb.on_input(shift, true);
+        kb.on_input(shift, false);
+        assert!(kb.get("key.sneak").unwrap().is_down());
+        kb.on_input(shift, true);
+        assert!(!kb.get("key.sneak").unwrap().is_down());
+        kb.set_toggle("key.sneak", false);
+        kb.on_input(shift, true);
+        kb.on_input(shift, false);
+        assert!(!kb.get("key.sneak").unwrap().is_down());
     }
 }

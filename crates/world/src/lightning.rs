@@ -18,12 +18,14 @@ pub struct Bolt {
 }
 
 /// Что сделал тик молнии на клиенте.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct BoltTick {
     /// `life >= 0` → `Level#setSkyFlashTime(2)`.
     pub flash: bool,
     /// Первый тик (`life == 2`): здесь ваниль играет гром и удар (звук не портирован).
     pub struck: bool,
+    /// Позиция ударов этого тика (для звука грома/удара).
+    pub strikes: Vec<[f64; 3]>,
 }
 
 pub struct Bolts {
@@ -71,6 +73,7 @@ impl Bolts {
         self.list.retain_mut(|b| {
             if b.life == START_LIFE {
                 out.struck = true;
+                out.strikes.push(b.pos);
             }
             b.life -= 1;
             if b.life < 0 {

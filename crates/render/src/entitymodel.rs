@@ -173,6 +173,14 @@ pub struct Model {
     pub tex_size: [f32; 2],
 }
 
+/// Грань модели после применения поз (см. `Model::quads`).
+#[derive(Clone, Copy, Debug)]
+pub struct RasterQuad {
+    pub pos: [Vec3; 4],
+    pub uv: [[f32; 2]; 4],
+    pub normal: Vec3,
+}
+
 /// Описание куба для билдера (VANILLA: CubeListBuilder#addBox).
 #[derive(Clone, Copy, Debug)]
 pub struct BoxDef {
@@ -261,6 +269,35 @@ impl Model {
         m
     }
 
+    /// Видимые грани в пространстве `root` для программной растеризации (превью в GUI).
+    /// Возвращает вершины (в блоках), UV (0..1) и нормаль грани после преобразования.
+    pub fn quads(&self, root: Mat4) -> Vec<RasterQuad> {
+        let mats = self.part_matrices(root);
+        let mut out = Vec::new();
+        for (i, part) in self.parts.iter().enumerate() {
+            let mut shown = part.visible;
+            let mut cur = part.parent;
+            while let (true, Some(p)) = (shown, cur) {
+                shown = self.parts[p].visible;
+                cur = self.parts[p].parent;
+            }
+            if !shown {
+                continue;
+            }
+            let m = mats[i];
+            for poly in part.cubes.iter().flat_map(|c| c.polys.iter()) {
+                out.push(RasterQuad {
+                    pos: poly.v.map(|v| m.transform_point3(Vec3::from(v.pos) / 16.0)),
+                    uv: poly.v.map(|v| v.uv),
+                    normal: m
+                        .transform_vector3(Vec3::from(poly.normal))
+                        .normalize_or_zero(),
+                });
+            }
+        }
+        out
+    }
+
     /// Запекает видимые части в вершины формата `ParticleDraw` (32 Б, квады по 4 вершины).
     /// `root` переводит модель в пространство, где камера в начале координат.
     /// `light` — (block, sky) 0..15. Освещение граней: VANILLA minecraft_mix_light (LEVEL).
@@ -311,7 +348,7 @@ impl Model {
 }
 
 /// VANILLA: Lighting (Entry.LEVEL) — направления света и minecraft_mix_light.
-fn mix_light(n: Vec3) -> f32 {
+pub fn mix_light(n: Vec3) -> f32 {
     let l0 = Vec3::new(0.2, 1.0, -0.7).normalize();
     let l1 = Vec3::new(-0.2, 1.0, 0.7).normalize();
     let (a, b) = (l0.dot(n).max(0.0), l1.dot(n).max(0.0));
@@ -363,4 +400,54 @@ mod tests {
         let mats = m.part_matrices(Mat4::IDENTITY);
         assert_eq!(mats[1].w_axis.truncate(), Vec3::new(1.0, 1.0, 0.0));
     }
+}
+
+/// VANILLA: ArrowModel (32×32) — оперение (`back`) и два креста (`cross_1/2`), масштаб 0.9.
+/// Текстуры трёх стрел лежат стопкой 32×96: `row` = 0 обычная, 1 spectral, 2 tipped.
+/// `root` — матрица после поворотов сущности (Y yRot−90, Z xRot), камера в начале координат.
+pub fn bake_arrow(root: Mat4, row: u32, light: (u8, u8), out: &mut Vec<u8>) {
+    let uv = |u: f32, v: f32| [u / 32.0, (v + 32.0 * row as f32) / 96.0];
+    let base = root * Mat4::from_scale(Vec3::splat(0.9 / 16.0));
+    let mut quad = |m: Mat4, pos: [[f32; 3]; 4], tx: [[f32; 2]; 4], n: [f32; 3]| {
+        let shade = mix_light(m.transform_vector3(Vec3::from(n)).normalize_or_zero());
+        let c = [(255.0 * shade) as u8, (255.0 * shade) as u8, (255.0 * shade) as u8, 255];
+        for i in 0..4 {
+            let p = m.transform_point3(Vec3::from(pos[i]));
+            push_vertex(out, p.to_array(), uv(tx[i][0], tx[i][1]), c, light);
+        }
+    };
+    // cross: addBox(-12,-2,0, 16,4,0) uScale 1.0 vScale 0.8 → v 0..3.2.
+    let (x0, x1, y0, y1, vh) = (-12.0, 4.0, -2.0, 2.0, 3.2);
+    for rot in [std::f32::consts::FRAC_PI_4, std::f32::consts::PI * 3.0 / 4.0] {
+        let m = base * Mat4::from_rotation_x(rot);
+        quad(
+            m,
+            [[x1, y0, 0.0], [x0, y0, 0.0], [x0, y1, 0.0], [x1, y1, 0.0]],
+            [[16.0, 0.0], [0.0, 0.0], [0.0, vh], [16.0, vh]],
+            [0.0, 0.0, -1.0],
+        );
+        quad(
+            m,
+            [[x0, y0, 0.0], [x1, y0, 0.0], [x1, y1, 0.0], [x0, y1, 0.0]],
+            [[32.0, 0.0], [16.0, 0.0], [16.0, vh], [32.0, vh]],
+            [0.0, 0.0, 1.0],
+        );
+    }
+    // back: addBox(0,-2.5,-2.5, 0,5,5), поза (−11,0,0) rotX π/4, scale 0.8.
+    let m = base
+        * Mat4::from_translation(Vec3::new(-11.0, 0.0, 0.0))
+        * Mat4::from_rotation_x(std::f32::consts::FRAC_PI_4)
+        * Mat4::from_scale(Vec3::splat(0.8));
+    quad(
+        m,
+        [[0.0, -2.5, -2.5], [0.0, -2.5, 2.5], [0.0, 2.5, 2.5], [0.0, 2.5, -2.5]],
+        [[5.0, 5.0], [0.0, 5.0], [0.0, 10.0], [5.0, 10.0]],
+        [-1.0, 0.0, 0.0],
+    );
+    quad(
+        m,
+        [[0.0, -2.5, 2.5], [0.0, -2.5, -2.5], [0.0, 2.5, -2.5], [0.0, 2.5, 2.5]],
+        [[10.0, 5.0], [5.0, 5.0], [5.0, 10.0], [10.0, 10.0]],
+        [1.0, 0.0, 0.0],
+    );
 }

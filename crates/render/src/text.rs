@@ -5,8 +5,6 @@
 //! наибольшее целое, при котором экран вмещает 320×240).
 use wgpu::util::DeviceExt;
 
-const CELL: u32 = 8;
-const GRID: u32 = 16;
 const MAX_VERTS: usize = 4 * 16384;
 
 #[repr(C)]
@@ -17,15 +15,40 @@ struct Vertex {
     color: [f32; 4],
 }
 
+/// Лист растрового шрифта (один `bitmap`-провайдер font/include/default.json).
+pub struct FontSheet<'a> {
+    pub rgba: &'a [u8],
+    pub w: u32,
+    pub h: u32,
+    /// Строки `chars` (код U+0000 — пустая ячейка).
+    pub rows: Vec<Vec<char>>,
+    pub height: f32,
+    pub ascent: f32,
+}
+
+/// Готовый глиф в объединённом атласе (пиксели атласа / GUI-пиксели).
+#[derive(Clone, Copy)]
+struct Glyph {
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+    w: f32,
+    h: f32,
+    /// Смещение верха от верха строки: 7 - ascent.
+    top: f32,
+    adv: f32,
+}
+
 pub struct TextRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     screen: wgpu::Buffer,
     vb: wgpu::Buffer,
     ib: wgpu::Buffer,
-    atlas_px: u32,
-    /// Ширина (без интервала) каждого из 256 кодов.
-    widths: [u8; 256],
+    atlas_w: f32,
+    atlas_h: f32,
+    glyphs: std::collections::HashMap<char, Glyph>,
     verts: Vec<Vertex>,
     /// GUI scale текущего кадра.
     scale: u32,
@@ -33,6 +56,19 @@ pub struct TextRenderer {
     scale_opt: u32,
     /// Аффинное преобразование (центр, угол°, масштаб) для `push`/`fill` — сплэш.
     xf: Option<(f32, f32, f32, f32)>,
+    rng: u32,
+}
+
+/// Флаги форматирования текста (ChatFormatting / Style).
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct Fmt {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strike: bool,
+    pub obfuscated: bool,
+    /// Первый символ строки: подчёркивание начинается на 1 px левее.
+    pub line_start: bool,
 }
 
 /// VANILLA: Window#calculateScale (guiScale = 0 «авто», без ограничения максимума).
@@ -55,21 +91,21 @@ pub fn gui_scale_opt(w: u32, h: u32, opt: u32) -> u32 {
 }
 
 impl TextRenderer {
-    /// `atlas_rgba` — `ascii.png` как RGBA8, квадрат `GRID*CELL`×`GRID*CELL` (или кратный).
+    /// `sheets` — листы шрифта в порядке провайдеров (первый, где есть символ, выигрывает).
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         color: wgpu::TextureFormat,
-        atlas_rgba: &[u8],
-        atlas_px: u32,
+        sheets: &[FontSheet],
     ) -> Self {
+        let (atlas_rgba, atlas_w, atlas_h, glyphs) = build_atlas(sheets);
         let tex = device.create_texture_with_data(
             queue,
             &wgpu::TextureDescriptor {
                 label: Some("font"),
                 size: wgpu::Extent3d {
-                    width: atlas_px,
-                    height: atlas_px,
+                    width: atlas_w,
+                    height: atlas_h,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -80,7 +116,7 @@ impl TextRenderer {
                 view_formats: &[],
             },
             wgpu::util::TextureDataOrder::LayerMajor,
-            atlas_rgba,
+            &atlas_rgba,
         );
         let view = tex.create_view(&Default::default());
         let samp = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -201,12 +237,14 @@ impl TextRenderer {
             screen,
             vb,
             ib,
-            atlas_px,
-            widths: glyph_widths(atlas_rgba, atlas_px),
+            atlas_w: atlas_w as f32,
+            atlas_h: atlas_h as f32,
+            glyphs,
             verts: Vec::new(),
             scale: 1,
             scale_opt: 0,
             xf: None,
+            rng: 12345,
         }
     }
 
@@ -234,7 +272,9 @@ impl TextRenderer {
     fn tf(&self, p: [f32; 2]) -> [f32; 2] {
         let k = self.scale as f32;
         match self.xf {
-            None => [p[0] * k, p[1] * k],
+            // Округление до целого пикселя окна: полпиксельные сдвиги при центрировании текста
+            // давали обрезанные столбцы у букв (nearest-выборка).
+            None => [(p[0] * k).round(), (p[1] * k).round()],
             Some((cx, cy, deg, sc)) => {
                 let (s, c) = deg.to_radians().sin_cos();
                 let (x, y) = (p[0] * sc, p[1] * sc);
@@ -253,8 +293,13 @@ impl TextRenderer {
         if c == ' ' {
             4.0
         } else {
-            f32::from(self.widths[code(c)]) + 1.0
+            self.glyph(c).map_or(0.0, |g| g.adv)
         }
+    }
+
+    /// Глиф символа; нет в шрифте → '?'.
+    fn glyph(&self, c: char) -> Option<&Glyph> {
+        self.glyphs.get(&c).or_else(|| self.glyphs.get(&'?'))
     }
 
     pub fn text_width(&self, s: &str) -> f32 {
@@ -297,6 +342,8 @@ impl TextRenderer {
                 match it.next() {
                     Some('a') => cur = 0x55FF55,
                     Some('c') => cur = 0xFF5555,
+                    Some('e') => cur = 0xFFFF55,
+                    Some('f') => cur = 0xFFFFFF,
                     Some('r') => cur = rgb,
                     _ => {}
                 }
@@ -322,36 +369,138 @@ impl TextRenderer {
     }
 
     fn push(&mut self, s: &str, x: f32, y: f32, color: [f32; 4]) {
-        let px = self.atlas_px as f32;
-        let tex_per_cell = px / (GRID * CELL) as f32;
+        self.push_ex(s, x, y, color, false, false);
+    }
+
+    /// VANILLA: BakedSheetGlyph — жирный: второй проход со сдвигом 1; курсив: сдвиг верха/низа
+    /// `1 - 0.25 * (y - 3)`.
+    fn push_ex(&mut self, s: &str, x: f32, y: f32, color: [f32; 4], bold: bool, italic: bool) {
         let mut cx = x;
         for c in s.chars() {
-            let adv = self.advance(c);
-            if c != ' ' && self.verts.len() + 4 <= MAX_VERTS {
-                let i = code(c) as u32;
-                let w = f32::from(self.widths[i as usize]);
-                let (u0, v0) = (
-                    (i % GRID * CELL) as f32 * tex_per_cell / px,
-                    (i / GRID * CELL) as f32 * tex_per_cell / px,
-                );
-                let u1 = u0 + w * tex_per_cell / px;
-                let v1 = v0 + CELL as f32 * tex_per_cell / px;
-                let (x0, x1) = (cx, cx + w);
-                let (y0, y1) = (y, y + CELL as f32);
-                for (p, uv) in [
-                    ([x0, y0], [u0, v0]),
-                    ([x1, y0], [u1, v0]),
-                    ([x1, y1], [u1, v1]),
-                    ([x0, y1], [u0, v1]),
-                ] {
-                    self.verts.push(Vertex {
-                        pos: self.tf(p),
-                        uv,
-                        color,
-                    });
+            let adv = self.advance(c) + if bold { 1.0 } else { 0.0 };
+            if c != ' ' && self.verts.len() + 8 <= MAX_VERTS {
+                if let Some(g) = self.glyph(c).copied() {
+                    let passes: &[f32] = if bold { &[0.0, 1.0] } else { &[0.0] };
+                    for off in passes {
+                        let (x0, x1) = (cx + off, cx + off + g.w);
+                        let (y0, y1) = (y + g.top, y + g.top + g.h);
+                        let sh = |rel: f32| {
+                            if italic {
+                                1.0 - 0.25 * (rel - 3.0)
+                            } else {
+                                0.0
+                            }
+                        };
+                        let (s0, s1) = (sh(g.top), sh(g.top + g.h));
+                        for (p, uv) in [
+                            ([x0 + s0, y0], [g.u0, g.v0]),
+                            ([x1 + s0, y0], [g.u1, g.v0]),
+                            ([x1 + s1, y1], [g.u1, g.v1]),
+                            ([x0 + s1, y1], [g.u0, g.v1]),
+                        ] {
+                            self.verts.push(Vertex {
+                                pos: self.tf(p),
+                                uv,
+                                color,
+                            });
+                        }
+                    }
                 }
             }
             cx += adv;
+        }
+    }
+
+    /// Ширина строки одним стилем (жирный: +1 к шагу каждого символа).
+    pub fn width_fmt(&self, s: &str, bold: bool) -> f32 {
+        s.chars()
+            .map(|c| self.advance(c) + if bold { 1.0 } else { 0.0 })
+            .sum()
+    }
+
+    /// Случайный символ с тем же шагом (VANILLA: «магический» текст §k).
+    fn obfuscate(&mut self, c: char) -> char {
+        if c == ' ' {
+            return c;
+        }
+        let w = self.advance(c);
+        self.rng = self.rng.wrapping_mul(1664525).wrapping_add(1013904223);
+        let n = 0x21 + (self.rng >> 16) % 0x5E;
+        let cand = char::from_u32(n).unwrap_or('?');
+        if (self.advance(cand) - w).abs() < f32::EPSILON {
+            return cand;
+        }
+        // Подбор по соседям ASCII с тем же шагом.
+        (0x21u32..0x7F)
+            .cycle()
+            .skip((n - 0x21) as usize)
+            .take(0x5E)
+            .filter_map(char::from_u32)
+            .find(|ch| (self.advance(*ch) - w).abs() < f32::EPSILON)
+            .unwrap_or(c)
+    }
+
+    /// Рисует строку со стилем Component (цвет 0xRRGGBB, прозрачность `alpha`), возвращает x после неё.
+    /// VANILLA: Font.StringRenderOutput#accept.
+    pub fn draw_fmt(
+        &mut self,
+        s: &str,
+        x: f32,
+        y: f32,
+        rgb: u32,
+        alpha: f32,
+        f: Fmt,
+        shadow: bool,
+    ) -> f32 {
+        let mut cx = x;
+        let col = |m: f32| {
+            [
+                ((rgb >> 16) & 255) as f32 / 255.0 * m,
+                ((rgb >> 8) & 255) as f32 / 255.0 * m,
+                (rgb & 255) as f32 / 255.0 * m,
+                alpha,
+            ]
+        };
+        let bold = f.bold;
+        for (i, c) in s.chars().enumerate() {
+            let adv = self.advance(c) + if bold { 1.0 } else { 0.0 };
+            let ch = if f.obfuscated { self.obfuscate(c) } else { c };
+            let mut tmp = [0u8; 4];
+            let cs: &str = ch.encode_utf8(&mut tmp);
+            if shadow {
+                self.push_ex(cs, cx + 1.0, y + 1.0, col(0.25), bold, f.italic);
+            }
+            self.push_ex(cs, cx, y, col(1.0), bold, f.italic);
+            let ex0 = if f.line_start && i == 0 { cx - 1.0 } else { cx };
+            for (on, a, b) in [(f.strike, 3.5, 4.5), (f.underline, 8.0, 9.0)] {
+                if on {
+                    if shadow {
+                        self.fill_f(
+                            ex0 + 1.0,
+                            y + a + 1.0,
+                            cx + adv + 1.0,
+                            y + b + 1.0,
+                            col(0.25),
+                        );
+                    }
+                    self.fill_f(ex0, y + a, cx + adv, y + b, col(1.0));
+                }
+            }
+            cx += adv;
+        }
+        cx
+    }
+
+    fn fill_f(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, color: [f32; 4]) {
+        if self.verts.len() + 4 > MAX_VERTS {
+            return;
+        }
+        for p in [[x0, y0], [x1, y0], [x1, y1], [x0, y1]] {
+            self.verts.push(Vertex {
+                pos: self.tf(p),
+                uv: [-1.0, -1.0],
+                color,
+            });
         }
     }
 
@@ -400,39 +549,73 @@ impl TextRenderer {
     }
 }
 
-fn code(c: char) -> usize {
-    let n = c as usize;
-    if n < 256 {
-        n
-    } else {
-        usize::from(b'?')
-    }
-}
-
 fn bytes<T: Copy>(v: &[T]) -> &[u8] {
     // SAFETY: только POD (u32, Vertex из f32) без padding.
     unsafe { std::slice::from_raw_parts(v.as_ptr().cast(), std::mem::size_of_val(v)) }
 }
 
-/// VANILLA: BitmapProvider — ширина = индекс правого непрозрачного столбца ячейки + 1 (0 для пустой).
-fn glyph_widths(rgba: &[u8], px: u32) -> [u8; 256] {
-    let cell = (px / GRID) as usize;
-    let scale = cell / CELL as usize;
-    let mut out = [0u8; 256];
-    for (i, o) in out.iter_mut().enumerate() {
-        let (gx, gy) = (i % GRID as usize * cell, i / GRID as usize * cell);
-        let mut right = 0;
-        for x in 0..cell {
-            for y in 0..cell {
-                if rgba[((gy + y) * px as usize + gx + x) * 4 + 3] != 0 {
-                    right = x + 1;
-                }
+/// VANILLA: BitmapProvider — ширина глифа = индекс правого непрозрачного столбца ячейки + 1.
+fn cell_right(rgba: &[u8], px: u32, gx: usize, gy: usize, cw: usize, ch: usize) -> usize {
+    let mut right = 0;
+    for x in 0..cw {
+        for y in 0..ch {
+            if rgba[((gy + y) * px as usize + gx + x) * 4 + 3] != 0 {
+                right = x + 1;
             }
         }
-        // Ширина в «ванильных» 8-пиксельных единицах.
-        *o = right.div_ceil(scale.max(1)) as u8;
     }
-    out
+    right
+}
+
+/// Склеивает листы в один атлас (вертикально) и строит таблицу глифов.
+/// VANILLA: BitmapProvider (scale = height / высота ячейки; шаг = округл(ширина*scale) + 1).
+fn build_atlas(
+    sheets: &[FontSheet],
+) -> (Vec<u8>, u32, u32, std::collections::HashMap<char, Glyph>) {
+    let aw = sheets.iter().map(|s| s.w).max().unwrap_or(1).max(1);
+    let ah: u32 = sheets.iter().map(|s| s.h).sum::<u32>().max(1);
+    let mut img = vec![0u8; (aw * ah * 4) as usize];
+    let mut glyphs = std::collections::HashMap::new();
+    let mut oy = 0u32;
+    for sh in sheets {
+        for y in 0..sh.h {
+            let src = (y * sh.w * 4) as usize;
+            let dst = (((oy + y) * aw) * 4) as usize;
+            img[dst..dst + (sh.w * 4) as usize]
+                .copy_from_slice(&sh.rgba[src..src + (sh.w * 4) as usize]);
+        }
+        let cols = sh.rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
+        let (cw, chh) = (sh.w as usize / cols, sh.h as usize / sh.rows.len().max(1));
+        let scale = sh.height / chh.max(1) as f32;
+        for (r, row) in sh.rows.iter().enumerate() {
+            for (c, &ch) in row.iter().enumerate() {
+                if ch == '\0' || glyphs.contains_key(&ch) {
+                    continue;
+                }
+                let (gx, gy) = (c * cw, r * chh);
+                let right = cell_right(&sh.rgba, sh.w, gx, gy, cw, chh);
+                if right == 0 {
+                    continue;
+                }
+                let pw = right as f32 * scale;
+                glyphs.insert(
+                    ch,
+                    Glyph {
+                        u0: gx as f32 / aw as f32,
+                        v0: (oy as usize + gy) as f32 / ah as f32,
+                        u1: (gx + right) as f32 / aw as f32,
+                        v1: (oy as usize + gy + chh) as f32 / ah as f32,
+                        w: pw,
+                        h: sh.height,
+                        top: 7.0 - sh.ascent,
+                        adv: (pw + 0.5).floor() + 1.0,
+                    },
+                );
+            }
+        }
+        oy += sh.h;
+    }
+    (img, aw, ah, glyphs)
 }
 
 #[cfg(test)]
@@ -450,10 +633,27 @@ mod tests {
     #[test]
     fn widths_from_alpha() {
         let mut px = vec![0u8; 128 * 128 * 4];
-        // Код 65 ('A'): ячейка (1, 4); закрасить столбец x=4 в строке 0.
+        // Ячейка (1, 4) 8×8; закрасить столбец x=4 в строке 0.
         px[((4 * 8) * 128 + 8 + 4) * 4 + 3] = 255;
-        let w = glyph_widths(&px, 128);
-        assert_eq!(w[65], 5);
-        assert_eq!(w[66], 0);
+        assert_eq!(cell_right(&px, 128, 8, 32, 8, 8), 5);
+        assert_eq!(cell_right(&px, 128, 16, 32, 8, 8), 0);
+    }
+
+    #[test]
+    fn multi_sheet_cyrillic() {
+        let mut px = vec![0u8; 16 * 8 * 8 * 4];
+        px[3 * 4 + 3] = 255; // ячейка 0, столбец 3 → ширина 4
+        let sheet = FontSheet {
+            rgba: &px,
+            w: 16 * 8,
+            h: 8,
+            rows: vec![std::iter::once('Ж')
+                .chain(std::iter::repeat_n('\0', 15))
+                .collect()],
+            height: 8.0,
+            ascent: 7.0,
+        };
+        let (_, _, _, g) = build_atlas(&[sheet]);
+        assert_eq!(g[&'Ж'].adv, 5.0);
     }
 }

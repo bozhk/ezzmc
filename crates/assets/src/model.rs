@@ -192,6 +192,14 @@ impl DisplayContext {
         DisplayContext::OnShelf,
     ];
 
+    /// VANILLA: ItemDisplayContext#leftHand.
+    pub fn left_hand(self) -> bool {
+        matches!(
+            self,
+            DisplayContext::ThirdPersonLeftHand | DisplayContext::FirstPersonLeftHand
+        )
+    }
+
     pub fn serialized_name(self) -> &'static str {
         match self {
             DisplayContext::ThirdPersonLeftHand => "thirdperson_lefthand",

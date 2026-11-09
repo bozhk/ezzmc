@@ -34,3 +34,18 @@ fn vs_pano(@location(0) p: vec2<f32>, @location(1) uv: vec2<f32>, @location(2) c
 fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     return textureSample(tex, samp, i.uv) * i.color;
 }
+
+// Блеск зачарования поверх уже нарисованной иконки (аддитивно).
+// VANILLA: item.fsh (GLINT): rgb += (GlintAlpha * glint.rgb)^2; текстура — TextureTransform#setupGlintTexturing.
+struct G { m: vec4<f32>, off: vec4<f32> }
+@group(1) @binding(0) var<uniform> gl: G;
+@group(1) @binding(1) var glint_tex: texture_2d<f32>;
+@group(1) @binding(2) var glint_samp: sampler;
+
+@fragment
+fn fs_glint(i: VsOut) -> @location(0) vec4<f32> {
+    let mask = textureSample(tex, samp, i.uv).a;
+    let uv = mat2x2<f32>(gl.m.xy, gl.m.zw) * i.uv + gl.off.xy;
+    let g = gl.off.z * textureSample(glint_tex, glint_samp, uv).rgb;
+    return vec4<f32>(g * g * mask, 0.0);
+}

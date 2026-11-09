@@ -41,6 +41,10 @@ pub struct Digger {
     progress: f32,
     delay: u8,
     seq: i32,
+    /// VANILLA: MultiPlayerGameMode#destroyTicks.
+    ticks: u32,
+    /// Тик копания, на котором играет hit-звук (destroyTicks % 4 == 0).
+    pub hit_sound: bool,
 }
 
 /// VANILLA: BlockStateBase#getDestroyProgress (рука, без эффектов).
@@ -113,6 +117,9 @@ impl Digger {
             return (out, broken);
         }
         if self.destroying && self.pos == a.pos {
+            // VANILLA: continueDestroyBlock — hitSound каждые 4 тика, затем destroyTicks++.
+            self.hit_sound = self.ticks % 4 == 0;
+            self.ticks += 1;
             self.progress += destroy_progress(a.state, body);
             if self.progress >= 1.0 {
                 self.destroying = false;
@@ -124,6 +131,12 @@ impl Digger {
             return (out, broken);
         }
         // startDestroyBlock: новая цель
+        self.begin(&mut out, &mut broken, a, body);
+        (out, broken)
+    }
+
+    /// VANILLA: MultiPlayerGameMode#startDestroyBlock (новая цель или предмгновенный блок).
+    fn begin(&mut self, out: &mut Vec<DigCmd>, broken: &mut Vec<[i32; 3]>, a: Aim, body: Body) {
         if self.destroying {
             let p = self.pos;
             out.push(self.cmd(ABORT_DESTROY_BLOCK, p, a.face));
@@ -137,6 +150,29 @@ impl Digger {
             self.destroying = true;
             self.pos = a.pos;
             self.progress = 0.0;
+            self.ticks = 0;
+        }
+    }
+
+    /// VANILLA: Minecraft#startAttack по блоку — клик вызывает startDestroyBlock напрямую,
+    /// destroyDelay его не блокирует (он действует только на continueDestroyBlock при удержании).
+    pub fn click(
+        &mut self,
+        aim: Option<Aim>,
+        mode: i8,
+        body: Body,
+    ) -> (Vec<DigCmd>, Vec<[i32; 3]>) {
+        let (mut out, mut broken) = (Vec::new(), Vec::new());
+        let Some(a) = aim.filter(|a| !a.state.is_air() && (mode == SURVIVAL || mode == CREATIVE))
+        else {
+            return (out, broken);
+        };
+        if mode == CREATIVE {
+            self.delay = 5;
+            out.push(self.cmd(START_DESTROY_BLOCK, a.pos, a.face));
+            broken.push(a.pos);
+        } else if !(self.destroying && self.pos == a.pos) {
+            self.begin(&mut out, &mut broken, a, body);
         }
         (out, broken)
     }

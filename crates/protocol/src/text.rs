@@ -223,6 +223,11 @@ fn nbt_to_json(t: &Tag) -> Value {
         Tag::Double(v) => serde_json::Number::from_f64(*v).map_or(Value::Null, Value::Number),
         Tag::String(s) => Value::String(s.clone()),
         Tag::List(v) => Value::Array(v.iter().map(nbt_to_json).collect()),
+        // VANILLA: NbtOps.HomogenousListCollector#tryUnwrap — элемент смешанного списка (`extra`)
+        // кладётся в компаунд с единственным ключом "".
+        Tag::Compound(v) if v.len() == 1 && v.iter().next().is_some_and(|(k, _)| k.is_empty()) => {
+            v.iter().next().map_or(Value::Null, |(_, t)| nbt_to_json(t))
+        }
         Tag::Compound(v) => {
             Value::Object(v.iter().map(|(k, t)| (k.clone(), nbt_to_json(t))).collect())
         }

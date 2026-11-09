@@ -96,6 +96,8 @@ pub struct BiomeColors {
     pub sky_color: Option<u32>,
     pub fog_color: Option<u32>,
     pub water_fog_color: Option<u32>,
+    /// Музыка/ambient биома (override атрибутов dimension).
+    pub audio: crate::audio_attr::AudioAttrs,
 }
 
 /// `#rrggbb` или Int (как `ExtraCodecs.STRING_RGB_COLOR`).
@@ -142,6 +144,7 @@ impl BiomeColors {
             sky_color: attr("minecraft:visual/sky_color"),
             fog_color: attr("minecraft:visual/fog_color"),
             water_fog_color: attr("minecraft:visual/water_fog_color"),
+            audio: crate::audio_attr::AudioAttrs::from_attributes(attrs),
         })
     }
 

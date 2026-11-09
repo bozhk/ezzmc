@@ -25,19 +25,36 @@ pub struct ParticleQuad {
     pub v0: f32,
     pub v1: f32,
     pub color: [u8; 4],
-    /// block, sky (0..15).
-    pub light: (u8, u8),
+    /// block, sky в единицах 0..240 (уровень*16; Flame: плавное addSmoothBlockEmission).
+    pub light: (u16, u16),
 }
 
 const VERTEX_SIZE: usize = 32;
 
 pub fn push_vertex(out: &mut Vec<u8>, p: [f32; 3], uv: [f32; 2], c: [u8; 4], light: (u8, u8)) {
+    push_vertex_raw(
+        out,
+        p,
+        uv,
+        c,
+        (u16::from(light.0) * 16, u16::from(light.1) * 16),
+    );
+}
+
+/// То же, свет уже в 0..240.
+pub fn push_vertex_raw(
+    out: &mut Vec<u8>,
+    p: [f32; 3],
+    uv: [f32; 2],
+    c: [u8; 4],
+    light: (u16, u16),
+) {
     for v in p.into_iter().chain(uv) {
         out.extend_from_slice(&v.to_le_bytes());
     }
     out.extend_from_slice(&c);
-    out.extend_from_slice(&(i32::from(light.0) * 16).to_le_bytes());
-    out.extend_from_slice(&(i32::from(light.1) * 16).to_le_bytes());
+    out.extend_from_slice(&i32::from(light.0).to_le_bytes());
+    out.extend_from_slice(&i32::from(light.1).to_le_bytes());
 }
 
 fn build(out: &mut Vec<u8>, q: &ParticleQuad, right: [f32; 3], up: [f32; 3]) {
@@ -48,10 +65,10 @@ fn build(out: &mut Vec<u8>, q: &ParticleQuad, right: [f32; 3], up: [f32; 3]) {
             q.pos[2] + (right[2] * x + up[2] * y) * q.size,
         ]
     };
-    push_vertex(out, corner(1.0, -1.0), [q.u1, q.v1], q.color, q.light);
-    push_vertex(out, corner(1.0, 1.0), [q.u1, q.v0], q.color, q.light);
-    push_vertex(out, corner(-1.0, 1.0), [q.u0, q.v0], q.color, q.light);
-    push_vertex(out, corner(-1.0, -1.0), [q.u0, q.v1], q.color, q.light);
+    push_vertex_raw(out, corner(1.0, -1.0), [q.u1, q.v1], q.color, q.light);
+    push_vertex_raw(out, corner(1.0, 1.0), [q.u1, q.v0], q.color, q.light);
+    push_vertex_raw(out, corner(-1.0, 1.0), [q.u0, q.v0], q.color, q.light);
+    push_vertex_raw(out, corner(-1.0, -1.0), [q.u0, q.v1], q.color, q.light);
 }
 
 pub struct ParticleDraw {
@@ -80,6 +97,43 @@ impl ParticleDraw {
         lightmap: &wgpu::TextureView,
         blocks: &wgpu::TextureView,
         particles: Option<(&[u8], u32, u32)>,
+    ) -> Self {
+        Self::new_ex(
+            device, queue, color, depth, projection, fog, lightmap, blocks, particles, false,
+        )
+    }
+
+    /// Тени сущностей. VANILLA: RenderTypes#entityShadow — translucent, без записи глубины,
+    /// polygon offset (−1, −10) (тень лежит на грани блока).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_shadow(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color: wgpu::TextureFormat,
+        depth: wgpu::TextureFormat,
+        projection: &wgpu::Buffer,
+        fog: &wgpu::Buffer,
+        lightmap: &wgpu::TextureView,
+        blocks: &wgpu::TextureView,
+        texture: Option<(&[u8], u32, u32)>,
+    ) -> Self {
+        Self::new_ex(
+            device, queue, color, depth, projection, fog, lightmap, blocks, texture, true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_ex(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color: wgpu::TextureFormat,
+        depth: wgpu::TextureFormat,
+        projection: &wgpu::Buffer,
+        fog: &wgpu::Buffer,
+        lightmap: &wgpu::TextureView,
+        blocks: &wgpu::TextureView,
+        particles: Option<(&[u8], u32, u32)>,
+        shadow: bool,
     ) -> Self {
         let vf = wgpu::ShaderStages::VERTEX_FRAGMENT;
         let uni = |binding| wgpu::BindGroupLayoutEntry {
@@ -231,10 +285,18 @@ impl ParticleDraw {
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: depth,
-                depth_write_enabled: true,
+                depth_write_enabled: !shadow,
                 depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: Default::default(),
-                bias: Default::default(),
+                bias: if shadow {
+                    wgpu::DepthBiasState {
+                        constant: -10,
+                        slope_scale: -1.0,
+                        clamp: 0.0,
+                    }
+                } else {
+                    Default::default()
+                },
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -340,12 +402,30 @@ impl ParticleDraw {
         model_view: Mat4,
         data: &[u8],
     ) {
+        self.prepare_split(device, queue, model_view, &[], data);
+    }
+
+    /// Как `prepare_raw`, но две группы квадов: сначала с атласом блоков, затем с `particles`-текстурой.
+    pub fn prepare_split(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        model_view: Mat4,
+        blocks: &[u8],
+        particles: &[u8],
+    ) {
         self.blocks_quads = 0;
         self.particle_quads = 0;
-        let n = (data.len() / (VERTEX_SIZE * 4)) as u32;
+        let nb = (blocks.len() / (VERTEX_SIZE * 4)) as u32;
+        let np = (particles.len() / (VERTEX_SIZE * 4)) as u32;
+        let n = nb + np;
         if n == 0 {
             return;
         }
+        let mut data = Vec::with_capacity(blocks.len() + particles.len());
+        data.extend_from_slice(blocks);
+        data.extend_from_slice(particles);
+        let data = &data[..];
         if self
             .vb
             .as_ref()
@@ -389,7 +469,8 @@ impl ParticleDraw {
             }
             .to_bytes(),
         );
-        self.particle_quads = n;
+        self.blocks_quads = nb;
+        self.particle_quads = np;
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
@@ -431,7 +512,7 @@ mod tests {
             v0: 0.0,
             v1: 1.0,
             color: [255; 4],
-            light: (0, 15),
+            light: (0, 240),
         };
         let mut out = Vec::new();
         build(&mut out, &q, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);

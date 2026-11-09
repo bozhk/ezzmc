@@ -100,6 +100,8 @@ pub struct ChunkCache {
     center: ChunkPos,
     count: usize,
     format: ChunkFormat,
+    /// Секции (x, y, z), чей свет изменил клиентский светодвижок (для ремеша).
+    pub light_dirty: std::collections::HashSet<(i32, i32, i32)>,
 }
 
 impl ChunkCache {
@@ -113,6 +115,7 @@ impl ChunkCache {
             center: ChunkPos { x: 0, z: 0 },
             count: 0,
             format,
+            light_dirty: Default::default(),
         }
     }
 
@@ -140,6 +143,11 @@ impl ChunkCache {
     /// VANILLA: updateViewCenter (ClientboundSetChunkCacheCenterPacket).
     pub fn set_center(&mut self, x: i32, z: i32) {
         self.center = ChunkPos { x, z };
+    }
+
+    /// Текущая дальность прорисовки (чанки), как её задал сервер.
+    pub fn view_radius(&self) -> i32 {
+        self.radius - 3
     }
 
     /// VANILLA: updateViewRadius (ClientboundSetChunkCacheRadiusPacket) — пересоздаёт сетку.
@@ -249,7 +257,7 @@ impl ChunkCache {
         }
     }
 
-    fn get_mut(&mut self, x: i32, z: i32) -> Option<&mut ClientChunk> {
+    pub(crate) fn get_mut(&mut self, x: i32, z: i32) -> Option<&mut ClientChunk> {
         if !self.in_range(x, z) {
             return None;
         }
@@ -278,9 +286,16 @@ impl ChunkCache {
         match &mut self.chunks[i] {
             Some(c) if c.pos.x == cx && c.pos.z == cz => {
                 let c = Arc::make_mut(c);
-                c.chunk
+                let old = c.chunk.block((x & 15) as usize, y, (z & 15) as usize);
+                let ok = c
+                    .chunk
                     .set_block((x & 15) as usize, y, (z & 15) as usize, state)
-                    .is_some()
+                    .is_some();
+                if ok && old != state {
+                    // VANILLA: ClientLevel#sendBlockUpdated → LevelLightEngine#checkBlock.
+                    self.light_check_block(x, y, z, old, state);
+                }
+                ok
             }
             _ => false,
         }

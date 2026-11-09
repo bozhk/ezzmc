@@ -193,6 +193,10 @@ pub enum PlayEvent {
         teleport_id: i32,
         state: PlayerState,
     },
+    /// VANILLA: LocalPlayer#handleEntityEvent 24..28 — уровень прав оператора (0..4).
+    OpLevel(u8),
+    /// VANILLA: LivingEntity#handleEntityEvent 9 (USE_ITEM_COMPLETE) для себя.
+    UseComplete,
     /// VANILLA: handleSetEntityMotion для локального игрока (`Entity#lerpMotion`).
     Motion([f64; 3]),
     /// VANILLA: ClientboundPlayerAbilitiesPacket: флаги (1 invulnerable, 2 flying, 4 mayfly, 8 instabuild), скорости.
@@ -360,6 +364,17 @@ impl PlayHandler {
                     PlayEvent::Other(p)
                 }
             }
+            Some("entity_event") => {
+                let id = r.i32()?;
+                let ev = r.u8()?;
+                if id == self.player_id && (24..=28).contains(&ev) {
+                    PlayEvent::OpLevel(ev - 24)
+                } else if id == self.player_id && ev == 9 {
+                    PlayEvent::UseComplete
+                } else {
+                    PlayEvent::Other(p)
+                }
+            }
             Some("respawn") => PlayEvent::Respawn {
                 spawn: Box::new(SpawnInfo::read(&mut r)?),
                 data_to_keep: r.u8()?,
@@ -464,12 +479,32 @@ impl PlayHandler {
         face: u8,
         seq: i32,
     ) -> NetResult<()> {
+        // VANILLA: 26.x — в ServerboundPlayerActionPacket.Action после START_DESTROY_BLOCK вставлен
+        // CHANGE_DESTROY_DIRECTION (1): все дальнейшие номера +1. Клиент оперирует старой нумерацией
+        // (0 start, 1 abort, 2 stop, 3 drop all, 4 drop, 5 release, 6 swap); маркер 26.x — пакет `punch`.
+        let action = if action >= 1 && self.sid("punch").is_ok() {
+            action + 1
+        } else {
+            action
+        };
         let mut w = Writer::new();
         w.var_int(action)
             .block_pos(pos[0], pos[1], pos[2])
             .u8(face)
             .var_int(seq);
         conn.send(self.sid("player_action")?, &w.buf)
+    }
+
+    /// VANILLA: ServerboundPickItemFromBlockPacket(BlockPos, includeData) (1.21.5+).
+    pub fn send_pick_item_from_block(
+        &self,
+        conn: &mut Connection,
+        pos: [i32; 3],
+        include_data: bool,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.block_pos(pos[0], pos[1], pos[2]).u8(u8::from(include_data));
+        conn.send(self.sid("pick_item_from_block")?, &w.buf)
     }
 
     /// VANILLA: ServerboundUseItemOnPacket(MAIN_HAND, BlockHitResult, sequence); `rel` — точка попадания внутри блока.
@@ -495,6 +530,19 @@ impl PlayHandler {
         conn.send(self.sid("use_item_on")?, &w.buf)
     }
 
+    /// VANILLA: ServerboundUseItemPacket(hand, sequence, yRot, xRot).
+    pub fn send_use_item(
+        &self,
+        conn: &mut Connection,
+        seq: i32,
+        yaw: f32,
+        pitch: f32,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.var_int(0).var_int(seq).f32(yaw).f32(pitch);
+        conn.send(self.sid("use_item")?, &w.buf)
+    }
+
     /// VANILLA: ServerboundAttackPacket(entityId).
     pub fn send_attack(&self, conn: &mut Connection, entity_id: i32) -> NetResult<()> {
         let mut w = Writer::new();
@@ -509,8 +557,11 @@ impl PlayHandler {
         conn.send(self.sid("set_carried_item")?, &w.buf)
     }
 
-    /// VANILLA: ServerboundContainerClickPacket без предсказания: changedSlots пусты, carried пуст —
-    /// сервер выполнит клик сам и пришлёт полное состояние (TODO-232: хэши компонентов).
+    /// VANILLA: ServerboundContainerClickPacket(containerId, stateId, slot, button, input,
+    /// changedSlots: Int2Object<HashedStack>, carried: HashedStack).
+    /// `HashedStack` = Optional(item varint, count varint, HashedPatchMap); хэши компонентов не считаем —
+    /// пустая карта (для стека с компонентами сервер заметит расхождение и пришлёт состояние).
+    #[allow(clippy::too_many_arguments)]
     pub fn send_container_click(
         &self,
         conn: &mut Connection,
@@ -519,16 +570,49 @@ impl PlayHandler {
         slot: i16,
         button: i8,
         input: i32,
+        changed: &[(i16, Option<(u32, i32)>)],
+        carried: Option<(u32, i32)>,
     ) -> NetResult<()> {
+        fn hashed(w: &mut Writer, s: Option<(u32, i32)>) {
+            match s {
+                None => {
+                    w.u8(0);
+                }
+                Some((item, count)) => {
+                    w.u8(1)
+                        .var_int(item as i32)
+                        .var_int(count)
+                        .var_int(0)
+                        .var_int(0);
+                }
+            }
+        }
         let mut w = Writer::new();
         w.var_int(container)
             .var_int(state_id)
             .i16(slot)
             .u8(button as u8)
             .var_int(input)
-            .var_int(0)
-            .u8(0);
+            .var_int(changed.len() as i32);
+        for (s, st) in changed {
+            w.i16(*s);
+            hashed(&mut w, *st);
+        }
+        hashed(&mut w, carried);
         conn.send(self.sid("container_click")?, &w.buf)
+    }
+
+    /// VANILLA: ServerboundSetCreativeModeSlotPacket(short slot, OPTIONAL_UNTRUSTED stack).
+    pub fn send_set_creative_slot(
+        &self,
+        conn: &mut Connection,
+        slot: i16,
+        stack: Option<&ezzmc_protocol::item::ItemStack>,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.i16(slot);
+        ezzmc_protocol::item::write_stack_untrusted(&mut w, stack);
+        conn.send(self.sid("set_creative_mode_slot")?, &w.buf)
     }
 
     /// VANILLA: ServerboundContainerClosePacket(container id).
@@ -538,11 +622,64 @@ impl PlayHandler {
         conn.send(self.sid("container_close")?, &w.buf)
     }
 
+    /// VANILLA: ServerboundClientCommandPacket(PERFORM_RESPAWN = 0).
+    pub fn send_respawn(&self, conn: &mut Connection) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.var_int(0);
+        conn.send(self.sid("client_command")?, &w.buf)
+    }
+
     /// VANILLA: ServerboundSwingPacket(MAIN_HAND = 0).
+    /// VANILLA: 26.x — ServerboundPunchPacket (пустой; `swing` переименован).
+    /// VANILLA: ServerboundClientInformationPacket (Play) — при смене настроек.
+    pub fn send_client_information(
+        &self,
+        conn: &mut Connection,
+        info: &crate::session::ClientInformation,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        info.write(&mut w);
+        conn.send(self.sid("client_information")?, &w.buf)
+    }
+
     pub fn send_swing(&self, conn: &mut Connection) -> NetResult<()> {
+        if let Ok(id) = self.sid("punch") {
+            return conn.send(id, &[]);
+        }
         let mut w = Writer::new();
         w.var_int(0);
         conn.send(self.sid("swing")?, &w.buf)
+    }
+
+    /// VANILLA: ClientPacketListener#sendChat без профильного ключа — ServerboundChatPacket
+    /// (message, timestamp, salt, signature = нет, LastSeenMessages.Update{offset 0, bitset, checksum 0}).
+    pub fn send_chat(&self, conn: &mut Connection, msg: &str, ms: i64) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.string(msg).i64(ms).i64(0).bool(false);
+        w.var_int(0).bytes(&[0, 0, 0]).u8(0);
+        conn.send(self.sid("chat")?, &w.buf)
+    }
+
+    /// VANILLA: ClientPacketListener#sendCommand — команда без `/`. Без дерева Brigadier всегда
+    /// `chat_command_signed` с пустыми подписями (сервер с `enforce-secure-chat=false` принимает; обычный
+    /// `chat_command` отвергается для команд с подписываемыми аргументами: say/msg/me).
+    pub fn send_chat_command(&self, conn: &mut Connection, cmd: &str, ms: i64) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.string(cmd).i64(ms).i64(0).var_int(0);
+        w.var_int(0).bytes(&[0, 0, 0]).u8(0);
+        conn.send(self.sid("chat_command_signed")?, &w.buf)
+    }
+
+    /// VANILLA: ServerboundCommandSuggestionPacket — id запроса и вся строка ввода (с `/`).
+    pub fn send_command_suggestion(
+        &self,
+        conn: &mut Connection,
+        id: i32,
+        text: &str,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.var_int(id).string(text);
+        conn.send(self.sid("command_suggestion")?, &w.buf)
     }
 
     /// VANILLA: ServerboundPlayerAbilitiesPacket — байт флагов, бит1 = летит.

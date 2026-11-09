@@ -1,4 +1,5 @@
 //! Блоки, чанки, палитры, свет, сущности.
+pub mod audio_attr;
 pub mod biome_color;
 pub mod block;
 pub mod chunk;
@@ -9,9 +10,11 @@ pub mod entity_size;
 pub mod generated;
 pub mod level;
 pub mod light;
+pub mod lightengine;
 pub mod lightning;
 pub mod noise;
 pub mod palette;
+pub mod piston;
 pub mod precipitation;
 pub mod registry;
 pub mod storage;

@@ -21,7 +21,7 @@
 ## ⭐ ВЕХА M1 — «Видимый ванильный мир» (ПРИОРИТЕТ НАД ВСЕМ ОСТАЛЬНЫМ)
 
 Решение владельца: **сначала — подключиться к локальному offline-серверу и увидеть мир, выглядящий как в ванили (рендер, свет, небо, туман, биомные цвета), потом всё остальное.** Пока M1 не закрыта, задачи вне списка ниже **не берутся** (исключение — блокирующие баги). Идём **строго по порядку шагов**, внутри шага — по номерам.
-Версия-цель для M1: **1.21.11** (эталон и reports уже есть), затем 26.3 (когда подойдёт Java 25 для сервера). Без физики и взаимодействия: камера летает свободно.
+Версия-цель: **26.3** (DEC-014; данные 1.21.11 — запасные). Без физики и взаимодействия: камера летает свободно.
 
 | Шаг | Что даёт | Задачи (по порядку) |
 |---|---|---|
@@ -112,7 +112,7 @@
 - [~] TODO-065 [P1] Очередь исходящих пакетов, флаш, Nagle off, приоритеты (позиция/ввод)
 - [~] TODO-066 [P1] Метрики сети (байт/с, пакетов/с, лаг) для F3
 - [~] TODO-067 [P2] Ping-fuzz и replay-прогон всех пакетов состояния Play
-- [~] TODO-068 [P2] Серверный `chunk batch`: обратная связь скорости (chunk_batch_received)
+- [x] TODO-068 [P2] Серверный `chunk batch`: обратная связь скорости (chunk_batch_received)
 - [~] TODO-069 [P3] IPv6, прокси (SOCKS) — опционально, не ванильно, не делаем без DEC
 
 ## Глава 3. Вход (только offline, без аккаунтов — GOAL.md §0Б)
@@ -135,7 +135,7 @@
 - [x] TODO-084 [P0] Feature Flags (Update Enabled Features): vanilla/trade_rebalance/redstone_experiments и пр.
 - [~] TODO-085 [P1] Server resource pack: Add/Remove, загрузка, SHA1, prompt, принудительный, применение
 - [~] TODO-086 [P1] Reset Chat, Server Links, Custom Report Details, Clear Dialog/Show Dialog (если есть в версии)
-- [~] TODO-087 [P1] Client Information: язык, view distance, chat mode, цвета, skin parts, main hand, text filtering, listing
+- [x] TODO-087 [P1] Client Information: язык, view distance, chat mode, цвета, skin parts, main hand, text filtering, listing
 - [~] TODO-088 [P2] Reconfiguration (возврат Play → Config), смена мира/ресурспака на лету
 
 ## Глава 5. Ресурсы (assets)
@@ -157,7 +157,7 @@
 - [~] TODO-104 [P1] Пост-эффекты: `post_effect`/`shaders/post` (прозрачность, outline — spectator/glow)
 - [~] TODO-105 [P1] Текстуры сущностей, equipment (armor/trim/layers), элитры, плащи, скины игрока
 - [~] TODO-106 [P1] Splash-тексты, панорама title screen, GUI sprites (`gui/sprites`, 9-slice метаданные)
-- [~] TODO-107 [P2] Ресурспак-перезагрузка на лету (F3+T), прогресс-экран загрузки (Mojang-логотип)
+- [x] TODO-107 [P2] Ресурспак-перезагрузка на лету: блоки, модели, GUI (шрифт, спрайты, панорама), colormap — проверено вживую; не обновляются иконки предметов, рука, частицы, небо/облака, сущности, звуки, lang (нужен рестарт; F3+T и экран загрузки — нет)
 - [~] TODO-108 [P2] Датапаки клиентской части: нет (только серверные регистры по сети)
 - [~] TODO-109 [P2] Кэш предобработанных ресурсов (бинарный кэш атласов и моделей) для быстрого старта
 - [~] TODO-110 [P2] Поддержка `optifine`-стиля CTM/CIT — **не делаем** (не ванильно)
@@ -246,7 +246,7 @@
 
 ## Глава 9. Взаимодействие с блоками
 - [~] TODO-184 [P0] Raycast блока/сущности из глаз (дальность 4.5/5, creative), `ClipContext`, VoxelShape
-- [~] TODO-185 [P0] Ломание блока: Player Action start/abort/finish dig, прогресс (`destroyProgress`), скорость по инструменту/эффектам/воде/воздуху — подключено в WorldView::tick_dig (ЛКМ → PlayerAction + Swing + локальное предсказание); нет инструментов/эффектов/частиц-осколков при ломании/анимации трещин; не проверено на сервере
+- [~] TODO-185 [P0] Ломание блока: Player Action start/abort/finish dig, прогресс (`destroyProgress`), скорость по инструменту/эффектам/воде/воздуху — подключено в WorldView::tick_dig (ЛКМ → PlayerAction + Swing + локальное предсказание); КПС: клик = startDestroyBlock без destroyDelay (Digger::click), удержание — с задержкой 5 (проверено владельцем 2026-11-08); частицы-осколки есть; нет инструментов/эффектов/анимации трещин
 - [~] TODO-186 [P0] Постановка блока: Use Item On (hand, hit result, inside, sequence), предсказание и ack Block Changed Ack — отправка Use Item On готова (ПКМ → `WorldView::use_item`, `send_use_item_on`), без предсказания блока (нет инвентаря), ack Block Changed не разбирается; seq общий (187)
 - [x] TODO-187 [P0] Блок-предсказание: локальная смена блока и откат при отказе сервера — `Level::{start_prediction,predict_block}` + `block_changed_ack` (откат к серверному состоянию), единый seq для dig/use; предсказание постановки появится с инвентарём
 - [ ] TODO-188 [P0] Use Item (пища, зелья, лук, щит, удочка, ender pearl), удержание ПКМ, прогресс использования
@@ -254,7 +254,7 @@
 - [ ] TODO-190 [P0] Pick Block (СКМ) в creative/survival, Set Creative Mode Slot
 - [ ] TODO-191 [P1] Звуки блоков: step, break, place, hit, fall — по SoundType (volume/pitch как в ванили)
 - [ ] TODO-192 [P1] Частицы ломания/удара/хождения блока, анимации руки (swing), смена предмета (equip animation)
-- [ ] TODO-193 [P1] Руки/предмет от первого лица: позиция, swing, use-анимации (eat, bow, block, spyglass, trident, brush, goat horn), map in hand
+- [~] TODO-193 [P1] Руки/предмет от первого лица: позиция, swing, use-анимации (eat, bow, block, spyglass, trident, brush, goat horn), map in hand — eat/drink сделано 2026-11-09 (частицы item и остальные use-анимации открыты)
 - [ ] TODO-194 [P1] Рендер предмета в руке, в 3-м лице, на земле (item entity), в рамке, на ArmorStand, GUI
 - [ ] TODO-195 [P1] Инструментальные эффекты: Efficiency, Haste, Mining Fatigue, aqua affinity, подводное ломание, не на земле (÷5)
 - [ ] TODO-196 [P1] Контейнеры по клику: сундук, печь, верстак, наковальня и т.д. — открытие через Open Screen
@@ -296,15 +296,23 @@
 ## Глава 11. Инвентарь, предметы, контейнеры
 - [ ] TODO-229 [P0] Реестр предметов и данных (stack size, durability, attributes, компоненты по умолчанию)
 - [~] TODO-230 [P0] Инвентарь игрока: хотбар (9), главный (27), броня (4), оффхэнд, крафт 2×2, курсор — ГОТОВО: (a) `protocol/src/item.rs` — грамматика ItemStack/DataComponentPatch 26.3 (формы компонентов из pomme, `read_stack/read_template/read_patch/write_stack`, тест); (b) `client/src/inventory.rs` — `Inventory` (46 слотов InventoryMenu, cursor, selected, state_id, open), `parse_packet` (container_set_content/set_slot, set_cursor_item, set_player_inventory, set_held_slot, open_screen, container_close), тест. (c) подключено в netthread/WorldView (`NetEvt::Inventory`, `WorldView.inv`); (d) слот 1–9/колесо → `set_carried_item` готово. НЕ СДЕЛАНО: (e) частично готово: HUD-хотбар + плоские иконки + количество (`client/hud.rs`, проверено вживую); осталось: иконки по items/*.json, 3D-блоки; (f) экран инвентаря + клики `container_click` (HashedStack: item varint, count, HashedPatchMap — хэши компонентов CRC32C не реализованы, для стеков с компонентами слать пусто → сервер пересинхронизирует); (g) креатив: `set_creative_mode_slot` (short + OPTIONAL_UNTRUSTED stack) и креатив-вкладки; (h) Use Item (188), предсказание постановки блока из руки (186), скорость ломания по инструменту (185)
-- [ ] TODO-231 [P0] Window/Menu система: Open Screen, Container Set Content/Slot/Property, Set Cursor Item, Close Container
-- [ ] TODO-232 [P0] Клики по слотам: Click Container (ModeClickType: pickup, quick move, swap, clone, throw, quick craft, pickup all), state_id, changed slots
-- [ ] TODO-233 [P0] Колесо/цифры хотбара, Set Carried Item, Drop (Q, Ctrl+Q), смена рук (F)
-- [ ] TODO-234 [P0] Рендер предметов в GUI (3D блоки/плоские), количество, durability bar, cooldown overlay, glint
-- [ ] TODO-235 [P0] Tooltip предмета: имя, lore, атрибуты, энчанты, durability, компоненты, F3+H advanced
+- [x] TODO-231 [P0] Window/Menu система: Open Screen, Container Set Content/Slot/Property, Set Cursor Item, Close Container
+- [~] TODO-232 [P0] (см. STATUS 2026-11-08: честные changedSlots/carried — дописать main.rs) Клики по слотам: Click Container (ModeClickType: pickup, quick move, swap, clone, throw, quick craft, pickup all), state_id, changed slots
+- [x] TODO-233 [P0] Колесо/цифры хотбара, Set Carried Item, Drop (Q, Ctrl+Q), смена рук (F)
+- [~] TODO-234 [P0] Рендер предметов в GUI (3D блоки/плоские), количество, durability bar, cooldown overlay, glint — glint в GUI проверен вживую 2026-11-08 (хотбар); durability bar/cooldown не начаты
+- [~] TODO-235 [P0] (имя/редкость/чары/lore готовы 2026-11-08) Tooltip предмета: имя, lore, атрибуты, энчанты, durability, компоненты, F3+H advanced
 - [ ] TODO-236 [P1] Экран инвентаря выживания + персонаж-превью, recipe book кнопка
 - [ ] TODO-237 [P1] Верстак, печь/коптильня/плавильня, сундук/большой/эндер/бочка/шалкер, раздатчик/выбрасыватель, воронка, наковальня, точило, зачарователь, ткацкий станок, картографический, камнерез, кузнечный стол, кузница, варочная стойка, маяк, лектерн, жители-торговля, лошадь/лама, крафтер, нейтральные
 - [ ] TODO-238 [P1] Рецепты: синхронизация Recipe Book Add/Remove/Settings, подсветка, «place recipe» (Place Ghost Recipe), группы
-- [ ] TODO-239 [P1] Creative inventory: вкладки (building, colored, natural, functional, redstone, tools, combat, food, ingredients, spawn eggs, op, search, saved hotbars), порядок как в ванили
+- [~] TODO-239 [P1] Creative inventory: вкладки (building, colored, natural, functional, redstone, tools, combat, food, ingredients, spawn eggs, op, search, saved hotbars), порядок как в ванили
+- [x] TODO-239a [P1] Креатив: данные вкладок генерировать из `CreativeModeTabs.java` 26.3 (цепи, цветные ступени/плиты, новые предметы вроде Sulfur Cube); счёт предметов сверить
+- [~] TODO-239b [P1] (данные и выдача готовы, иконки с тинтом нет) Креатив: генерируемые предметы (tipped arrows, зелья, зачарованные книги…) с компонентами + иконки
+- [ ] TODO-239c [P1] Иконки: spear, свет gui-трансформа (слишком тёмные), компас/часы вращаются, special-модели (сундук и др.)
+- [ ] TODO-239d [P1] Креатив: вкладка Saved Hotbars, тултип и курсор (рука) на вкладках, OP-вкладка
+- [ ] TODO-239e [P1] Тултип предметов полный (категория, атрибуты, прочность, чары, lore, редкость)
+- [ ] TODO-239f [P1] Креатив: визуал размазывания (подсветка + число), СКМ-размазывание по макс. стаку, Shift по хотбару стирает, Shift-выдача макс. стака; разобрать Shift по корзине
+- [ ] TODO-239g [P1] Креатив/инвентарь: (значки пустых слотов — готово 2026-11-08); Q и Shift+ЛКМ по корзине — проверено 2026-11-08; число слота поверх курсора и лимит размазывания — собрано, не проверено (см. STATUS)
+- [ ] TODO-239h [P1] Вторая рука: смена на F (проверить), рендер второй руки от первого лица, механика (использование, анимации)
 - [ ] TODO-240 [P1] Зачарование: GUI, клики, энчант-подсказки, сид игрока, уровни
 - [ ] TODO-241 [P1] Торговля с жителями: Merchant Offers, выбор рецепта, Select Trade, скидки, звёзды уровня
 - [ ] TODO-242 [P2] Data components UI: имя, lore, custom model data, attribute modifiers, enchantments, stored enchantments, trim, dyed color, banner patterns, potion contents, firework, written book, map, food, tool, container, bundle…
@@ -320,13 +328,13 @@
 - [ ] TODO-250 [P0] GUI-слой: система виджетов (screen, button, edit box, slider, list, scroll), фокус, tab-навигация, макеты
 - [ ] TODO-251 [P0] Шрифт и текст: растеризация bitmap/TTF по font json, ширина символов, кернинг ванильный, тени, жирный/курсив/подчёркнутый/зачёркнутый/obfuscated
 - [ ] TODO-252 [P0] Масштаб GUI (auto/1–N), координаты, 9-slice sprites, текстуры виджетов
-- [ ] TODO-253 [P0] HUD: хотбар, выбор слота, здоровье/голод/воздух/броня/XP-бар/уровень, прицел, джамп-бар лошади, босс-бары
-- [ ] TODO-254 [P0] Прицел: crosshair, attack indicator (cooldown), F3-прицел 3D-оси
+- [~] TODO-253 [P0] HUD: хотбар, выбор слота, здоровье/голод/воздух/броня/XP-бар/уровень, прицел, джамп-бар лошади, босс-бары — сердца/еда/броня/XP сделаны 2026-11-09; локатор-бар сделан 2026-11-09; осталось: воздух, эффекты, джамп-бар, босс-бары
+- [~] TODO-254 [P0] Прицел: crosshair ✔ (2026-11-08), attack indicator (cooldown) — спрайты и расчёт есть (hud.rs, attack_strength), вживую не сверен; F3-прицел 3D-оси не сделан
 - [x] TODO-255 [P0] Title screen: логотип, панорама, splash, кнопки, версия, copyright (ванильный вид)
 - [~] TODO-256 [P0] Экран мультиплеера: список серверов (`servers.dat`), ping, иконки, MOTD, direct connect, add/edit/delete
 - [ ] TODO-257 [P0] Экран подключения/загрузки: «Connecting...», «Loading terrain», disconnected screen (причина), «Encrypting…»
 - [~] TODO-258 [P0] Pause menu (Esc), Options (Controls, Video, Sound, Language, Skin Customization, Resource Packs, Accessibility, Chat Settings, Online…) — все опции с ванильными значениями по умолчанию
-- [ ] TODO-259 [P0] Чат: рендер (history, scroll, fade, цвета, opacity, width/height, narrator нет), ввод (history ↑↓), автодополнение Tab, clickable links, hover
+- [~] TODO-259 [P0] Чат: рендер (history, scroll, fade, цвета, opacity, width/height, narrator нет), ввод (history ↑↓), автодополнение Tab, clickable links, hover
 - [ ] TODO-260 [P0] Tab-лист: сетка игроков, пинг-иконки, header/footer, команды, gamemode цвета
 - [~] TODO-261 [P0] F3 экран отладки: координаты, чанк, биом, свет, FPS, память, GPU, версия, направление, цель-блок/сущность, сервер — **ванильная раскладка и формат строк**
 - [ ] TODO-262 [P0] Экран смерти, «Вы умерли!», счёт, кнопки Respawn/Title
@@ -335,7 +343,7 @@
 - [ ] TODO-265 [P1] Scoreboard: sidebar, belowName, list; Teams (префикс/суффикс/цвет/видимость); Update Objectives/Score, Reset Score, Display Objective
 - [ ] TODO-266 [P1] Advancements: экран (дерево, иконки, рамки, прогресс), toast, пакеты Update Advancements/Select Tab
 - [ ] TODO-267 [P1] Экран статистик, Open Statistics/Award Statistics
-- [ ] TODO-268 [P1] Экран ресурспаков: список, перетаскивание, совместимость pack_format, предупреждения
+- [x] TODO-268 [P1] Экран ресурспаков: список, перетаскивание, совместимость pack_format, предупреждения
 - [ ] TODO-269 [P1] Экран языка, скинов, звуков (категории громкости), графики (все ванильные слайдеры/переключатели)
 - [ ] TODO-270 [P1] Экран «Ошибка подключения»: версия клиента/сервера несовместима с ванильными сообщениями (в нашем случае нужна политика для multi-version)
 - [ ] TODO-271 [P1] Диалоги (Dialog API, если в версии): Show Dialog, кнопки, ввод
@@ -391,7 +399,7 @@
 ## Глава 16. Игровая механика на клиенте (всё, что видит игрок)
 - [ ] TODO-314 [P0] Режимы игры: survival/creative/adventure/spectator, Game Event (change gamemode, begin raining, win game…), Player Abilities, Gamemode switcher F3+F4
 - [ ] TODO-315 [P0] Здоровье/голод/насыщение: Set Health/Food пакеты, HUD, эффект дрожания, мигание сердец (урон/отрегенерация/яд/иссушение/заморозка/поглощение), absorption
-- [ ] TODO-316 [P0] Опыт: Set Experience, оболочка уровня, XP-бар, звуки, орбы
+- [~] TODO-316 [P0] Опыт: Set Experience, оболочка уровня, XP-бар, звуки, орбы — XP-бар/уровень сделаны 2026-11-09 (звуки/орбы нет)
 - [ ] TODO-317 [P0] Эффекты зелий: Entity Effect, иконки в HUD (+таймеры), инвентарь эффектов, рендер эффектов на экране (nausea, blindness, darkness, nightvision)
 - [ ] TODO-318 [P0] Броня: HUD, damage reduction визуализация нет (только HUD), прочность, звуки
 - [ ] TODO-319 [P0] Смерть и респавн: Combat Death, Death Screen, hardcore режим (экран, замена кнопок), spectate
@@ -402,7 +410,7 @@
 - [ ] TODO-324 [P1] Приготовление/плавка: прогресс-стрелки, огонь печи, xp
 - [ ] TODO-325 [P1] Варка зелий: стойка, прогресс, fuel
 - [ ] TODO-326 [P1] Торговля: цены, скидки (Hero of the Village), блокировки, обновления
-- [ ] TODO-327 [P1] Редстоун-визуал: провод (цвет по силе, частицы, соединения), повторитель/компаратор состояния, поршни (анимация Block Event: рука поршня — block entity piston moving), observer, target, дроппер-визуал, TNT мигание, рельсы активные
+- [~] TODO-327 [P1] (поршни: клиентская симуляция сделана, не проверено вживую; толкание игрока и дым раздатчика сделаны 2026-11-08; TNT-мигание сделано (без дыма); осталось: колокол (нужен BE-рендер), проверка мёда вживую; слизь и дым раздатчика проверены) Редстоун-визуал: провод (цвет по силе, частицы, соединения), повторитель/компаратор состояния, поршни (анимация Block Event: рука поршня — block entity piston moving), observer, target, дроппер-визуал, TNT мигание, рельсы активные
 - [ ] TODO-328 [P1] Огонь/лава/вода течение: рендер анимаций, пузыри, дым, испарение в Nether
 - [ ] TODO-329 [P1] Звуки/частицы блоков-«событий»: Level Event (дверь, диск, эффекты зелья, вспышка, разрушение блока), Level Particles
 - [ ] TODO-330 [P1] Фейерверки: Firework Rocket entity, взрыв (Entity Event 17), форма/цвета/трейл/мерцание — частицы 1:1

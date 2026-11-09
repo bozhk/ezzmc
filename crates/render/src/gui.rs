@@ -24,6 +24,16 @@ struct Tex {
 
 pub struct GuiPainter {
     sprite_pipe: wgpu::RenderPipeline,
+    glint_pipe: wgpu::RenderPipeline,
+    invert_pipe: wgpu::RenderPipeline,
+    /// (имя текстуры, квад) — рисуются после всего с инверсным смешиванием (прицел).
+    inverted: Vec<(String, u32)>,
+    glint_bgl: wgpu::BindGroupLayout,
+    glint_buf: wgpu::Buffer,
+    glint_group: Option<wgpu::BindGroup>,
+    _glint_tex: Option<wgpu::Texture>,
+    /// m (mat2 столбцами), offset.xy, alpha
+    glint_params: [f32; 8],
     pano_pipe: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
     nearest: wgpu::Sampler,
@@ -36,7 +46,7 @@ pub struct GuiPainter {
     texs: HashMap<String, Tex>,
     verts: Vec<V>,
     /// (имя текстуры, первый квад, число квадов)
-    batches: Vec<(String, u32, u32)>,
+    batches: Vec<(String, u32, u32, bool)>,
     scale: f32,
 }
 
@@ -121,6 +131,121 @@ impl GuiPainter {
                 cache: None,
             })
         };
+        // VANILLA: прицел — RenderPipelines.CROSSHAIR: ONE_MINUS_DST_COLOR / ONE_MINUS_SRC_COLOR, альфа ONE/ZERO.
+        let invert_pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("gui invert"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_sprite"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<V>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::OneMinusDst,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrc,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::Zero,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let glint_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("gui glint"),
+            entries: &[
+                entry(
+                    0,
+                    wgpu::ShaderStages::FRAGMENT,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                entry(
+                    1,
+                    wgpu::ShaderStages::FRAGMENT,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
+                entry(
+                    2,
+                    wgpu::ShaderStages::FRAGMENT,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ),
+            ],
+        });
+        let glint_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("gui glint"),
+            bind_group_layouts: &[&bgl, &glint_bgl],
+            immediate_size: 0,
+        });
+        let add = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let glint_pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("gui glint"),
+            layout: Some(&glint_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_sprite"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<V>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_glint"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color,
+                    blend: Some(wgpu::BlendState {
+                        color: add,
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::Zero,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let samp = |f| {
             device.create_sampler(&wgpu::SamplerDescriptor {
                 mag_filter: f,
@@ -178,6 +303,14 @@ impl GuiPainter {
             .collect();
         Self {
             sprite_pipe: mk("vs_sprite", "gui sprite"),
+            glint_pipe,
+            invert_pipe,
+            inverted: Vec::new(),
+            glint_bgl,
+            glint_buf: ubuf("gui glint"),
+            glint_group: None,
+            _glint_tex: None,
+            glint_params: [0.0; 8],
             pano_pipe: mk("vs_pano", "gui pano"),
             bgl,
             nearest: samp(wgpu::FilterMode::Nearest),
@@ -276,6 +409,7 @@ impl GuiPainter {
     pub fn begin(&mut self, scale: u32) {
         self.verts.clear();
         self.batches.clear();
+        self.inverted.clear();
         self.scale = scale as f32;
     }
 
@@ -303,9 +437,113 @@ impl GuiPainter {
         }
         let q = (self.verts.len() / 4 - 1) as u32;
         match self.batches.last_mut() {
-            Some(b) if b.0 == name => b.2 += 1,
-            _ => self.batches.push((name.to_owned(), q, 1)),
+            Some(b) if b.0 == name && !b.3 => b.2 += 1,
+            _ => self.batches.push((name.to_owned(), q, 1, false)),
         }
+    }
+
+    /// Спрайт с инверсным смешиванием, рисуется поверх всего (VANILLA: прицел).
+    pub fn blit_inverted(&mut self, name: &str, x: f32, y: f32, w: f32, h: f32, uv: [f32; 4]) {
+        let before = self.verts.len();
+        self.blit(name, x, y, w, h, uv, 0xFFFF_FFFF);
+        if self.verts.len() == before {
+            return;
+        }
+        let q = (self.verts.len() / 4 - 1) as u32;
+        // квад не должен попасть в обычную пачку
+        if let Some(b) = self.batches.last_mut() {
+            if b.1 + b.2 > q {
+                b.2 -= 1;
+                if b.2 == 0 {
+                    self.batches.pop();
+                }
+            }
+        }
+        self.inverted.push((name.to_owned(), q));
+    }
+
+    /// Блеск зачарования поверх иконки `name` (аддитивно, по альфе иконки).
+    /// Вызывать сразу после `blit` той же иконки (порядок отрисовки сохраняется).
+    pub fn glint(&mut self, name: &str, x: f32, y: f32, w: f32, h: f32) {
+        if self.glint_group.is_none() || !self.texs.contains_key(name) {
+            return;
+        }
+        self.blit(name, x, y, w, h, [0.0, 0.0, 1.0, 1.0], 0xFFFF_FFFF);
+        if let Some(b) = self.batches.last_mut() {
+            if b.3 {
+                return;
+            }
+            // blit мог дописать квад в предыдущую пачку: отделяем его в glint-пачку
+            if b.2 > 1 {
+                b.2 -= 1;
+                let q = b.1 + b.2;
+                self.batches.push((name.to_owned(), q, 1, true));
+            } else {
+                b.3 = true;
+            }
+        }
+    }
+
+    /// Загрузить текстуру блеска (RGBA8, повтор, билинейно).
+    pub fn set_glint_texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        rgba: &[u8],
+        w: u32,
+        h: u32,
+    ) {
+        let tex = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("glint"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            rgba,
+        );
+        let view = tex.create_view(&Default::default());
+        let samp = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            ..Default::default()
+        });
+        self.glint_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glint"),
+            layout: &self.glint_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.glint_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&samp),
+                },
+            ],
+        }));
+        self._glint_tex = Some(tex);
+    }
+
+    /// Параметры блеска кадра: матрица текстуры (2×2 столбцами), смещение, сила.
+    pub fn set_glint_params(&mut self, m: [f32; 4], off: [f32; 2], alpha: f32) {
+        self.glint_params = [m[0], m[1], m[2], m[3], off[0], off[1], alpha, 0.0];
     }
 
     /// Плитка `name` (тайлинг не нужен для 16×16 фона — UV за пределы 0..1 с Repeat не используем:
@@ -392,6 +630,7 @@ impl GuiPainter {
                 * Mat4::from_axis_angle(Vec3::Y, ry.to_radians());
             queue.write_buffer(&self.mvp, 0, bytes(&(proj * model).to_cols_array()));
         }
+        queue.write_buffer(&self.glint_buf, 0, bytes(&self.glint_params));
         queue.write_buffer(&self.vb, 0, bytes(&self.verts));
         let mut enc =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gui") });
@@ -427,10 +666,29 @@ impl GuiPainter {
             }
             pass.set_pipeline(&self.sprite_pipe);
             pass.set_vertex_buffer(0, self.vb.slice(..));
-            for (name, q, n) in &self.batches {
+            let mut glinting = false;
+            for (name, q, n, g) in &self.batches {
                 if let Some(t) = self.texs.get(name) {
+                    if *g != glinting {
+                        glinting = *g;
+                        if *g {
+                            pass.set_pipeline(&self.glint_pipe);
+                            pass.set_bind_group(1, self.glint_group.as_ref(), &[]);
+                        } else {
+                            pass.set_pipeline(&self.sprite_pipe);
+                        }
+                    }
                     pass.set_bind_group(0, &t.sprite, &[]);
                     pass.draw_indexed(q * 6..(q + n) * 6, 0, 0..1);
+                }
+            }
+            if !self.inverted.is_empty() {
+                pass.set_pipeline(&self.invert_pipe);
+                for (name, q) in &self.inverted {
+                    if let Some(t) = self.texs.get(name) {
+                        pass.set_bind_group(0, &t.sprite, &[]);
+                        pass.draw_indexed(q * 6..(q + 1) * 6, 0, 0..1);
+                    }
                 }
             }
         }

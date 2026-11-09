@@ -1,0 +1,440 @@
+P oak_sapling POPPED
+P spruce_sapling POPPED
+P birch_sapling POPPED
+P jungle_sapling POPPED
+P acacia_sapling POPPED
+P cherry_sapling POPPED
+P dark_oak_sapling POPPED
+P pale_oak_sapling POPPED
+P mangrove_propagule POPPED
+P poplar_sapling POPPED
+P water POPPED
+P lava POPPED
+P suspicious_sand POPPED
+P suspicious_gravel POPPED
+P cherry_leaves POPPED
+P pale_oak_leaves POPPED
+P bed POPPED
+P straw_bed POPPED
+P cobweb POPPED
+P short_grass POPPED
+P fern POPPED
+P dead_bush POPPED
+P bush POPPED
+P red_shrub POPPED
+P short_dry_grass POPPED
+P tall_dry_grass POPPED
+P seagrass POPPED
+P tall_seagrass POPPED
+P piston_head IMMOVEABLE
+P moving_piston IMMOVEABLE
+P dandelion POPPED
+P golden_dandelion POPPED
+P torchflower POPPED
+P poppy POPPED
+P blue_orchid POPPED
+P allium POPPED
+P azure_bluet POPPED
+P red_tulip POPPED
+P orange_tulip POPPED
+P white_tulip POPPED
+P pink_tulip POPPED
+P oxeye_daisy POPPED
+P cornflower POPPED
+P wither_rose POPPED
+P lily_of_the_valley POPPED
+P brown_mushroom POPPED
+P red_mushroom POPPED
+P obsidian IMMOVEABLE
+P torch POPPED
+P wall_torch POPPED
+P fire POPPED
+P soul_fire POPPED
+P redstone_wire POPPED
+P wheat POPPED
+P oak_door POPPED
+P ladder POPPED
+P lever POPPED
+P stone_pressure_plate POPPED
+P iron_door POPPED
+P oak_pressure_plate POPPED
+P spruce_pressure_plate POPPED
+P birch_pressure_plate POPPED
+P jungle_pressure_plate POPPED
+P acacia_pressure_plate POPPED
+P cherry_pressure_plate POPPED
+P dark_oak_pressure_plate POPPED
+P pale_oak_pressure_plate POPPED
+P mangrove_pressure_plate POPPED
+P poplar_pressure_plate POPPED
+P bamboo_pressure_plate POPPED
+P redstone_torch POPPED
+P redstone_wall_torch POPPED
+P snow POPPED
+P cactus POPPED
+P cactus_flower POPPED
+P sugar_cane POPPED
+P soul_torch POPPED
+P soul_wall_torch POPPED
+P copper_torch POPPED
+P copper_wall_torch POPPED
+P nether_portal IMMOVEABLE
+P carved_pumpkin POPPED
+P jack_o_lantern POPPED
+P cake POPPED
+P repeater POPPED
+P pumpkin POPPED
+P melon POPPED
+P attached_pumpkin_stem POPPED
+P attached_melon_stem POPPED
+P pumpkin_stem POPPED
+P melon_stem POPPED
+P vine POPPED
+P glow_lichen POPPED
+P resin_clump POPPED
+P lily_pad POPPED
+P nether_wart POPPED
+P end_portal IMMOVEABLE
+P dragon_egg POPPED
+P cocoa POPPED
+P shelf_mushroom POPPED
+P tripwire_hook POPPED
+P tripwire POPPED
+P carrots POPPED
+P potatoes POPPED
+P skeleton_skull POPPED
+P skeleton_wall_skull POPPED
+P wither_skeleton_skull POPPED
+P wither_skeleton_wall_skull POPPED
+P zombie_head POPPED
+P zombie_wall_head POPPED
+P player_head POPPED
+P player_wall_head POPPED
+P creeper_head POPPED
+P creeper_wall_head POPPED
+P dragon_head POPPED
+P dragon_wall_head POPPED
+P piglin_head POPPED
+P piglin_wall_head POPPED
+P anvil IMMOVEABLE
+P chipped_anvil IMMOVEABLE
+P damaged_anvil IMMOVEABLE
+P light_weighted_pressure_plate POPPED
+P heavy_weighted_pressure_plate POPPED
+P comparator POPPED
+P barrier IMMOVEABLE
+P sunflower POPPED
+P lilac POPPED
+P rose_bush POPPED
+P peony POPPED
+P tall_grass POPPED
+P large_fern POPPED
+P spruce_door POPPED
+P birch_door POPPED
+P jungle_door POPPED
+P acacia_door POPPED
+P cherry_door POPPED
+P dark_oak_door POPPED
+P pale_oak_door POPPED
+P mangrove_door POPPED
+P poplar_door POPPED
+P bamboo_door POPPED
+P chorus_plant POPPED
+P chorus_flower POPPED
+P torchflower_crop POPPED
+P pitcher_crop POPPED
+P pitcher_plant POPPED
+P beetroots POPPED
+P end_gateway IMMOVEABLE
+P structure_void POPPED
+P glazed_terracotta PUSH
+P kelp POPPED
+P kelp_plant POPPED
+P turtle_egg POPPED
+P tube_coral POPPED
+P brain_coral POPPED
+P bubble_coral POPPED
+P fire_coral POPPED
+P horn_coral POPPED
+P tube_coral_fan POPPED
+P brain_coral_fan POPPED
+P bubble_coral_fan POPPED
+P fire_coral_fan POPPED
+P horn_coral_fan POPPED
+P tube_coral_wall_fan POPPED
+P brain_coral_wall_fan POPPED
+P bubble_coral_wall_fan POPPED
+P fire_coral_wall_fan POPPED
+P horn_coral_wall_fan POPPED
+P sea_pickle POPPED
+P bamboo_sapling POPPED
+P bamboo POPPED
+P bubble_column POPPED
+P scaffolding POPPED
+P grindstone IMMOVEABLE
+P bell POPPED
+P lantern POPPED
+P soul_lantern POPPED
+P sweet_berry_bush POPPED
+P warped_fungus POPPED
+P warped_roots POPPED
+P nether_sprouts POPPED
+P crimson_fungus POPPED
+P weeping_vines POPPED
+P weeping_vines_plant POPPED
+P twisting_vines POPPED
+P twisting_vines_plant POPPED
+P crimson_roots POPPED
+P crimson_pressure_plate POPPED
+P warped_pressure_plate POPPED
+P crimson_door POPPED
+P warped_door POPPED
+P crying_obsidian IMMOVEABLE
+P respawn_anchor IMMOVEABLE
+P lodestone IMMOVEABLE
+P polished_blackstone_pressure_plate POPPED
+P candle_cake POPPED
+P dyed_candle_cake POPPED
+P budding_amethyst POPPED
+P amethyst_cluster POPPED
+P large_amethyst_bud POPPED
+P medium_amethyst_bud POPPED
+P small_amethyst_bud POPPED
+P sculk_vein POPPED
+P pointed_dripstone POPPED
+P sulfur_spike POPPED
+P cave_vines POPPED
+P cave_vines_plant POPPED
+P spore_blossom POPPED
+P azalea POPPED
+P flowering_azalea POPPED
+P moss_carpet POPPED
+P pink_petals POPPED
+P wildflowers POPPED
+P leaf_litter POPPED
+P moss_block POPPED
+P big_dripleaf POPPED
+P big_dripleaf_stem POPPED
+P small_dripleaf POPPED
+P hanging_roots POPPED
+P frogspawn POPPED
+P reinforced_deepslate IMMOVEABLE
+P decorated_pot POPPED
+P pale_moss_block POPPED
+P pale_moss_carpet POPPED
+P pale_hanging_moss POPPED
+P open_eyeblossom POPPED
+P closed_eyeblossom POPPED
+P firefly_bush POPPED
+P white_glazed_terracotta PUSH
+P orange_glazed_terracotta PUSH
+P magenta_glazed_terracotta PUSH
+P light_blue_glazed_terracotta PUSH
+P yellow_glazed_terracotta PUSH
+P lime_glazed_terracotta PUSH
+P pink_glazed_terracotta PUSH
+P gray_glazed_terracotta PUSH
+P light_gray_glazed_terracotta PUSH
+P cyan_glazed_terracotta PUSH
+P purple_glazed_terracotta PUSH
+P blue_glazed_terracotta PUSH
+P brown_glazed_terracotta PUSH
+P green_glazed_terracotta PUSH
+P red_glazed_terracotta PUSH
+P black_glazed_terracotta PUSH
+E acacia_hanging_sign
+E acacia_shelf
+E acacia_sign
+E acacia_wall_hanging_sign
+E acacia_wall_sign
+E bamboo_hanging_sign
+E bamboo_shelf
+E bamboo_sign
+E bamboo_wall_hanging_sign
+E bamboo_wall_sign
+E banne
+E barrel
+E beacon
+E bee_nest
+E beehive
+E bell
+E birch_hanging_sign
+E birch_shelf
+E birch_sign
+E birch_wall_hanging_sign
+E birch_wall_sign
+E black_banner
+E black_bed
+E black_shulker_box
+E black_wall_banner
+E blast_furnace
+E blue_banner
+E blue_bed
+E blue_shulker_box
+E blue_wall_banner
+E brewing_stand
+E brown_banner
+E brown_bed
+E brown_shulker_box
+E brown_wall_banner
+E calibrated_sculk_sensor
+E campfire
+E chain_command_block
+E cherry_hanging_sign
+E cherry_shelf
+E cherry_sign
+E cherry_wall_hanging_sign
+E cherry_wall_sign
+E chest
+E chiseled_bookshelf
+E command_block
+E comparator
+E conduit
+E copper_ches
+E copper_golem_statu
+E crafter
+E creaking_heart
+E creeper_head
+E creeper_wall_head
+E crimson_hanging_sign
+E crimson_shelf
+E crimson_sign
+E crimson_wall_hanging_sign
+E crimson_wall_sign
+E cyan_banner
+E cyan_bed
+E cyan_shulker_box
+E cyan_wall_banner
+E dark_oak_hanging_sign
+E dark_oak_shelf
+E dark_oak_sign
+E dark_oak_wall_hanging_sign
+E dark_oak_wall_sign
+E daylight_detector
+E decorated_pot
+E dispenser
+E dragon_head
+E dragon_wall_head
+E dropper
+E dyed_shulker_bo
+E enchanting_table
+E end_gateway
+E end_portal
+E ender_chest
+E furnace
+E gray_banner
+E gray_bed
+E gray_shulker_box
+E gray_wall_banner
+E green_banner
+E green_bed
+E green_shulker_box
+E green_wall_banner
+E hopper
+E jigsaw
+E jukebox
+E jungle_hanging_sign
+E jungle_shelf
+E jungle_sign
+E jungle_wall_hanging_sign
+E jungle_wall_sign
+E lectern
+E light_blue_banner
+E light_blue_bed
+E light_blue_shulker_box
+E light_blue_wall_banner
+E light_gray_banner
+E light_gray_bed
+E light_gray_shulker_box
+E light_gray_wall_banner
+E lime_banner
+E lime_bed
+E lime_shulker_box
+E lime_wall_banner
+E magenta_banner
+E magenta_bed
+E magenta_shulker_box
+E magenta_wall_banner
+E mangrove_hanging_sign
+E mangrove_shelf
+E mangrove_sign
+E mangrove_wall_hanging_sign
+E mangrove_wall_sign
+E moving_piston
+E oak_hanging_sign
+E oak_shelf
+E oak_sign
+E oak_wall_hanging_sign
+E oak_wall_sign
+E orange_banner
+E orange_bed
+E orange_shulker_box
+E orange_wall_banner
+E pale_oak_hanging_sign
+E pale_oak_shelf
+E pale_oak_sign
+E pale_oak_wall_hanging_sign
+E pale_oak_wall_sign
+E piglin_head
+E piglin_wall_head
+E pink_banner
+E pink_bed
+E pink_shulker_box
+E pink_wall_banner
+E player_head
+E player_wall_head
+E poplar_hanging_sign
+E poplar_shelf
+E poplar_sign
+E poplar_wall_hanging_sign
+E poplar_wall_sign
+E potent_sulfur
+E purple_banner
+E purple_bed
+E purple_shulker_box
+E purple_wall_banner
+E red_banner
+E red_bed
+E red_shulker_box
+E red_wall_banner
+E repeating_command_block
+E sculk_catalyst
+E sculk_sensor
+E sculk_shrieker
+E shulker_box
+E skeleton_skull
+E skeleton_wall_skull
+E smoker
+E soul_campfire
+E spawner
+E spruce_hanging_sign
+E spruce_shelf
+E spruce_sign
+E spruce_wall_hanging_sign
+E spruce_wall_sign
+E structure_block
+E suspicious_gravel
+E suspicious_sand
+E test_block
+E test_instance_block
+E trapped_chest
+E trial_spawner
+E vault
+E wall_banne
+E warped_hanging_sign
+E warped_shelf
+E warped_sign
+E warped_wall_hanging_sign
+E warped_wall_sign
+E white_banner
+E white_bed
+E white_shulker_box
+E white_wall_banner
+E wither_skeleton_skull
+E wither_skeleton_wall_skull
+E yellow_banner
+E yellow_bed
+E yellow_shulker_box
+E yellow_wall_banner
+E zombie_head
+E zombie_wall_head

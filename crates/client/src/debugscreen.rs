@@ -183,6 +183,16 @@ pub fn build(v: &WorldView, e: &Env) -> (Vec<String>, Vec<String>) {
             wrap_degrees(e.pitch)
         ),
     ];
+    // Скорость за последний тик (блоков/с): горизонтальная и общая.
+    {
+        let (p, q) = (v.player.pos, v.player.prev_pos);
+        let (dx, dy, dz) = (p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+        pos.push(format!(
+            "Speed: {:.3} b/s (XZ {:.3})",
+            (dx * dx + dy * dy + dz * dz).sqrt() * 20.0,
+            (dx * dx + dz * dz).sqrt() * 20.0
+        ));
+    }
     pos.push(format!(
         "Section-relative: {:02} {:02} {:02}",
         b[0] & 15,
@@ -207,7 +217,7 @@ pub fn build(v: &WorldView, e: &Env) -> (Vec<String>, Vec<String>) {
     left.push(light);
     left.push(String::new());
 
-    if let Some(t) = v.target {
+    if let Some(t) = v.look_target {
         right.extend(state_lines(
             "Targeted Block",
             t.pos,
@@ -217,7 +227,7 @@ pub fn build(v: &WorldView, e: &Env) -> (Vec<String>, Vec<String>) {
         right.push(String::new());
     }
     if let Some((t, f)) = v
-        .fluid_target
+        .look_fluid
         .and_then(|t| bi::fluid(t.state).map(|f| (t, f)))
     {
         let (n, p) = fluid_props(f);

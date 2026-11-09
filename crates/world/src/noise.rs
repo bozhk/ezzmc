@@ -51,6 +51,11 @@ impl LegacyRandom {
         (self.seed >> (48 - bits)) as i32
     }
 
+    // VANILLA: BitRandomSource#nextBoolean
+    pub fn next_boolean(&mut self) -> bool {
+        self.next(1) != 0
+    }
+
     // VANILLA: BitRandomSource#nextInt(int)
     pub fn next_int_bound(&mut self, bound: i32) -> i32 {
         if bound & (bound - 1) == 0 {

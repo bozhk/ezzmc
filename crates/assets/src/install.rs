@@ -20,6 +20,13 @@ pub fn minecraft_dirs() -> Vec<PathBuf> {
     if let Some(d) = std::env::var_os("EZZMC_MINECRAFT_DIR") {
         v.push(PathBuf::from(d));
     }
+    // Папка `minecraft/` рядом с exe (релиз с вложенными ресурсами).
+    if let Some(d) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|p| p.join("minecraft")))
+    {
+        v.push(d);
+    }
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         v.push(home.join(".minecraft"));
         v.push(home.join(".var/app/com.mojang.Minecraft/data/minecraft"));
