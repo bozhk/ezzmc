@@ -1,6 +1,7 @@
 mod ambient;
 mod atlasanim;
 mod audio;
+mod armor;
 mod avatar;
 mod blocksound;
 mod charpreview;
@@ -8,6 +9,7 @@ mod chat;
 mod chatnet;
 mod clipboard;
 mod control;
+mod cooldown;
 #[allow(dead_code)] // 230: модель готова, в netthread/WorldView ещё не подключена
 mod creative_data;
 mod creativescreen;
@@ -34,6 +36,7 @@ mod itemphys;
 mod keymap;
 mod levelsound;
 mod log;
+mod mobs;
 mod music;
 mod netthread;
 mod packrepo;
@@ -1588,6 +1591,16 @@ impl ApplicationHandler for App {
                 if let Some(w) = &self.window {
                     self.mouse.release(w);
                 }
+                // VANILLA: Minecraft#setWindowActive(false) → pauseGame(false) (pauseOnLostFocus):
+                // в игре без открытого экрана открывается меню паузы, чтобы после возврата курсор не «залипал».
+                let playing = !self.menu_active
+                    && !self.inv_open
+                    && !self.chat.open
+                    && !self.dead_screen
+                    && self.view.as_ref().is_some_and(|v| v.joined);
+                if playing && self.focus.pause_on_lost_focus {
+                    self.open_pause_menu();
+                }
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 if let Some(w) = &self.window {
@@ -1948,6 +1961,11 @@ impl ApplicationHandler for App {
                                     .as_ref()
                                     .map(|(_, rm)| charpreview::CharPreview::new(rm));
                             }
+                            if inv_open {
+                                if let Some(cp) = self.char_preview.as_mut() {
+                                    cp.set_snap(v.preview_snapshot());
+                                }
+                            }
                             let preview = &mut self.char_preview;
                             let lang = &self.item_lang;
                             let cur = self.cursor_px;
@@ -2138,6 +2156,7 @@ impl ApplicationHandler for App {
                                                 if let (true, Some(cp)) =
                                                     (lay.is_player(), preview.as_mut())
                                                 {
+                                                    cp.set_armor(&invr.slots);
                                                     cp.draw(
                                                         p,
                                                         &g.device,

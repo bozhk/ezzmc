@@ -32,17 +32,20 @@ impl SortState {
     /// Порядок квадов от дальнего к ближнему (стабильно, как `IntArrays.mergeSort`).
     /// `camera` — позиция камеры относительно начала секции.
     pub fn sorted_order(&self, camera: [f32; 3]) -> Vec<u32> {
-        let d: Vec<f32> = self
+        // Квадрат расстояния ≥ 0 → порядок f32 совпадает с порядком битов; инверсия даёт «дальние первыми»,
+        // младшие 32 бита — индекс квада (равные расстояния — исходный порядок, как у стабильной сортировки).
+        let mut keys: Vec<u64> = self
             .centroids
             .iter()
-            .map(|c| {
+            .enumerate()
+            .map(|(i, c)| {
                 let (x, y, z) = (c[0] - camera[0], c[1] - camera[1], c[2] - camera[2]);
-                x * x + y * y + z * z
+                let d = x * x + y * y + z * z;
+                (u64::from(!d.to_bits()) << 32) | i as u64
             })
             .collect();
-        let mut idx: Vec<u32> = (0..self.centroids.len() as u32).collect();
-        idx.sort_by(|&a, &b| d[b as usize].total_cmp(&d[a as usize]));
-        idx
+        keys.sort_unstable();
+        keys.into_iter().map(|k| k as u32).collect()
     }
 
     /// Индексный буфер: на квад `0,1,2,2,3,0` (+4·номер квада).

@@ -90,15 +90,63 @@ fn fluid_props(f: bi::Fluid) -> (&'static str, Vec<(String, String)>) {
     (n, p)
 }
 
+/// RSS читается из /proc, поэтому значение кешируется на секунду (экран F3 перерисовывается каждый кадр).
 fn rss_mib() -> u64 {
-    std::fs::read_to_string("/proc/self/status")
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static CACHE: Mutex<Option<(Instant, u64)>> = Mutex::new(None);
+    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, v)) = *c {
+        if at.elapsed() < Duration::from_secs(1) {
+            return v;
+        }
+    }
+    let v = std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| {
             s.lines()
                 .find_map(|l| l.strip_prefix("VmRSS:"))
                 .and_then(|l| l.split_whitespace().next()?.parse::<u64>().ok())
         })
-        .map_or(0, |kb| kb / 1024)
+        .map_or(0, |kb| kb / 1024);
+    *c = Some((Instant::now(), v));
+    v
+}
+
+/// VRAM (занято/всего, МиБ) и мощность (Вт) по `nvidia-smi`; опрос раз в секунду в фоне.
+/// `None`, если утилиты нет (не NVIDIA) — тогда строка не выводится.
+fn gpu_stats() -> Option<(u32, u32, f32)> {
+    use std::sync::{Mutex, Once};
+    static STATS: Mutex<Option<(u32, u32, f32)>> = Mutex::new(None);
+    static START: Once = Once::new();
+    START.call_once(|| {
+        let _ = std::thread::Builder::new()
+            .name("gpu-stats".into())
+            .spawn(|| loop {
+                let Ok(out) = std::process::Command::new("nvidia-smi")
+                    .args([
+                        "--query-gpu=memory.used,memory.total,power.draw",
+                        "--format=csv,noheader,nounits",
+                    ])
+                    .output()
+                else {
+                    return;
+                };
+                if !out.status.success() {
+                    return;
+                }
+                let t = String::from_utf8_lossy(&out.stdout);
+                let mut it = t.lines().next().unwrap_or("").split(',').map(str::trim);
+                let used = it.next().and_then(|x| x.parse().ok());
+                let total = it.next().and_then(|x| x.parse().ok());
+                let watts = it.next().and_then(|x| x.parse().ok()).unwrap_or(0.0);
+                if let (Some(u), Some(m), Ok(mut g)) = (used, total, STATS.lock()) {
+                    *g = Some((u, m, watts));
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            });
+    });
+    STATS.lock().ok().and_then(|g| *g)
 }
 
 fn cpu_info() -> &'static str {
@@ -235,6 +283,15 @@ pub fn build(v: &WorldView, e: &Env) -> (Vec<String>, Vec<String>) {
         right.push(String::new());
     }
     right.push(format!("Mem: {} MiB (RSS)", rss_mib()));
+    if let Some((used, total, watts)) = gpu_stats() {
+        right.push(format!(
+            "VRAM: {used}/{total} MiB ({}%)",
+            used * 100 / total.max(1)
+        ));
+        if watts > 0.0 {
+            right.push(format!("GPU Power: {watts:.0} W"));
+        }
+    }
     right.push(String::new());
     let g = e.gpu;
     right.push(format!("CPU: {}", cpu_info()));

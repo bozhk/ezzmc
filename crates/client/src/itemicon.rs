@@ -52,6 +52,8 @@ pub struct Ctx {
     pub compass: Option<u8>,
     /// `lodestone_tracker` есть; внутри — цель (x, z) в текущем измерении.
     pub lode: Option<Option<(i32, i32)>>,
+    /// Предмет в руке используется (лук/арбалет): тики использования, не больше 30.
+    pub using: Option<u8>,
 }
 
 /// Дополнить контекст динамическими свойствами предмета по имени (часы/компасы).
@@ -186,11 +188,13 @@ pub(crate) fn eval(v: &Value, cx: &Ctx, dc: &str, out: &mut Vec<Layer>) {
         }
         "condition" => {
             let prop = obj.get("property").and_then(Value::as_str).unwrap_or("");
-            let on = prop.ends_with("has_component")
+            let on = (prop.ends_with("has_component")
                 && obj
                     .get("component")
                     .and_then(Value::as_str)
-                    .is_some_and(|c| c.ends_with("lodestone_tracker") && cx.lode.is_some());
+                    .is_some_and(|c| c.ends_with("lodestone_tracker") && cx.lode.is_some()))
+                // VANILLA: UsingItemProperty — предмет в руке используется этим существом.
+                || (prop.ends_with("using_item") && cx.using.is_some());
             if let Some(f) = obj.get(if on { "on_true" } else { "on_false" }) {
                 eval(f, cx, dc, out);
             }
@@ -201,6 +205,13 @@ pub(crate) fn eval(v: &Value, cx: &Ctx, dc: &str, out: &mut Vec<Layer>) {
             let val = match prop.trim_start_matches("minecraft:") {
                 "time" => cx.clock.map_or(0.0, f64::from),
                 "compass" => cx.compass.map_or(0.0, f64::from),
+                // VANILLA: UseDuration (remaining=false): тики использования × scale.
+                "use_duration" => {
+                    cx.using.map_or(0.0, f64::from)
+                        * obj.get("scale").and_then(Value::as_f64).unwrap_or(1.0)
+                }
+                // VANILLA: CrossbowPull: ticks / chargeDuration (25 без Быстрой перезарядки).
+                "crossbow/pull" => (cx.using.map_or(0.0, f64::from) / 25.0).min(1.0),
                 _ => 0.0,
             };
             let hit = obj.get("entries").and_then(Value::as_array).and_then(|es| {

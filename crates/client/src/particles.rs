@@ -68,6 +68,8 @@ enum Kind {
     Huge,
     /// PortalParticle (жемчуг Энда, портал).
     Portal,
+    /// CritParticle (крит-стрела, удар критом).
+    Crit,
 }
 
 /// VANILLA: DripParticle.* — стадия капли.
@@ -423,6 +425,12 @@ impl Particle {
                 self.base_tick(level);
                 self.sprite_from_age();
             }
+            // VANILLA: CritParticle#tick.
+            Kind::Crit => {
+                self.base_tick(level);
+                self.rgb[1] *= 0.96;
+                self.rgb[2] *= 0.9;
+            }
             Kind::WaterDrop => self.water_drop_tick(level),
             Kind::Bubble => self.bubble_tick(level),
             Kind::Portal => {
@@ -633,7 +641,9 @@ impl Particle {
             }
             // VANILLA: PortalParticle#getLightCoords — свечение (age/lifetime)^4.
             Kind::Portal => {
-                let t = (self.age as f32 / self.lifetime as f32).clamp(0.0, 1.0).powi(4);
+                let t = (self.age as f32 / self.lifetime as f32)
+                    .clamp(0.0, 1.0)
+                    .powi(4);
                 ((f32::from(b) + t * 240.0).min(240.0) as u16, sky)
             }
             _ => (b, sky),
@@ -642,7 +652,7 @@ impl Particle {
 
     fn quad_size(&self, partial: f32) -> f32 {
         match self.kind {
-            Kind::Smoke => {
+            Kind::Smoke | Kind::Crit => {
                 self.quad_size
                     * ((self.age as f32 + partial) / self.lifetime as f32 * 32.0).clamp(0.0, 1.0)
             }
@@ -1466,6 +1476,30 @@ impl ParticleEngine {
         self.add(p);
     }
 
+    /// VANILLA: CritParticle#<init> (провайдер CRIT).
+    pub fn add_crit(&mut self, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+        if !self.allow() {
+            return;
+        }
+        let Some(set) = self.sets.get("crit").cloned() else {
+            return;
+        };
+        let seed = self.seed();
+        let mut p = Particle::with_speed(Kind::Crit, x, y, z, 0.0, 0.0, 0.0, seed);
+        p.sprite = set[0];
+        p.friction = 0.7;
+        p.gravity = 0.5;
+        p.xd = p.xd * f64::from(0.1_f32) + xa * 0.4;
+        p.yd = p.yd * f64::from(0.1_f32) + ya * 0.4;
+        p.zd = p.zd * f64::from(0.1_f32) + za * 0.4;
+        let col = p.rng.next_float() * 0.3 + 0.6;
+        p.rgb = [col; 3];
+        p.quad_size *= 0.75;
+        p.lifetime = ((6.0 / (f64::from(p.rng.next_float()) * 0.8 + 0.6)) as i32).max(1);
+        p.has_physics = false;
+        self.add(p);
+    }
+
     /// VANILLA: ThrownEnderpearl#onHit — 32 частиц portal над точкой попадания.
     pub fn pearl_hit(&mut self, pos: [f64; 3]) {
         let seed = self.seed();
@@ -1474,6 +1508,26 @@ impl ParticleEngine {
             let y = pos[1] + r.next_double() * 2.0;
             let (gx, gz) = (r.next_gaussian(), r.next_gaussian());
             self.add_portal(pos[0], y, pos[2], gx, 0.0, gz);
+        }
+    }
+
+    /// VANILLA: LivingEntity#makePoofParticles — 20 poof вокруг хитбокса.
+    pub fn death_poof(&mut self, pos: [f64; 3], w: f64, h: f64) {
+        let mut r = LegacyRandom::new(self.seed());
+        for _ in 0..20 {
+            let (xa, ya, za) = (
+                r.next_gaussian() * 0.02,
+                r.next_gaussian() * 0.02,
+                r.next_gaussian() * 0.02,
+            );
+            self.add_poof(
+                pos[0] + w * (r.next_double() * 2.0 - 1.0) - xa * 10.0,
+                pos[1] + h * r.next_double() - ya * 10.0,
+                pos[2] + w * (r.next_double() * 2.0 - 1.0) - za * 10.0,
+                xa,
+                ya,
+                za,
+            );
         }
     }
 

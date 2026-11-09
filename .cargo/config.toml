@@ -1,5 +1,7 @@
 [alias]
 xtask = "run -q -p xtask --"
+# `cargo f` — быстрая сборка клиента (профиль fast, с символами для samply) -> target/fast/ezzmc-client
+f = "build --profile fast -p ezzmc-client"
 
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]

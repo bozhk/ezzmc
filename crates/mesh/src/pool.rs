@@ -2,7 +2,7 @@
 //! устаревшие результаты отбрасываются по счётчику поколения секции. Рендер-поток не блокируется.
 use crate::section::{mesh_section, ModelProvider, Neighborhood, SectionMesh, SectionPos};
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::sync::Arc;
 
 pub struct MeshResult {
@@ -29,7 +29,7 @@ impl MeshPool {
             pool,
             tx,
             rx,
-            generation: HashMap::new(),
+            generation: HashMap::default(),
             pending: 0,
         })
     }

@@ -444,10 +444,14 @@ impl Player {
         let want_crouch = !self.flying && !self.swimming && input.sneak;
         let stand_fits = self.fits(w, HEIGHT_STANDING);
         // Player#updatePlayerPose: не влезаем в стоя/присед → поза SWIMMING (ползём).
-        let want = !self.flying && !self.swimming && (want_crouch || !stand_fits);
-        self.crawling =
-            !self.flying && !self.swimming && !stand_fits && !self.fits(w, HEIGHT_CROUCHING);
-        self.crouching = want && !self.crawling;
+        // VANILLA: Player#updatePlayerPose — поза меняется, только если влезает хотя бы SWIMMING (0.6);
+        // внутри блока/двери поза остаётся прежней.
+        if self.fits(w, HEIGHT_SWIMMING) {
+            let want = !self.flying && !self.swimming && (want_crouch || !stand_fits);
+            self.crawling =
+                !self.flying && !self.swimming && !stand_fits && !self.fits(w, HEIGHT_CROUCHING);
+            self.crouching = want && !self.crawling;
+        }
 
         // спринт
         // VANILLA: LocalPlayer#aiStep — isSlowDueToUsingItem обнуляет sprintTriggerTime.
@@ -768,7 +772,12 @@ impl Player {
     }
 
     fn fits(&self, w: &dyn Collider, height: f64) -> bool {
-        let b = aabb_at(self.pos, height);
+        // VANILLA: ...makeBoundingBox(position()).deflate(1.0E-7)
+        let mut b = aabb_at(self.pos, height);
+        for i in 0..3 {
+            b[i] += 1.0e-7;
+            b[i + 3] -= 1.0e-7;
+        }
         // VANILLA: canPlayerFitWithinBlocksAndEntitiesWhen — без пересечения с коллизиями.
         gather(w, b).iter().all(|c| !overlaps(&b, c))
     }

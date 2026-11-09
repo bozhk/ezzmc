@@ -99,7 +99,7 @@ impl ParticleDraw {
         particles: Option<(&[u8], u32, u32)>,
     ) -> Self {
         Self::new_ex(
-            device, queue, color, depth, projection, fog, lightmap, blocks, particles, false,
+            device, queue, color, depth, projection, fog, lightmap, blocks, particles, false, false,
         )
     }
 
@@ -118,7 +118,25 @@ impl ParticleDraw {
         texture: Option<(&[u8], u32, u32)>,
     ) -> Self {
         Self::new_ex(
-            device, queue, color, depth, projection, fog, lightmap, blocks, texture, true,
+            device, queue, color, depth, projection, fog, lightmap, blocks, texture, true, false,
+        )
+    }
+
+    /// Модели сущностей с отсечением обратных граней. VANILLA: RenderTypes#entityCutoutCull (стрела).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_culled(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color: wgpu::TextureFormat,
+        depth: wgpu::TextureFormat,
+        projection: &wgpu::Buffer,
+        fog: &wgpu::Buffer,
+        lightmap: &wgpu::TextureView,
+        blocks: &wgpu::TextureView,
+        texture: Option<(&[u8], u32, u32)>,
+    ) -> Self {
+        Self::new_ex(
+            device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, true,
         )
     }
 
@@ -134,6 +152,7 @@ impl ParticleDraw {
         blocks: &wgpu::TextureView,
         particles: Option<(&[u8], u32, u32)>,
         shadow: bool,
+        cull: bool,
     ) -> Self {
         let vf = wgpu::ShaderStages::VERTEX_FRAGMENT;
         let uni = |binding| wgpu::BindGroupLayoutEntry {
@@ -282,7 +301,10 @@ impl ParticleDraw {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            primitive: wgpu::PrimitiveState::default(),
+            primitive: wgpu::PrimitiveState {
+                cull_mode: cull.then_some(wgpu::Face::Back),
+                ..Default::default()
+            },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: depth,
                 depth_write_enabled: !shadow,

@@ -99,12 +99,12 @@ pub fn apply_parts(m: &mut ezzmc_render::entitymodel::Model, mask: u8) {
 /// VANILLA: Options#buildPlayerInformation.
 pub fn client_info(o: &Options) -> ClientInformation {
     let mask = model_mask(o);
-    let rd: i8 = o.get(&VIDEO[0]).parse::<i32>().unwrap_or(12).clamp(2, 32) as i8;
+    let rd: i8 = o.get(&VIDEO[0]).parse::<i32>().unwrap_or(12).clamp(2, 127) as i8;
     ClientInformation {
         view_distance: std::env::var("EZZMC_RENDER_DISTANCE")
             .ok()
             .and_then(|v| v.parse::<i8>().ok())
-            .map_or(rd, |v| v.clamp(2, 32)),
+            .map_or(rd, |v| v.clamp(2, 127)),
         chat_colors: o.get(&CHAT[0]) == "true",
         model_customisation: mask,
         main_hand: i32::from(o.get(find(SKIN, "mainHand")) != "left"),

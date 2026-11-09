@@ -1,4 +1,5 @@
 //! wgpu-рендер.
+pub mod animals;
 pub mod clouddraw;
 pub mod entitymodel;
 pub mod fog;
@@ -8,6 +9,7 @@ pub mod gui;
 pub mod hiz;
 pub mod humanoid;
 pub mod keyframe;
+pub mod keyframes_data;
 pub mod lightmap;
 pub mod lightningdraw;
 pub mod lines;

@@ -15,6 +15,7 @@ ezzmc-mesh.workspace = true
 ezzmc-render.workspace = true
 ezzmc-assets.workspace = true
 tracing.workspace = true
+rustc-hash = "1.1"
 tracing-subscriber.workspace = true
 thiserror.workspace = true
 winit = { version = "0.30", features = ["rwh_06"] }

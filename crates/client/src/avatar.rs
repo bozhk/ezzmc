@@ -41,6 +41,8 @@ pub struct AvatarAnim {
     swing_ticks: i32,
     swing_old: f32,
     swing_now: f32,
+    /// Последний обработанный `Entity::swing_seq` (чужие игроки).
+    pub swing_seen: u32,
     age: u32,
     /// Поза плавания (Pose.SWIMMING) и «в воде» — выставляются владельцем перед `tick`.
     pub swimming: bool,

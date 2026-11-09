@@ -23,6 +23,14 @@ struct Quad {
     items: bool,
 }
 
+/// Квад предмета в руке для превью (см. `HandMesh::raster`).
+pub struct RasterItemQuad {
+    pub pos: [Vec3; 4],
+    pub uv: [[f32; 2]; 4],
+    pub color: [u8; 3],
+    pub items: bool,
+}
+
 /// Модель предмета в руке.
 pub struct HandMesh {
     quads: Vec<Quad>,
@@ -59,6 +67,24 @@ impl HandMesh {
             return (0.0, 0.0);
         }
         (min_y, max_z - min_z)
+    }
+
+    /// Квады для программной растеризации превью: (вершины, UV, цвет, из атласа предметов).
+    pub fn raster(&self, root: Mat4, view: View) -> Vec<RasterItemQuad> {
+        let m = root
+            * match view {
+                View::ThirdPersonLeft => self.third_person_left,
+                _ => self.third_person,
+            };
+        self.quads
+            .iter()
+            .map(|q| RasterItemQuad {
+                pos: q.pos.map(|p| m.transform_point3(Vec3::from(p))),
+                uv: q.uv,
+                color: q.color,
+                items: q.items,
+            })
+            .collect()
     }
 
     /// Запечь вершины: `root` — матрица руки/камеры, затем трансформ `display` модели.

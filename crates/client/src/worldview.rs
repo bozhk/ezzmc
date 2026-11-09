@@ -23,7 +23,7 @@ use ezzmc_render::Gpu;
 use ezzmc_world::block::BlockState;
 use ezzmc_world::level::{Level, LevelEvent};
 use glam::{Mat4, Vec3};
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 use std::sync::Arc;
 
 /// Настройки рендера. `use_compute_renderer`: цельные кубы рисует compute-`Renderer`
@@ -50,10 +50,10 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 // VANILLA: Camera/GameRenderer — fov 70 по умолчанию.
 const FOV_DEG: f32 = 70.0;
 const NEAR: f32 = 0.05;
-const VERTEX_CAPACITY: u32 = 20_000_000;
+const VERTEX_CAPACITY: u32 = 80_000_000;
 const INDEX_ARENA_CAPACITY: u32 = 10_000_000;
-const MAX_SECTIONS: u32 = 16_384;
-const MAX_PENDING: usize = 48;
+const MAX_SECTIONS: u32 = 65_536;
+const MAX_PENDING: usize = 128;
 
 pub struct WorldView {
     /// 185: зажата ЛКМ (key.attack) — Minecraft#continueAttack.
@@ -106,6 +106,13 @@ pub struct WorldView {
     lightning: ezzmc_render::lightningdraw::LightningDraw,
     /// Модели сущностей (пока только аватар игрока от 3-го лица): скин Стива, слой одежды.
     entity_draw: ezzmc_render::particledraw::ParticleDraw,
+    /// Броня игроков: отдельная текстура-атлас (`armor::ArmorKit`).
+    armor_draw: ezzmc_render::particledraw::ParticleDraw,
+    armor_kit: crate::armor::ArmorKit,
+    /// Атласы для программного превью игрока (блоки — со старта, предметы — лениво).
+    preview_blocks: std::rc::Rc<(Vec<u8>, u32, u32)>,
+    preview_items: Option<std::rc::Rc<(Vec<u8>, u32, u32)>>,
+    mobs: crate::mobs::Mobs,
     /// Стрелы: текстуры arrow/arrow_spectral/arrow_tipped стопкой 32×96.
     arrow_draw: ezzmc_render::particledraw::ParticleDraw,
     /// VANILLA: PistonHeadRenderer — движущиеся блоки (атлас блоков).
@@ -319,16 +326,16 @@ fn load_celestials(rm: &ResourceManager) -> CelestialImages {
 }
 
 /// Плавание для корневой матрицы. VANILLA: AvatarRenderer#setupRotations (swimAmount > 0).
-#[derive(Clone, Copy, Default)]
-struct SwimPose {
-    amount: f32,
-    in_water: bool,
-    visually: bool,
-    x_rot: f32,
+#[derive(Clone, Copy, Default, PartialEq)]
+pub struct SwimPose {
+    pub amount: f32,
+    pub in_water: bool,
+    pub visually: bool,
+    pub x_rot: f32,
 }
 
 impl SwimPose {
-    fn matrix(self) -> Mat4 {
+    pub fn matrix(self) -> Mat4 {
         if self.amount <= 0.0 {
             return Mat4::IDENTITY;
         }
@@ -422,10 +429,14 @@ impl WorldView {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        // Не больше, чем позволяет видеокарта (вершина = 16 байт); дальность 127 требует десятков млн вершин.
+        let vertex_capacity = VERTEX_CAPACITY
+            .min((gpu.device.limits().max_buffer_size / 16).min(u64::from(u32::MAX)) as u32);
+        tracing::info!("арена террейна: {vertex_capacity} вершин");
         let arena = TerrainArena::new(
             &gpu.device,
             &gpu.queue,
-            VERTEX_CAPACITY,
+            vertex_capacity,
             INDEX_ARENA_CAPACITY,
             MAX_SECTIONS,
         );
@@ -533,6 +544,7 @@ impl WorldView {
                 "splash",
                 "bubble",
                 "portal",
+                "crit",
                 "explosion",
                 "poof",
             ] {
@@ -586,12 +598,32 @@ impl WorldView {
             &atlas_view,
             skin.as_ref().map(|(d, w, h)| (d.as_slice(), *w, *h)),
         );
+        let preview_blocks =
+            std::rc::Rc::new((atlas.mips[0].to_rgba8(), atlas.width, atlas.height));
+        let armor_kit = crate::armor::ArmorKit::new(rm);
+        let armor_draw = ezzmc_render::particledraw::ParticleDraw::new(
+            &gpu.device,
+            &gpu.queue,
+            color,
+            DEPTH_FORMAT,
+            &projection_buf,
+            &fog_buf,
+            &lightmap.view,
+            &atlas_view,
+            Some((
+                armor_kit.rgba.as_slice(),
+                armor_kit.width,
+                armor_kit.height,
+            )),
+        );
         let arrow_tex = {
             let mut rgba = Vec::new();
             let mut ok = true;
             for n in ["arrow", "arrow_spectral", "arrow_tipped"] {
                 match rm
-                    .read(&format!("assets/minecraft/textures/entity/projectiles/{n}.png"))
+                    .read(&format!(
+                        "assets/minecraft/textures/entity/projectiles/{n}.png"
+                    ))
                     .and_then(|d| Image::decode_png(&d).ok())
                 {
                     Some(i) if i.width == 32 && i.height == 32 => rgba.extend(i.to_rgba8()),
@@ -600,7 +632,7 @@ impl WorldView {
             }
             ok.then_some(rgba)
         };
-        let arrow_draw = ezzmc_render::particledraw::ParticleDraw::new(
+        let arrow_draw = ezzmc_render::particledraw::ParticleDraw::new_culled(
             &gpu.device,
             &gpu.queue,
             color,
@@ -704,7 +736,7 @@ impl WorldView {
             use_compute,
             vox,
             rects: RectTable::default(),
-            vox_resident: HashSet::new(),
+            vox_resident: HashSet::default(),
             hiz: None,
             hiz_valid: false,
             prev: None,
@@ -721,6 +753,11 @@ impl WorldView {
             weather,
             lightning,
             entity_draw,
+            armor_draw,
+            armor_kit,
+            preview_blocks,
+            preview_items: None,
+            mobs: crate::mobs::Mobs::default(),
             arrow_draw,
             piston_draw,
             shadow_draw,
@@ -762,7 +799,7 @@ impl WorldView {
             group0,
             depth: None,
             atlas_size: (atlas.width, atlas.height),
-            resident: HashSet::new(),
+            resident: HashSet::default(),
             min_y: -64,
             height: 384,
             view_radius: 8,
@@ -862,7 +899,7 @@ impl WorldView {
         if on == self.use_compute {
             return;
         }
-        let mut cols: HashSet<(i32, i32)> = HashSet::new();
+        let mut cols: HashSet<(i32, i32)> = HashSet::default();
         let arena_pos: Vec<SectionPos> = self.resident.drain().collect();
         let vox_pos: Vec<SectionPos> = self.vox_resident.drain().collect();
         for p in &arena_pos {
@@ -1331,6 +1368,9 @@ impl WorldView {
         for p in std::mem::take(&mut level.pearl_hits) {
             self.particles.pearl_hit(p);
         }
+        for (p, w, h) in std::mem::take(&mut level.death_poofs) {
+            self.particles.death_poof(p, w, h);
+        }
         let level: &Level = level;
         let now = level.game_time;
         crate::itemdyn::update(
@@ -1352,6 +1392,25 @@ impl WorldView {
                 self.cam[2].floor() as i32,
             );
             self.particles.tick(level);
+            // VANILLA: AbstractArrow#tick — 4 частицы CRIT вдоль хода крит-стрелы.
+            for e in level.entities.iter().filter(|e| e.crit_arrow()) {
+                let m = [
+                    e.pos[0] - e.prev_pos[0],
+                    e.pos[1] - e.prev_pos[1],
+                    e.pos[2] - e.prev_pos[2],
+                ];
+                for i in 0..4 {
+                    let k = f64::from(i) / 4.0;
+                    self.particles.add_crit(
+                        e.prev_pos[0] + m[0] * k,
+                        e.prev_pos[1] + m[1] * k,
+                        e.prev_pos[2] + m[2] * k,
+                        -m[0],
+                        -m[1] + 0.2,
+                        -m[2],
+                    );
+                }
+            }
             // VANILLA: PrimedTnt#tick — клиентский дым SMOKE на y+0.5 каждый тик.
             for e in level.entities.iter().filter(|e| e.fuse > 0) {
                 self.particles
@@ -1563,6 +1622,7 @@ impl WorldView {
                 self.right_click_delay = (self.right_click_delay - 1).max(0);
                 self.miss_time = (self.miss_time - 1).max(0);
                 self.tick_using();
+                crate::cooldown::tick();
                 self.tick_hand();
                 self.tick_dig();
             }
@@ -1716,10 +1776,12 @@ impl WorldView {
     fn prepare_player_model(&mut self, gpu: &Gpu, mv: Mat4) {
         use ezzmc_render::humanoid::setup_anim;
         let mut data = Vec::new();
+        let mut armor_data = Vec::new();
         let mut shadow = Vec::new();
         self.entity_item_visible = false;
         let held_mesh = self.inv.held().cloned().and_then(|st| {
             let (name, cx) = crate::handitem::stack_ctx(&st)?;
+            let cx = self.use_ctx(cx);
             let rm = self.hand_rm.as_ref()?;
             self.hand_items.as_mut()?.get(rm, name, &cx)
         });
@@ -1755,6 +1817,9 @@ impl WorldView {
             crate::settings::apply_parts(model, self.cfg.parts);
             setup_anim(model, parts, &state);
             model.bake(root, [255; 4], light, &mut data);
+            let looks = crate::armor::looks_of_menu(&self.inv.slots);
+            self.armor_kit
+                .bake(&looks, &state, root, [255; 4], light, &mut armor_data);
             // VANILLA: AvatarRenderer — shadowRadius 0.5; тень не рисуется у невидимого.
             if let Ok(Some(l)) = self.net.level.lock().as_deref() {
                 crate::entityshadow::bake(l, pos, self.cam, 0.5, 1.0, self.sky_darken, &mut shadow);
@@ -1789,7 +1854,39 @@ impl WorldView {
                 self.entity_item_visible = true;
             }
         }
-        self.bake_remote_players(&mut data, &mut shadow);
+        self.bake_remote_players(&mut data, &mut armor_data, &mut shadow, &mut item_data);
+        if let Ok(g) = self.net.level.lock() {
+            if let Some(l) = g.as_ref() {
+                self.mobs.bake(l, self.cam, self.sky_darken, &mut shadow);
+            }
+        }
+        if let Some(rm) = self.hand_rm.as_ref() {
+            let (color, projection, fog, lightmap, atlas) = (
+                self.color_format,
+                &self.projection_buf,
+                &self.fog_buf,
+                &self.lightmap.view,
+                &self.atlas_view,
+            );
+            let mut make = |tex: &str| {
+                let img = rm
+                    .read(&format!("assets/minecraft/textures/entity/{tex}.png"))
+                    .and_then(|d| Image::decode_png(&d).ok())?;
+                let rgba = img.to_rgba8();
+                Some(ezzmc_render::particledraw::ParticleDraw::new(
+                    &gpu.device,
+                    &gpu.queue,
+                    color,
+                    DEPTH_FORMAT,
+                    projection,
+                    fog,
+                    lightmap,
+                    atlas,
+                    Some((rgba.as_slice(), img.width, img.height)),
+                ))
+            };
+            self.mobs.prepare(&gpu.device, &gpu.queue, mv, &mut make);
+        }
         self.bake_item_entities(&mut item_data, &mut shadow);
         let mut arrow_data = Vec::new();
         self.bake_projectiles(&mut item_data, &mut arrow_data);
@@ -1798,6 +1895,8 @@ impl WorldView {
         self.bake_flames(&mut item_data.0);
         self.entity_draw
             .prepare_raw(&gpu.device, &gpu.queue, mv, &data);
+        self.armor_draw
+            .prepare_raw(&gpu.device, &gpu.queue, mv, &armor_data);
         let mut pdata = Vec::new();
         if let Ok(g) = self.net.level.lock() {
             if let Some(l) = g.as_ref() {
@@ -1895,7 +1994,25 @@ impl WorldView {
                 * Mat4::from_rotation_y(((self.yaw - y_bob) * 0.1).to_radians());
             let place =
                 Mat4::from_translation(Vec3::new(i * 0.56, -0.52 + inverse_h * -0.6, -0.72));
-            let root = if let Some(u) = self.using.as_ref().filter(|u| u.remaining > 0) {
+            let root = if let Some(u) = self.using.as_ref().filter(|u| u.bow) {
+                // VANILLA: FirstPersonHandsAndItemsRenderer — ItemUseAnimation.BOW.
+                let held = (u.duration - u.remaining) as f32 + pt;
+                let mut power = held / 20.0;
+                power = ((power * power + power * 2.0) / 3.0).min(1.0);
+                let mut b =
+                    Mat4::from_translation(Vec3::new(i * -0.278_568_2, 0.183_443_87, 0.157_315_31))
+                        * Mat4::from_rotation_x((-13.935f32).to_radians())
+                        * Mat4::from_rotation_y((i * 35.3).to_radians())
+                        * Mat4::from_rotation_z((i * -9.785).to_radians());
+                if power > 0.1 {
+                    let shake = ((held - 0.1) * 1.3).sin() * (power - 0.1);
+                    b *= Mat4::from_translation(Vec3::new(0.0, shake * 0.004, 0.0));
+                }
+                b *= Mat4::from_translation(Vec3::new(0.0, 0.0, power * 0.04))
+                    * Mat4::from_scale(Vec3::new(1.0, 1.0, 1.0 + power * 0.2))
+                    * Mat4::from_rotation_y((-i * 45.0).to_radians());
+                look * place * b
+            } else if let Some(u) = self.using.as_ref().filter(|u| u.remaining > 0) {
                 // VANILLA: FirstPersonHandsAndItemsRenderer#applyEatTransform (до applyItemArmTransform).
                 let curr = u.remaining as f32 - pt + 1.0;
                 let scaled = curr / u.duration as f32;
@@ -1995,6 +2112,45 @@ impl WorldView {
         }
     }
 
+    /// Состояние игрока для превью в инвентаре. VANILLA: InventoryScreen рисует LocalPlayer как есть
+    /// (присед, плавание/ползание, предметы в руках).
+    pub fn preview_snapshot(&mut self) -> crate::charpreview::Snap {
+        let pt = (self.tick_acc / 0.05).clamp(0.0, 1.0) as f32;
+        let p = &self.player;
+        let crouching = p.crouching;
+        let mut state = p.anim.humanoid_state(pt, crouching);
+        let swim = SwimPose {
+            amount: state.swim_amount,
+            in_water: p.in_water,
+            visually: p.swimming || p.crawling,
+            x_rot: 0.0,
+        };
+        let held = self.inv.held().cloned().and_then(|st| {
+            let (name, cx) = crate::handitem::stack_ctx(&st)?;
+            let cx = self.use_ctx(cx);
+            let rm = self.hand_rm.as_ref()?;
+            self.hand_items.as_mut()?.get(rm, name, &cx)
+        });
+        let left = self.offhand_mesh(true);
+        state.item_right = held.is_some();
+        state.item_left = left.is_some();
+        if self.preview_items.is_none() {
+            self.preview_items = self
+                .hand_items
+                .as_ref()
+                .map(|h| std::rc::Rc::new(h.items_rgba()));
+        }
+        crate::charpreview::Snap {
+            state,
+            crouching,
+            swim,
+            right: held,
+            left,
+            blocks: self.preview_blocks.clone(),
+            items: self.preview_items.clone(),
+        }
+    }
+
     fn offhand_mesh(&mut self, real: bool) -> Option<std::rc::Rc<crate::handitem::HandMesh>> {
         let st = if real {
             self.inv.slots.get(crate::inventory::OFFHAND)?.clone()?
@@ -2006,9 +2162,18 @@ impl WorldView {
         self.hand_items.as_mut()?.get(rm, name, &cx)
     }
 
+    /// Контекст предмета в основной руке: добавляет тики натяжения лука.
+    fn use_ctx(&self, mut cx: crate::itemicon::Ctx) -> crate::itemicon::Ctx {
+        if let Some(u) = self.using.as_ref().filter(|u| u.bow) {
+            cx.using = Some((u.duration - u.remaining).clamp(0, 30) as u8);
+        }
+        cx
+    }
+
     fn shown_mesh(&mut self) -> Option<std::rc::Rc<crate::handitem::HandMesh>> {
         let (stack, _) = self.hand_shown.as_ref()?;
         let (name, cx) = crate::handitem::stack_ctx(stack)?;
+        let cx = self.use_ctx(cx);
         let rm = self.hand_rm.as_ref()?;
         self.hand_items.as_mut()?.get(rm, name, &cx)
     }
@@ -2047,6 +2212,12 @@ impl WorldView {
                 (0.25f32, 0.25f32)
             } else if Some(e.ty) == player_ty {
                 (0.6, 1.8)
+            } else if let Some(sz) = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+                .get(e.ty)
+                .and_then(|n| ezzmc_world::entity_size::size(n))
+            {
+                // VANILLA: EntityRenderer#submit → displayFireAnimation для любых сущностей.
+                sz
             } else {
                 continue;
             };
@@ -2278,6 +2449,7 @@ impl WorldView {
             rot: (f32, f32),
             light: (u8, u8),
             stack: Option<ezzmc_protocol::item::ItemStack>,
+            shake: f32,
         }
         let mut list = Vec::new();
         {
@@ -2294,7 +2466,12 @@ impl WorldView {
                 };
                 if !matches!(
                     name,
-                    "arrow" | "spectral_arrow" | "ender_pearl" | "snowball" | "egg" | "experience_bottle"
+                    "arrow"
+                        | "spectral_arrow"
+                        | "ender_pearl"
+                        | "snowball"
+                        | "egg"
+                        | "experience_bottle"
                 ) {
                     continue;
                 }
@@ -2318,6 +2495,7 @@ impl WorldView {
                     rot: (e.prev_yaw + dy * pt, lr(e.prev_pitch, e.pitch)),
                     light: crate::particles::light_at(level, pos[0], pos[1] + 0.1, pos[2]),
                     stack: e.item.clone(),
+                    shake: e.shake as f32 - pt,
                 });
             }
         }
@@ -2332,7 +2510,7 @@ impl WorldView {
                     * Mat4::from_rotation_y((p.rot.0 - 90.0).to_radians())
                     * Mat4::from_rotation_z(p.rot.1.to_radians());
                 let row = u32::from(p.kind == "spectral_arrow");
-                ezzmc_render::entitymodel::bake_arrow(root, row, p.light, arrows);
+                ezzmc_render::entitymodel::bake_arrow(root, row, p.light, p.shake, arrows);
                 continue;
             }
             let Some(rm) = self.hand_rm.as_ref() else {
@@ -2340,10 +2518,7 @@ impl WorldView {
             };
             let (name, cx) = match p.stack.as_ref().and_then(crate::handitem::stack_ctx) {
                 Some(v) => v,
-                None => (
-                    p.kind,
-                    crate::itemicon::Ctx::default(),
-                ),
+                None => (p.kind, crate::itemicon::Ctx::default()),
             };
             let Some(mesh) = self.hand_items.as_mut().and_then(|h| h.get(rm, name, &cx)) else {
                 continue;
@@ -2366,7 +2541,13 @@ impl WorldView {
         }
     }
 
-    fn bake_remote_players(&mut self, data: &mut Vec<u8>, shadow: &mut Vec<u8>) {
+    fn bake_remote_players(
+        &mut self,
+        data: &mut Vec<u8>,
+        armor_data: &mut Vec<u8>,
+        shadow: &mut Vec<u8>,
+        item_data: &mut (Vec<u8>, Vec<u8>),
+    ) {
         use ezzmc_render::humanoid::setup_anim;
         let Some(player_ty) = ezzmc_world::entities::player_type() else {
             return;
@@ -2388,6 +2569,11 @@ impl WorldView {
         for e in level.entities.iter().filter(|e| e.ty == player_ty) {
             let anim = self.remote_anims.entry(e.id).or_default();
             anim.swimming = e.swimming();
+            // VANILLA: handleAnimate → swing(); один взмах на пакет.
+            if anim.swing_seen != e.swing_seq {
+                anim.swing_seen = e.swing_seq;
+                anim.swing();
+            }
             // VANILLA: Entity#isInvisible → LivingEntityRenderer не рисует модель (без брони/предметов).
             // Анимацию тикаем, чтобы при появлении не было скачка.
             for _ in 0..ticks {
@@ -2413,7 +2599,16 @@ impl WorldView {
                 continue;
             }
             let crouching = e.crouching() && !swimming;
-            let state = anim.humanoid_state(pt, crouching);
+            let mut state = anim.humanoid_state(pt, crouching);
+            let mut mesh_of = |st: &Option<ezzmc_protocol::item::ItemStack>| {
+                let (name, cx) = crate::handitem::stack_ctx(st.as_ref()?)?;
+                let rm = self.hand_rm.as_ref()?;
+                self.hand_items.as_mut()?.get(rm, name, &cx)
+            };
+            let right_mesh = mesh_of(&e.held);
+            let left_mesh = mesh_of(&e.held_off);
+            state.item_right = e.held.is_some();
+            state.item_left = e.held_off.is_some();
             let body = anim.body_rot(pt);
             let swim = SwimPose {
                 amount: state.swim_amount,
@@ -2426,7 +2621,34 @@ impl WorldView {
             crate::settings::apply_parts(model, 0x7F);
             setup_anim(model, parts, &state);
             model.bake(root, [255; 4], light, data);
+            let looks = crate::armor::looks_of_entity(&e.armor);
+            self.armor_kit
+                .bake(&looks, &state, root, [255; 4], light, armor_data);
             crate::entityshadow::bake(level, pos, self.cam, 0.5, 1.0, self.sky_darken, shadow);
+            // VANILLA: ItemInHandLayer — рука, X−90°, Y180°, translate(±1/16, 2/16, −10/16).
+            for (mesh, arm_idx, dx, view) in [
+                (
+                    right_mesh,
+                    parts.right_arm,
+                    1.0,
+                    crate::handitem::View::ThirdPerson,
+                ),
+                (
+                    left_mesh,
+                    parts.left_arm,
+                    -1.0,
+                    crate::handitem::View::ThirdPersonLeft,
+                ),
+            ] {
+                if let Some(mesh) = mesh {
+                    let arm = model.part_matrices(root)[arm_idx]
+                        * Mat4::from_rotation_x((-90.0f32).to_radians())
+                        * Mat4::from_rotation_y(180.0f32.to_radians())
+                        * Mat4::from_translation(Vec3::new(dx / 16.0, 0.125, -0.625));
+                    mesh.bake(arm, view, light, &mut item_data.0, &mut item_data.1);
+                    self.entity_item_visible = true;
+                }
+            }
         }
     }
 
@@ -2774,6 +2996,8 @@ impl WorldView {
             for &layer in first_layers {
                 if !compute && layer == RenderLayer::Translucent {
                     self.entity_draw.draw(&mut pass);
+                    self.armor_draw.draw(&mut pass);
+                    self.mobs.draw(&mut pass);
                     self.arrow_draw.draw(&mut pass);
                     self.piston_draw.draw(&mut pass);
                     self.shadow_draw.draw(&mut pass);
@@ -3020,9 +3244,13 @@ impl WorldView {
         }
         // VANILLA: Consumable#shouldEmitParticlesAndSounds.
         let used = u.duration - u.remaining;
-        if u.remaining > 0 && used > (u.duration as f32 * 0.21875) as i32 && u.remaining % 4 == 0 {
-            let (c, cam) = (u.c, self.cam);
-            Self::emit_consume_sound(&mut u.rng, c, cam);
+        if let Some(c) = u.c {
+            if u.remaining > 0
+                && used > (u.duration as f32 * 0.21875) as i32
+                && u.remaining % 4 == 0
+            {
+                Self::emit_consume_sound(&mut u.rng, c, self.cam);
+            }
         }
         if u.remaining > 0 {
             u.remaining -= 1;
@@ -3061,8 +3289,9 @@ impl WorldView {
     /// VANILLA: entity event 9 → LivingEntity#completeUsingItem: звук завершения и стоп.
     fn complete_using(&mut self) {
         if let Some(mut u) = self.using.take() {
-            let (c, cam) = (u.c, self.cam);
-            Self::emit_consume_sound(&mut u.rng, c, cam);
+            if let Some(c) = u.c {
+                Self::emit_consume_sound(&mut u.rng, c, self.cam);
+            }
         }
         self.player.using_item = false;
     }
@@ -3316,6 +3545,7 @@ impl WorldView {
                 consumed = true;
                 if k == BlockUse::Click {
                     crate::blocksound::use_block(t.state.name(), t.state, t.pos);
+                    self.predict_toggle(t.state, t.pos);
                     self.player.swing();
                     let _ = self.net.cmd.send(crate::netthread::NetCmd::Swing);
                 }
@@ -3337,6 +3567,13 @@ impl WorldView {
                         _ => [1, 0, 0],
                     };
                     crate::blocksound::place(n, t.pos[0] + d[0], t.pos[1] + d[1], t.pos[2] + d[2]);
+                    if n.ends_with("_door") {
+                        self.predict_door(
+                            n,
+                            [t.pos[0] + d[0], t.pos[1] + d[1], t.pos[2] + d[2]],
+                            t.hit,
+                        );
+                    }
                 }
             } else {
                 consumed = is_block;
@@ -3369,6 +3606,27 @@ impl WorldView {
                 self.player.swing();
                 let _ = self.net.cmd.send(crate::netthread::NetCmd::Swing);
             }
+            // VANILLA: BowItem#use — натяжение, если есть стрела (или креатив): startUsingItem, 72000 тиков.
+            if held_name == Some("bow") && self.using.is_none() {
+                let has_arrow = self.game_mode == 1
+                    || self.inv.slots.iter().flatten().any(|s| {
+                        ezzmc_protocol::generated::r26_3::ITEM
+                            .get(s.item as usize)
+                            .is_some_and(|n| n.ends_with("arrow"))
+                    });
+                if has_arrow {
+                    self.using = Some(Using {
+                        item: self.inv.held().map_or(0, |s| s.item),
+                        slot: self.inv.selected,
+                        remaining: 72000,
+                        duration: 72000,
+                        c: None,
+                        bow: true,
+                        rng: ezzmc_world::noise::LegacyRandom::new(seed_now()),
+                    });
+                    self.player.using_item = true;
+                }
+            }
             // VANILLA: Consumable#startConsuming → LivingEntity#startUsingItem (canEat для еды).
             if let Some(c) = held_name.and_then(crate::itemdata::consumable) {
                 if self.using.is_none() && (self.invulnerable || c.always || self.food < 20) {
@@ -3377,7 +3635,8 @@ impl WorldView {
                         slot: self.inv.selected,
                         remaining: c.ticks,
                         duration: c.ticks,
-                        c,
+                        c: Some(c),
+                        bow: false,
                         rng: ezzmc_world::noise::LegacyRandom::new(seed_now()),
                     });
                     self.player.using_item = true;
@@ -3445,6 +3704,110 @@ impl WorldView {
                     && a[2] < bz + b[5]
                     && a[5] > bz + b[2]
             })
+    }
+
+    /// VANILLA: DoorBlock/TrapDoorBlock#useWithoutItem — переключение `open` (у двери обе половины).
+    fn predict_toggle(&self, st: ezzmc_world::block::BlockState, pos: [i32; 3]) {
+        let name = st.name();
+        let door = name.ends_with("_door");
+        if !(door || name.ends_with("_trapdoor")) {
+            return;
+        }
+        let Some(open) = st.property("open") else {
+            return;
+        };
+        let v = if open == "true" { "false" } else { "true" };
+        let Ok(mut g) = self.net.level.lock() else {
+            return;
+        };
+        let Some(l) = g.as_mut() else {
+            return;
+        };
+        let oy = if st.property("half") == Some("upper") {
+            pos[1] - 1
+        } else {
+            pos[1] + 1
+        };
+        let other = l.chunks.block(pos[0], oy, pos[2]);
+        let mut set = |p: [i32; 3], s: ezzmc_world::block::BlockState| {
+            if let Some(n) = s.with("open", v) {
+                l.predict_block(ezzmc_protocol::types::BlockPos::new(p[0], p[1], p[2]), n);
+            }
+        };
+        set(pos, st);
+        if door && other.block_id() == st.block_id() {
+            set([pos[0], oy, pos[2]], other);
+        }
+    }
+
+    /// VANILLA: DoorBlock#getStateForPlacement + setPlacedBy — обе половины сразу (предсказание).
+    fn predict_door(&self, item: &str, pos: [i32; 3], hit: [f64; 3]) {
+        use ezzmc_mesh::blockinfo as bi;
+        use ezzmc_world::block::BlockState;
+        let Some(info) = ezzmc_world::generated::b26_3::BLOCKS
+            .iter()
+            .find(|b| b.name == item)
+        else {
+            return;
+        };
+        let Some(base) = BlockState::from_id(info.default_state) else {
+            return;
+        };
+        let Ok(mut g) = self.net.level.lock() else {
+            return;
+        };
+        let Some(l) = g.as_mut() else {
+            return;
+        };
+        // Level#isInWorldBounds / canSurvive (опора снизу) / верхняя клетка свободна.
+        let above = l.chunks.block(pos[0], pos[1] + 1, pos[2]);
+        let below = l.chunks.block(pos[0], pos[1] - 1, pos[2]);
+        let free = |s: BlockState| s.is_air() || bi::fluid(s).is_some();
+        if !free(above) || !bi::has(below, bi::COLLISION_FULL) {
+            return;
+        }
+        // Direction#fromYRot: 0 юг, 1 запад, 2 север, 3 восток.
+        let q = ((self.yaw / 90.0 + 0.5).floor() as i32).rem_euclid(4);
+        let (facing, step, cw, ccw) = match q {
+            0 => ("south", [0, 1], [-1, 0], [1, 0]),
+            1 => ("west", [-1, 0], [0, -1], [0, 1]),
+            2 => ("north", [0, -1], [1, 0], [-1, 0]),
+            _ => ("east", [1, 0], [0, 1], [0, -1]),
+        };
+        let at = |l: &Level, o: [i32; 2], dy: i32| {
+            l.chunks.block(pos[0] + o[0], pos[1] + dy, pos[2] + o[1])
+        };
+        let (l_st, l_up, r_st, r_up) = (at(l, ccw, 0), at(l, ccw, 1), at(l, cw, 0), at(l, cw, 1));
+        let full = |s: BlockState| i32::from(bi::has(s, bi::COLLISION_FULL));
+        let n = -full(l_st) - full(l_up) + full(r_st) + full(r_up);
+        let is_door =
+            |s: BlockState| s.name().ends_with("_door") && s.property("half") == Some("lower");
+        let (ld, rd) = (is_door(l_st), is_door(r_st));
+        let right = if (ld && !rd) || n > 0 {
+            true
+        } else if (rd && !ld) || n < 0 {
+            false
+        } else {
+            let (dx, dz) = (hit[0] - f64::from(pos[0]), hit[2] - f64::from(pos[2]));
+            (step[0] < 0 && dz < 0.0)
+                || (step[0] > 0 && dz > 0.0)
+                || (step[1] < 0 && dx > 0.0)
+                || (step[1] > 0 && dx < 0.0)
+        };
+        let Some(lower) = base
+            .with("facing", facing)
+            .and_then(|s| s.with("hinge", if right { "right" } else { "left" }))
+            .and_then(|s| s.with("half", "lower"))
+        else {
+            return;
+        };
+        let Some(upper) = lower.with("half", "upper") else {
+            return;
+        };
+        // sequence уже взят у UseItemOn (next_seq), pending_seq тот же.
+        let bp = |y: i32| ezzmc_protocol::types::BlockPos::new(pos[0], y, pos[2]);
+        l.predict_block(bp(pos[1]), lower);
+        l.predict_block(bp(pos[1] + 1), upper);
     }
 
     fn next_seq(&self) -> i32 {
@@ -3516,6 +3879,21 @@ impl WorldView {
                                 ezzmc_protocol::types::BlockPos::new(p[0], p[1], p[2]),
                                 ezzmc_world::block::BlockState::AIR,
                             );
+                            // VANILLA: DoorBlock#updateShape — вторая половина без пары исчезает сразу.
+                            if old.name().ends_with("_door") {
+                                let oy = if old.property("half") == Some("upper") {
+                                    p[1] - 1
+                                } else {
+                                    p[1] + 1
+                                };
+                                let other = l.chunks.block(p[0], oy, p[2]);
+                                if other.block_id() == old.block_id() {
+                                    l.predict_block(
+                                        ezzmc_protocol::types::BlockPos::new(p[0], oy, p[2]),
+                                        ezzmc_world::block::BlockState::AIR,
+                                    );
+                                }
+                            }
                         }
                     }
                     let _ = self.net.cmd.send(crate::netthread::NetCmd::PlayerAction {
@@ -3779,7 +4157,9 @@ pub struct Using {
     pub slot: u8,
     pub remaining: i32,
     pub duration: i32,
-    pub c: crate::itemdata::Consume,
+    /// None — лук/арбалет (натяжение), без звуков еды.
+    pub c: Option<crate::itemdata::Consume>,
+    pub bow: bool,
     rng: ezzmc_world::noise::LegacyRandom,
 }
 

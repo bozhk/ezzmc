@@ -43,7 +43,7 @@ pub const VIDEO: &[Def] = &[
     d(
         "renderDistance",
         "options.renderDistance",
-        Slider(2.0, 32.0, 1.0),
+        Slider(2.0, 127.0, 1.0),
         "12",
     ),
     d(

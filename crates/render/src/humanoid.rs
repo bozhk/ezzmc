@@ -229,6 +229,83 @@ pub fn player_mesh(slim: bool) -> (Model, HumanoidParts) {
     )
 }
 
+/// VANILLA: SkeletonModel#createBodyLayer (64×32): HumanoidModel + тонкие руки/ноги 2×12×2.
+pub fn skeleton_mesh(grow: f32) -> (Model, HumanoidParts) {
+    let mut m = Model::new([64.0, 32.0]);
+    let head = m.add(
+        "head",
+        None,
+        Pose::default(),
+        &[BoxDef::new([0.0, 0.0], [-4.0, -8.0, -4.0], [8.0, 8.0, 8.0]).grow(grow)],
+    );
+    let body = m.add(
+        "body",
+        None,
+        Pose::default(),
+        &[BoxDef::new([16.0, 16.0], [-4.0, 0.0, -2.0], [8.0, 12.0, 4.0]).grow(grow)],
+    );
+    let limb = |tex: [f32; 2], oy: f32, mirror: bool| {
+        let b = BoxDef::new(tex, [-1.0, oy, -1.0], [2.0, 12.0, 2.0]).grow(grow);
+        if mirror {
+            b.mirror()
+        } else {
+            b
+        }
+    };
+    let right_arm = m.add(
+        "right_arm",
+        None,
+        Pose::offset(-5.0, 2.0, 0.0),
+        &[limb([40.0, 16.0], -2.0, false)],
+    );
+    let left_arm = m.add(
+        "left_arm",
+        None,
+        Pose::offset(5.0, 2.0, 0.0),
+        &[limb([40.0, 16.0], -2.0, true)],
+    );
+    let right_leg = m.add(
+        "right_leg",
+        None,
+        Pose::offset(-2.0, 12.0, 0.0),
+        &[limb([0.0, 16.0], 0.0, false)],
+    );
+    let left_leg = m.add(
+        "left_leg",
+        None,
+        Pose::offset(2.0, 12.0, 0.0),
+        &[limb([0.0, 16.0], 0.0, true)],
+    );
+    (
+        m,
+        HumanoidParts {
+            head,
+            body,
+            right_arm,
+            left_arm,
+            right_leg,
+            left_leg,
+        },
+    )
+}
+
+/// VANILLA: AnimationUtils#animateZombieArms (без копья/трезубца).
+pub fn zombie_arms(m: &mut Model, p: &HumanoidParts, aggressive: bool, attack: f32) {
+    let arm_drop = -PI / if aggressive { 1.5 } else { 2.25 };
+    let y_mod = (attack * PI).sin();
+    let x_mod = ((1.0 - (1.0 - attack) * (1.0 - attack)) * PI).sin();
+    let x_rot = arm_drop + y_mod * 1.2 - x_mod * 0.4;
+    let y_rot = 0.1 - y_mod * 0.6;
+    let r = &mut m.parts[p.right_arm].pose;
+    r.x_rot = x_rot;
+    r.y_rot = -y_rot;
+    r.z_rot = 0.0;
+    let l = &mut m.parts[p.left_arm].pose;
+    l.x_rot = x_rot;
+    l.y_rot = y_rot;
+    l.z_rot = 0.0;
+}
+
 /// VANILLA: Ease#outQuart.
 fn out_quart(x: f32) -> f32 {
     1.0 - (1.0 - x).powi(4)

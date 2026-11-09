@@ -1,12 +1,22 @@
 //! Очередь перестроения секций (TODO-133).
 //! Ближайшие к камере — первыми; секции позади взгляда получают штраф.
 use crate::section::SectionPos;
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 #[derive(Default)]
 pub struct RebuildQueue {
     dirty: HashSet<SectionPos>,
+    /// Правки блоков игроком/сервером: мешим вне очереди (нужен мгновенный отклик).
+    urgent: HashSet<SectionPos>,
+    /// Лучшие кандидаты из `dirty`, отсортированы по убыванию приоритета (лучший — в конце).
+    batch: Vec<SectionPos>,
+    calls: u32,
 }
+
+/// Размер пачки кандидатов и период её пересборки (в вызовах `take`): на больших дальностях
+/// в `dirty` сотни тысяч секций, полный проход каждый кадр съедал кадр целиком.
+const BATCH: usize = 4096;
+const REBUILD_EVERY: u32 = 16;
 
 const BEHIND_PENALTY: f32 = 4.0;
 
@@ -24,7 +34,7 @@ impl RebuildQueue {
                     let near =
                         |l: i32, d: i32| (d == -1 && l == 0) || (d == 1 && l == 15) || d == 0;
                     if near(x & 15, dx) && near(y & 15, dy) && near(z & 15, dz) {
-                        self.dirty.insert(SectionPos {
+                        self.urgent.insert(SectionPos {
                             x: sx + dx,
                             y: sy + dy,
                             z: sz + dz,
@@ -37,14 +47,15 @@ impl RebuildQueue {
 
     pub fn remove(&mut self, pos: &SectionPos) {
         self.dirty.remove(pos);
+        self.urgent.remove(pos);
     }
 
     pub fn len(&self) -> usize {
-        self.dirty.len()
+        self.dirty.len() + self.urgent.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.dirty.is_empty()
+        self.dirty.is_empty() && self.urgent.is_empty()
     }
 
     fn priority(p: SectionPos, cam: [f32; 3], look: [f32; 3]) -> f32 {
@@ -63,17 +74,51 @@ impl RebuildQueue {
 
     /// До `n` секций с наименьшим приоритетом; они удаляются из очереди.
     pub fn take(&mut self, n: usize, cam: [f32; 3], look: [f32; 3]) -> Vec<SectionPos> {
-        let mut all: Vec<SectionPos> = self.dirty.iter().copied().collect();
-        all.sort_by(|a, b| {
-            Self::priority(*a, cam, look)
-                .total_cmp(&Self::priority(*b, cam, look))
-                .then(a.cmp(b))
-        });
-        all.truncate(n);
-        for p in &all {
-            self.dirty.remove(p);
+        let mut out = Vec::new();
+        if n == 0 || self.is_empty() {
+            return out;
         }
-        all
+        let mut urgent: Vec<(f32, SectionPos)> = self
+            .urgent
+            .iter()
+            .map(|&p| (Self::priority(p, cam, look), p))
+            .collect();
+        urgent.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        for (_, p) in urgent.into_iter().take(n) {
+            self.urgent.remove(&p);
+            self.dirty.remove(&p);
+            out.push(p);
+        }
+        self.calls += 1;
+        if out.len() < n && !self.dirty.is_empty() {
+            if self.batch.is_empty() || self.calls >= REBUILD_EVERY {
+                self.rebuild_batch(cam, look);
+            }
+            while out.len() < n {
+                let Some(p) = self.batch.pop() else { break };
+                if self.dirty.remove(&p) {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    fn rebuild_batch(&mut self, cam: [f32; 3], look: [f32; 3]) {
+        self.calls = 0;
+        let mut all: Vec<(f32, SectionPos)> = self
+            .dirty
+            .iter()
+            .map(|&p| (Self::priority(p, cam, look), p))
+            .collect();
+        let cmp =
+            |a: &(f32, SectionPos), b: &(f32, SectionPos)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1));
+        if BATCH < all.len() {
+            all.select_nth_unstable_by(BATCH, cmp);
+            all.truncate(BATCH);
+        }
+        all.sort_unstable_by(|a, b| cmp(b, a));
+        self.batch = all.into_iter().map(|(_, p)| p).collect();
     }
 }
 

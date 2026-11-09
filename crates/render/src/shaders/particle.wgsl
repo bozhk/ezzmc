@@ -12,6 +12,8 @@ struct VsOut {
     @location(1) cylindrical: f32,
     @location(2) uv: vec2<f32>,
     @location(3) color: vec4<f32>,
+    @location(4) @interpolate(flat) hurt: f32,
+    @location(5) light: vec4<f32>,
 }
 
 @vertex
@@ -27,13 +29,23 @@ fn vs_main(
     o.cylindrical = fog_cylindrical_distance(position);
     o.uv = uv0;
     // texelFetch(Sampler2, UV2 / 16, 0)
-    o.color = color * textureLoad(lightmap, uv2 / 16, 0);
+    // Флаг красного оверлея урона (OverlayTexture.RED_OVERLAY_RGBA): uv2.x += 4096.
+    o.hurt = select(0.0, 1.0, uv2.x >= 4096);
+    let l2 = vec2<i32>(uv2.x & 4095, uv2.y);
+    o.color = color;
+    o.light = textureLoad(lightmap, l2 / 16, 0);
     return o;
 }
 
 @fragment
 fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
-    let color = textureSample(tex, tex_sampler, i.uv) * i.color * dyn_tf.color_modulator;
+    // VANILLA: entity.fsh — оверлей урона смешивается ДО умножения на lightMapColor.
+    var color = textureSample(tex, tex_sampler, i.uv) * i.color * dyn_tf.color_modulator;
+    if (i.hurt > 0.5) {
+        // entity.fsh: mix(overlay.rgb, color.rgb, overlay.a), overlay = 0xB2FF0000, a = 0.7 — доля текстуры.
+        color = vec4<f32>(mix(vec3<f32>(1.0, 0.0, 0.0), color.rgb, 0.7), color.a);
+    }
+    color = color * i.light;
     if (color.a < 0.1) {
         discard;
     }

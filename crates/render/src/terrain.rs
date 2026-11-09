@@ -12,7 +12,7 @@ use ezzmc_mesh::layers::RenderLayer;
 use ezzmc_mesh::section::{SectionMesh, SectionPos};
 use ezzmc_mesh::sort::{PointOfView, SortState};
 use ezzmc_mesh::vertex::PackedVertex;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use thiserror::Error;
 
 /// Размер общего шаблона индексов в квадах (секция вмещает ≤ 24576 граней полных кубов).
@@ -156,7 +156,7 @@ impl ArenaLayout {
             max_slots,
             slots: Vec::new(),
             free_slots: Vec::new(),
-            sections: HashMap::new(),
+            sections: HashMap::default(),
         }
     }
 
@@ -308,6 +308,8 @@ pub struct TerrainArena {
     pub(crate) src_cmds_buf: wgpu::Buffer,
     /// PERF (TODO-490): `u32` на слот — 1, если секция прошла CPU cave-culling (см. `set_visible`).
     pub(crate) flags_buf: wgpu::Buffer,
+    /// Писать ли `src_cmds_buf` (нужен только `GpuCuller`; по умолчанию выкл.).
+    pub track_src_cmds: bool,
     /// Слоты, освобождённые `remove`, но ещё не обнулённые в `src_cmds_buf`.
     stale_slots: Vec<u32>,
     max_slots: u32,
@@ -369,12 +371,13 @@ impl TerrainArena {
             indirect_buf,
             src_cmds_buf,
             flags_buf,
+            track_src_cmds: false,
             stale_slots: Vec::new(),
             max_slots: max_sections,
             first_instance_ok: device
                 .features()
                 .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
-            sort: HashMap::new(),
+            sort: HashMap::default(),
             cmds: Default::default(),
         }
     }
@@ -406,7 +409,11 @@ impl TerrainArena {
             if v.is_empty() {
                 continue;
             }
-            let bytes: Vec<u8> = v.iter().flat_map(PackedVertex::to_bytes).collect();
+            // Блоками по 16 байт: `flat_map` по байтам не векторизуется и давал ~20% кадра на загрузке.
+            let mut bytes = Vec::with_capacity(v.len() * PackedVertex::SIZE);
+            for p in v.iter() {
+                bytes.extend_from_slice(&p.to_bytes());
+            }
             queue.write_buffer(
                 &self.vertex_buf,
                 u64::from(l.first_vertex) * PackedVertex::SIZE as u64,
@@ -428,6 +435,10 @@ impl TerrainArena {
 
     /// Пишет (или обнуляет) исходные команды слота для GPU-culling.
     fn write_src_cmds(&self, queue: &wgpu::Queue, slot: u32, p: Option<&Placement>) {
+        // PERF: `GpuCuller` (заморожен) никем не создаётся — 4 `write_buffer` на секцию впустую.
+        if !self.track_src_cmds {
+            return;
+        }
         let mut bytes = Vec::with_capacity(RenderLayer::COUNT * 20);
         let mut offsets = [0u64; RenderLayer::COUNT];
         for layer in RenderLayer::ALL {
@@ -523,8 +534,10 @@ impl TerrainArena {
             let (x, y, z) = (d(p.x, camera[0]), d(p.y, camera[1]), d(p.z, camera[2]));
             x * x + y * y + z * z
         };
-        let mut near: Vec<SectionPos> = visible.to_vec();
-        near.sort_by(|a, b| dist(a).total_cmp(&dist(b)));
+        // Расстояние считается один раз на секцию (стабильная сортировка — порядок как раньше).
+        let mut keyed: Vec<(f64, SectionPos)> = visible.iter().map(|p| (dist(p), *p)).collect();
+        keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let near: Vec<SectionPos> = keyed.into_iter().map(|(_, p)| p).collect();
         let far: Vec<SectionPos> = near.iter().rev().copied().collect();
         for layer in RenderLayer::ALL {
             let order = if layer == RenderLayer::Translucent {
@@ -535,7 +548,10 @@ impl TerrainArena {
             let cmds = self.layout.commands(layer, order.iter().copied());
             let cap = self.max_slots as usize;
             let cmds = &cmds[..cmds.len().min(cap)];
-            let bytes: Vec<u8> = cmds.iter().flat_map(IndirectCmd::to_bytes).collect();
+            let mut bytes = Vec::with_capacity(cmds.len() * IndirectCmd::SIZE as usize);
+            for c in cmds {
+                bytes.extend_from_slice(&c.to_bytes());
+            }
             if !bytes.is_empty() {
                 queue.write_buffer(&self.indirect_buf, self.layer_offset(layer), &bytes);
             }

@@ -48,7 +48,7 @@ pub struct TextRenderer {
     ib: wgpu::Buffer,
     atlas_w: f32,
     atlas_h: f32,
-    glyphs: std::collections::HashMap<char, Glyph>,
+    glyphs: rustc_hash::FxHashMap<char, Glyph>,
     verts: Vec<Vertex>,
     /// GUI scale текущего кадра.
     scale: u32,
@@ -569,13 +569,11 @@ fn cell_right(rgba: &[u8], px: u32, gx: usize, gy: usize, cw: usize, ch: usize) 
 
 /// Склеивает листы в один атлас (вертикально) и строит таблицу глифов.
 /// VANILLA: BitmapProvider (scale = height / высота ячейки; шаг = округл(ширина*scale) + 1).
-fn build_atlas(
-    sheets: &[FontSheet],
-) -> (Vec<u8>, u32, u32, std::collections::HashMap<char, Glyph>) {
+fn build_atlas(sheets: &[FontSheet]) -> (Vec<u8>, u32, u32, rustc_hash::FxHashMap<char, Glyph>) {
     let aw = sheets.iter().map(|s| s.w).max().unwrap_or(1).max(1);
     let ah: u32 = sheets.iter().map(|s| s.h).sum::<u32>().max(1);
     let mut img = vec![0u8; (aw * ah * 4) as usize];
-    let mut glyphs = std::collections::HashMap::new();
+    let mut glyphs = rustc_hash::FxHashMap::default();
     let mut oy = 0u32;
     for sh in sheets {
         for y in 0..sh.h {

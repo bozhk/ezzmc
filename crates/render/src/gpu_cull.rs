@@ -287,6 +287,7 @@ mod tests {
             return;
         };
         let mut arena = TerrainArena::new(&gpu.device, &gpu.queue, 1 << 14, 1 << 12, 2048);
+        arena.track_src_cmds = true;
         let Some(culler) = GpuCuller::new(&gpu.device, &arena) else {
             eprintln!("нет INDIRECT_FIRST_INSTANCE — пропуск");
             return;

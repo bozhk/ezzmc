@@ -170,6 +170,8 @@ pub struct Level {
     pub pickups: Vec<Pickup>,
     /// Места попадания жемчуга Энда (частицы portal); забирает клиент.
     pub pearl_hits: Vec<[f64; 3]>,
+    /// VANILLA: LivingEntity#makePoofParticles (entity_event 60): (позиция, ширина, высота).
+    pub death_poofs: Vec<([f64; 3], f64, f64)>,
     /// VANILLA: ClientLevel#skyFlashTime (молния ставит 2, каждый тик −1).
     pub sky_flash_time: i32,
     /// VANILLA: DimensionType#skybox (Overworld/End/None) — что рисовать вместо неба.
@@ -181,6 +183,19 @@ pub struct Level {
 }
 
 impl Level {
+    /// Запоминает VarInt-метаданную моба (индекс ≥16) для вариантов/окрасов.
+    fn set_int_meta(&mut self, id: i32, idx: u8, v: i32) {
+        if idx < 16 {
+            return;
+        }
+        if let Some(e) = self.entities.map.get_mut(&id) {
+            match e.ints.iter_mut().find(|(i, _)| *i == idx) {
+                Some(slot) => slot.1 = v,
+                None => e.ints.push((idx, v)),
+            }
+        }
+    }
+
     pub fn new(format: ChunkFormat, view_radius: i32) -> Self {
         Level {
             chunks: ChunkCache::new(format, view_radius),
@@ -203,6 +218,7 @@ impl Level {
             entities: Default::default(),
             pickups: Vec::new(),
             pearl_hits: Vec::new(),
+            death_poofs: Vec::new(),
             sky_flash_time: 0,
             skybox: crate::dimension::Skybox::Overworld,
             audio: Default::default(),
@@ -245,15 +261,34 @@ impl Level {
                 let st = chunks.block(bx, by, bz);
                 let boxes = st
                     .props()
-                    .and_then(|p| crate::generated::p26_3::SHAPES.get(usize::from(p.collision_shape)).copied())
+                    .and_then(|p| {
+                        crate::generated::p26_3::SHAPES
+                            .get(usize::from(p.collision_shape))
+                            .copied()
+                    })
                     .unwrap_or(&[]);
                 let (fx, fy, fz) = (x - f64::from(bx), y - f64::from(by), z - f64::from(bz));
                 boxes.iter().any(|b| {
                     fx >= b[0] && fx <= b[3] && fy >= b[1] && fy <= b[4] && fz >= b[2] && fz <= b[5]
                 })
             };
+            let player_ty = crate::entities::player_type();
+            let others: Vec<(i32, ([f64; 3], [f64; 3]))> = self
+                .entities
+                .map
+                .values()
+                .filter(|e| Some(e.ty) == player_ty)
+                .filter_map(|e| Some((e.id, e.aabb()?)))
+                .collect();
+            let mut dead = Vec::new();
             for e in self.entities.map.values_mut() {
-                e.tick_projectile(&solid);
+                e.tick_projectile(&solid, &others);
+                if e.dead {
+                    dead.push(e.id);
+                }
+            }
+            for id in dead {
+                self.entities.remove(id);
             }
         }
         for p in &mut self.pickups {
@@ -469,9 +504,9 @@ impl Level {
                     self.bolts.spawn(id, pos);
                 }
                 if let Ok(ty) = usize::try_from(ty) {
-                    let rots =
-                        read_lp_vec3(&mut r).and_then(|v| Ok((v, r.i8()?, r.i8()?, r.i8()?)));
-                    if let Ok((vel, x_rot, y_rot, head)) = rots {
+                    let rots = read_lp_vec3(&mut r)
+                        .and_then(|v| Ok((v, r.i8()?, r.i8()?, r.i8()?, r.var_int()?)));
+                    if let Ok((vel, x_rot, y_rot, head, data)) = rots {
                         let (yaw, pitch, head) = (
                             unpack_degrees(y_rot),
                             unpack_degrees(x_rot),
@@ -479,12 +514,83 @@ impl Level {
                         );
                         let mut e = Entity::new(id, uuid, ty, pos, yaw, pitch, head);
                         e.vel = vel;
+                        // VANILLA: AbstractArrow#recreateFromPacket — data = id владельца.
+                        e.owner = data;
                         e.snap = ITEM_TYPE.is_some_and(|t| t == ty);
                         // VANILLA: PrimedTnt#DATA_FUSE_ID по умолчанию 80.
                         if TNT_TYPE.is_some_and(|t| t == ty) {
                             e.fuse = 80;
                         }
                         self.entities.add(e);
+                    }
+                }
+                LevelEvent::None
+            }
+            "entity_event" => {
+                // VANILLA: LivingEntity#handleEntityEvent: 2/33/36/37/44/57 = hurt (hurtTime=10), 3 = death.
+                let (id, ev) = (r.i32()?, r.u8()?);
+                if let Some(e) = self.entities.map.get_mut(&id) {
+                    match ev {
+                        2 | 33 | 36 | 37 | 44 | 57 => {
+                            e.hurt_at = Some(std::time::Instant::now());
+                            e.hurt_dur = 0.5;
+                        }
+                        3 => {
+                            e.hurt_at = Some(std::time::Instant::now());
+                            e.hurt_dur = 1.0;
+                            e.death_at.get_or_insert_with(std::time::Instant::now);
+                        }
+                        60 => {
+                            // VANILLA: LivingEntity#handleEntityEvent 60 → makePoofParticles.
+                            let (w, h) = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+                                .get(e.ty)
+                                .and_then(|n| crate::entity_size::size(n))
+                                .unwrap_or((0.6, 1.8));
+                            self.death_poofs.push((e.pos, f64::from(w), f64::from(h)));
+                        }
+                        _ => {}
+                    }
+                }
+                LevelEvent::None
+            }
+            "damage_event" | "hurt_animation" => {
+                // VANILLA: ClientPacketListener#handleDamageEvent / handleHurtAnimation → hurtTime=10.
+                let id = r.var_int()?;
+                if let Some(e) = self.entities.map.get_mut(&id) {
+                    e.hurt_at = Some(std::time::Instant::now());
+                    e.hurt_dur = 0.5;
+                }
+                LevelEvent::None
+            }
+            "animate" => {
+                // VANILLA: handleAnimate: 0 swing main, 3 swing off, 4 crit, 5 magic crit.
+                let (id, action) = (r.var_int()?, r.u8()?);
+                if let Some(e) = self.entities.map.get_mut(&id) {
+                    match action {
+                        0 | 3 => e.swing_seq = e.swing_seq.wrapping_add(1),
+                        4 | 5 => e.crit_seq = (e.crit_seq.0.wrapping_add(1), action - 3),
+                        _ => {}
+                    }
+                }
+                LevelEvent::None
+            }
+            "set_equipment" => {
+                // VANILLA: handleSetEquipment: цикл (slot | 0x80 = ещё) + стак; 0 mainhand, 1 offhand.
+                let id = r.var_int()?;
+                loop {
+                    let b = r.u8()?;
+                    let st = ezzmc_protocol::item::read_stack(&mut r)?;
+                    if let Some(e) = self.entities.map.get_mut(&id) {
+                        match b & 0x7F {
+                            0 => e.held = st,
+                            1 => e.held_off = st,
+                            // EquipmentSlot: FEET 2, LEGS 3, CHEST 4, HEAD 5.
+                            n @ 2..=5 => e.armor[(5 - n) as usize] = st,
+                            _ => {}
+                        }
+                    }
+                    if b & 0x80 == 0 {
+                        break;
                     }
                 }
                 LevelEvent::None
@@ -546,10 +652,32 @@ impl Level {
                                 if let Some(e) = self.entities.map.get_mut(&id) {
                                     e.flags = v;
                                 }
+                            } else if idx == 16 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    e.byte16 = v;
+                                }
+                            } else if idx == 15 || idx == 18 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    if idx == 15 {
+                                        e.mob_flags = v;
+                                    } else {
+                                        e.byte18 = v;
+                                    }
+                                }
+                            } else if idx == 8 {
+                                // AbstractArrow#ID_FLAGS (у предметов #8 — другой тип).
+                                if let Some(e) =
+                                    self.entities.map.get_mut(&id).filter(|e| e.proj == 1)
+                                {
+                                    e.arrow_flags = v;
+                                }
                             }
                         }
                         1 | 20 => {
                             let v = r.var_int()?;
+                            if ty == 1 {
+                                self.set_int_meta(id, idx, v);
+                            }
                             if ty == 1 && idx == 8 {
                                 if let Some(e) = self.entities.map.get_mut(&id) {
                                     if e.fuse >= 0 {
@@ -557,9 +685,71 @@ impl Level {
                                     }
                                 }
                             }
+                            if ty == 1 && idx == 16 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    e.swell_dir = v;
+                                }
+                            }
+                        }
+                        // BLOCK_STATE/OPTIONAL_BLOCK_STATE, OPTIONAL_UNSIGNED_INT, варианты (реестровые
+                        // холдеры), состояния — все VarInt (VANILLA: EntityDataSerializers, порядок регистрации).
+                        14 | 15 | 19 | 21..=32 | 34..=38 => {
+                            let v = r.var_int()?;
+                            self.set_int_meta(id, idx, v);
+                        }
+                        // OPTIONAL_LIVING_ENTITY_REFERENCE: bool + UUID.
+                        13 => {
+                            if r.bool()? {
+                                r.bytes(16)?;
+                            }
+                        }
+                        // LONG, FLOAT, STRING, ROTATIONS, BLOCK_POS, DIRECTION — пропускаем,
+                        // чтобы дойти до индексов мобов (#15+).
+                        2 => {
+                            r.var_long()?;
+                        }
+                        3 => {
+                            r.f32()?;
+                        }
+                        4 => {
+                            r.string(32767)?;
+                        }
+                        9 => {
+                            r.bytes(12)?;
+                        }
+                        10 => {
+                            r.bytes(8)?;
+                        }
+                        11 => {
+                            if r.bool()? {
+                                r.bytes(8)?;
+                            }
+                        }
+                        12 => {
+                            r.var_int()?;
                         }
                         8 => {
-                            r.u8()?;
+                            let v = r.u8()?;
+                            if idx == 16 || idx == 17 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    if idx == 16 {
+                                        e.baby = v != 0;
+                                    } else {
+                                        e.bool17 = v != 0;
+                                    }
+                                }
+                            }
+                            // AbstractArrow#IN_GROUND (#10).
+                            if idx == 10 {
+                                if let Some(e) =
+                                    self.entities.map.get_mut(&id).filter(|e| e.proj == 1)
+                                {
+                                    e.stuck = v != 0;
+                                    if v != 0 {
+                                        e.vel = [0.0; 3];
+                                    }
+                                }
+                            }
                         }
                         6 => {
                             if r.bool()? {

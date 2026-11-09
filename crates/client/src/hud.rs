@@ -308,6 +308,21 @@ pub fn stack_icon(
             glint_frame(p, 0.5, 0.75);
             p.glint(&icon_key(name, &cx), x, y, 16.0, 16.0);
         }
+        // VANILLA: GuiGraphicsExtractor#itemCooldown — белая полупрозрачная плашка (Integer.MAX_VALUE).
+        let cd = crate::cooldown::percent(name);
+        if cd > 0.0 {
+            let top = (16.0 * (1.0 - cd)).floor();
+            let h = (16.0 * cd).ceil();
+            p.blit(
+                "white",
+                x,
+                y + top,
+                16.0,
+                h,
+                [0.0, 0.0, 1.0, 1.0],
+                0x7FFF_FFFF,
+            );
+        }
     }
 }
 

@@ -861,6 +861,7 @@ dependencies = [
  "glam",
  "image",
  "rayon",
+ "rustc-hash",
  "serde_json",
  "symphonia",
  "thiserror 2.0.21",
@@ -880,6 +881,7 @@ dependencies = [
  "ezzmc-world",
  "glam",
  "rayon",
+ "rustc-hash",
  "tracing",
 ]
 
@@ -912,6 +914,7 @@ dependencies = [
  "glam",
  "naga",
  "pollster",
+ "rustc-hash",
  "thiserror 2.0.21",
  "tracing",
  "wgpu",

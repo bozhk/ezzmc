@@ -26,6 +26,17 @@ pub struct Entity {
     pub on_ground: bool,
     /// Общие флаги (метаданные #0): 1 = присед, 8 = спринт, 16 = плавание.
     pub flags: u8,
+    /// Метаданные мобов (индекс по ванили): Mob#15 флаги, AgeableMob#16 детёныш, Creeper#16 swellDir,
+    /// #17 powered, Sheep#18 цвет|стрижка. Какой смысл — решает тип сущности.
+    pub mob_flags: u8,
+    pub baby: bool,
+    pub swell_dir: i32,
+    pub bool17: bool,
+    pub byte18: u8,
+    /// VarInt-метаданные мобов (индекс ≥16): INT и реестровые холдеры (вариант кота/лягушки…).
+    pub ints: Vec<(u8, i32)>,
+    /// Метаданные #16 типа BYTE (Bat#DATA_ID_FLAGS: бит 1 = висит).
+    pub byte16: u8,
     /// Стак предмета (метаданные #8 у `item`).
     pub item: Option<ezzmc_protocol::item::ItemStack>,
     /// Entity#tickCount.
@@ -42,6 +53,31 @@ pub struct Entity {
     pub gravity: f64,
     /// Снаряд упёрся в блок (стоит до пакета движения).
     pub stuck: bool,
+    /// Стрела: id владельца (поле `data` пакета add_entity), 0 — нет.
+    pub owner: i32,
+    /// AbstractArrow#ID_FLAGS (1 — крит, 2 — noPhysics).
+    pub arrow_flags: u8,
+    /// AbstractArrow#shakeTime (7 после попадания в блок).
+    pub shake: i32,
+    /// Projectile#leftOwner.
+    pub left_owner: bool,
+    /// Клиент сам убрал снаряд (попал в другого игрока).
+    pub dead: bool,
+    /// Предмет в основной/второй руке (set_equipment).
+    pub held: Option<ezzmc_protocol::item::ItemStack>,
+    pub held_off: Option<ezzmc_protocol::item::ItemStack>,
+    /// Броня (set_equipment): голова, грудь, ноги, ступни.
+    pub armor: [Option<ezzmc_protocol::item::ItemStack>; 4],
+    /// Счётчик взмахов (animate 0/3); рендер сравнивает с виденным.
+    pub swing_seq: u32,
+    /// Момент последнего урона (entity_event 2/33/36/37/44/57 → hurtTime=10; 3 — смерть).
+    pub hurt_at: Option<std::time::Instant>,
+    /// Момент смерти (entity_event 3): deathTime растёт 0→20 тиков, потом сервер убирает сущность.
+    pub death_at: Option<std::time::Instant>,
+    /// Длительность красного оверлея, сек (10 тиков при уроне, 20 при смерти).
+    pub hurt_dur: f32,
+    /// Счётчик crit-анимаций (animate 4/5): 1 — обычный, 2 — магический.
+    pub crit_seq: (u32, u8),
     steps: u32,
     target: [f64; 3],
     target_rot: [f32; 3],
@@ -51,6 +87,11 @@ pub struct Entity {
 const LERP_STEPS: u32 = 3;
 
 impl Entity {
+    /// VarInt-метаданная по индексу (вариант/окрас), если приходила.
+    pub fn int_meta(&self, idx: u8) -> Option<i32> {
+        self.ints.iter().find(|(i, _)| *i == idx).map(|(_, v)| *v)
+    }
+
     pub fn new(
         id: i32,
         uuid: u128,
@@ -75,6 +116,13 @@ impl Entity {
             prev_head_yaw: head,
             on_ground: false,
             flags: 0,
+            mob_flags: 0,
+            baby: false,
+            swell_dir: 0,
+            bool17: false,
+            byte18: 0,
+            ints: Vec::new(),
+            byte16: 0,
             item: None,
             age: 0,
             vel: [0.0; 3],
@@ -83,6 +131,19 @@ impl Entity {
             proj,
             gravity,
             stuck: false,
+            owner: 0,
+            arrow_flags: 0,
+            shake: 0,
+            left_owner: false,
+            dead: false,
+            held: None,
+            held_off: None,
+            armor: [None, None, None, None],
+            swing_seq: 0,
+            hurt_at: None,
+            hurt_dur: 0.0,
+            death_at: None,
+            crit_seq: (0, 0),
             steps: 0,
             target: pos,
             target_rot: [yaw, pitch, head],
@@ -96,10 +157,33 @@ impl Entity {
 
     /// VANILLA: AbstractArrow#tick / ThrowableProjectile#tick (клиентская часть): полёт по скорости,
     /// сопротивление 0.99, гравитация; останов в блоке (`solid` — точка внутри коллизии блока).
-    // VANILLA-UNSURE: вода (сопротивление 0.6/0.8) и попадания в сущности не учитываются.
-    pub fn tick_projectile(&mut self, solid: &dyn Fn(f64, f64, f64) -> bool) {
-        if self.proj == 0 || self.stuck || self.steps > 0 || self.vel == [0.0; 3] {
+    /// Стрела, попавшая в другого игрока (`others`: id, хитбокс), убирается: RemotePlayer#hurtClient
+    /// возвращает true → AbstractArrow#onHitEntity → discard.
+    // VANILLA-UNSURE: вода (сопротивление 0.6/0.8), попадания в мобы (клиентский deflect) и в
+    // локального игрока не учитываются; leftOwner упрощён (владелец вне хитбокса стрелы).
+    #[allow(clippy::type_complexity)]
+    pub fn tick_projectile(
+        &mut self,
+        solid: &dyn Fn(f64, f64, f64) -> bool,
+        others: &[(i32, ([f64; 3], [f64; 3]))],
+    ) {
+        if self.proj == 0 {
             return;
+        }
+        if self.shake > 0 {
+            self.shake -= 1;
+        }
+        if self.stuck || self.vel == [0.0; 3] {
+            return;
+        }
+        // VANILLA: ThrowableProjectile#tick — сначала applyGravity + applyInertia (0.99), потом
+        // движение (у стрелы наоборот: движение, затем drag и гравитация).
+        if self.proj == 2 {
+            self.vel = [
+                self.vel[0] * 0.99,
+                (self.vel[1] - self.gravity) * 0.99,
+                self.vel[2] * 0.99,
+            ];
         }
         let v = self.vel;
         let mut last = self.pos;
@@ -117,10 +201,44 @@ impl Entity {
             }
             last = p;
         }
+        if self.proj == 1 {
+            // VANILLA: ProjectileUtil#computeMargin = clamp((tickCount − 2)/20, 0, 0.3).
+            let margin = ((f64::from(self.age) - 2.0) / 20.0).clamp(0.0, 0.3);
+            for (id, (mn, mx)) in others {
+                let inflated = |m: f64| {
+                    (
+                        [mn[0] - m, mn[1] - m, mn[2] - m],
+                        [mx[0] + m, mx[1] + m, mx[2] + m],
+                    )
+                };
+                if *id == self.owner && !self.left_owner {
+                    // Владелец ещё не покинут (хитбокс стрелы 0.5).
+                    let (a, b) = inflated(0.25);
+                    let inside = (0..3).all(|k| self.pos[k] >= a[k] && self.pos[k] <= b[k]);
+                    if inside {
+                        continue;
+                    }
+                    self.left_owner = true;
+                }
+                let (a, b) = inflated(margin);
+                if segment_hits_box(self.pos, last, a, b) {
+                    self.dead = true;
+                    return;
+                }
+            }
+        }
         self.pos = last;
         if hit {
+            // VANILLA: AbstractArrow#onHitBlock — отступ 0.05 против хода, shakeTime = 7.
+            for k in 0..3 {
+                self.pos[k] -= v[k].signum() * 0.05 * f64::from(u8::from(v[k] != 0.0));
+            }
             self.stuck = true;
             self.vel = [0.0; 3];
+            if self.proj == 1 {
+                self.shake = 7;
+                self.arrow_flags &= !1;
+            }
             return;
         }
         if self.proj == 1 {
@@ -130,7 +248,14 @@ impl Entity {
             self.yaw += wrap(yaw - self.yaw) * 0.2;
             self.pitch += wrap(pitch - self.pitch) * 0.2;
         }
-        self.vel = [v[0] * 0.99, v[1] * 0.99 - self.gravity, v[2] * 0.99];
+        if self.proj == 1 {
+            self.vel = [v[0] * 0.99, v[1] * 0.99 - self.gravity, v[2] * 0.99];
+        }
+    }
+
+    /// Крит-стрела в полёте (частицы CRIT каждый тик).
+    pub fn crit_arrow(&self) -> bool {
+        self.proj == 1 && self.arrow_flags & 1 != 0 && !self.stuck
     }
 
     /// VANILLA: Entity#isShiftKeyDown (общий флаг 1 → бит 2).
@@ -150,17 +275,25 @@ impl Entity {
 
     /// VANILLA: InterpolationHandler#interpolateTo.
     pub fn set_target(&mut self, pos: Option<[f64; 3]>, rot: Option<(f32, f32)>) {
+        // VANILLA: Entity#moveOrInterpolateTo — у снарядов (стрела, жемчуг, снежок…) обработчик
+        // интерполяции NO_OP: пакет сервера просто ставит позицию/поворот (setPos/setRot, без сброса
+        // xOld), дальше клиент сам считает полёт. Лерп к цели поверх своей физики давал рывки.
+        let direct = self.snap || self.proj != 0;
         if let Some(p) = pos {
             self.target = p;
-            if self.snap {
+            if direct {
                 self.pos = p;
             }
         }
         if let Some((y, x)) = rot {
             self.target_rot[0] = y;
             self.target_rot[1] = x;
+            if self.proj != 0 {
+                self.yaw = y;
+                self.pitch = x;
+            }
         }
-        self.steps = if self.snap { 0 } else { LERP_STEPS };
+        self.steps = if direct { 0 } else { LERP_STEPS };
     }
 
     pub fn target_pos(&self) -> [f64; 3] {
@@ -201,6 +334,30 @@ impl Entity {
     }
 }
 
+/// Пересечение отрезка [a, b] с AABB (slab-метод).
+fn segment_hits_box(a: [f64; 3], b: [f64; 3], mn: [f64; 3], mx: [f64; 3]) -> bool {
+    let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
+    for k in 0..3 {
+        let d = b[k] - a[k];
+        if d.abs() < 1e-12 {
+            if a[k] < mn[k] || a[k] > mx[k] {
+                return false;
+            }
+        } else {
+            let (mut ta, mut tb) = ((mn[k] - a[k]) / d, (mx[k] - a[k]) / d);
+            if ta > tb {
+                std::mem::swap(&mut ta, &mut tb);
+            }
+            t0 = t0.max(ta);
+            t1 = t1.min(tb);
+            if t0 > t1 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn wrap(d: f32) -> f32 {
     let mut d = d % 360.0;
     if d >= 180.0 {
@@ -214,7 +371,10 @@ fn wrap(d: f32) -> f32 {
 
 /// Тип снаряда по индексу `entity_type`: (вид, гравитация).
 fn projectile_kind(ty: usize) -> (u8, f64) {
-    match ezzmc_protocol::generated::r26_3::ENTITY_TYPE.get(ty).copied() {
+    match ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+        .get(ty)
+        .copied()
+    {
         Some("arrow" | "spectral_arrow") => (1, 0.05),
         Some("ender_pearl" | "snowball" | "egg" | "blue_egg" | "brown_egg") => (2, 0.03),
         Some("splash_potion" | "lingering_potion") => (2, 0.05),
@@ -260,6 +420,20 @@ impl Entities {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projectile_snaps_to_server_position() {
+        // VANILLA: у снарядов NO_OP-интерполяция — позиция из пакета ставится сразу.
+        let arrow = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+            .iter()
+            .position(|n| *n == "arrow")
+            .unwrap();
+        let mut e = Entity::new(1, 0, arrow, [0.0; 3], 0.0, 0.0, 0.0);
+        e.set_target(Some([1.0, 2.0, 3.0]), Some((90.0, 10.0)));
+        assert_eq!(e.pos, [1.0, 2.0, 3.0]);
+        assert!(!e.interpolating());
+        assert_eq!((e.yaw, e.pitch), (90.0, 10.0));
+    }
 
     #[test]
     fn lerps_to_target_in_three_ticks() {

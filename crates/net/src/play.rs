@@ -503,7 +503,8 @@ impl PlayHandler {
         include_data: bool,
     ) -> NetResult<()> {
         let mut w = Writer::new();
-        w.block_pos(pos[0], pos[1], pos[2]).u8(u8::from(include_data));
+        w.block_pos(pos[0], pos[1], pos[2])
+            .u8(u8::from(include_data));
         conn.send(self.sid("pick_item_from_block")?, &w.buf)
     }
 

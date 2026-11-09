@@ -260,7 +260,7 @@
 - [ ] TODO-196 [P1] Контейнеры по клику: сундук, печь, верстак, наковальня и т.д. — открытие через Open Screen
 - [ ] TODO-197 [P2] Блок-взаимодействия: двери, люки, калитки, кнопки, рычаги, нотный блок, колокол, кровать, якорь возрождения, переключатели
 - [ ] TODO-198 [P2] Adventure/Spectator ограничения: can_break/can_place, невозможность ломать
-- [ ] TODO-199 [P2] Cooldown предметов (ender pearl, shield), использование щита (blocking), shield disable axe
+- [~] TODO-199 [P2] (cooldown предметов ✔ пакет+плашка в иконках, не проверено вживую) Cooldown предметов (ender pearl, shield), использование щита (blocking), shield disable axe
 - [ ] TODO-200 [P2] Block interaction range и entity interaction range (атрибуты, 1.20.5+)
 - [ ] TODO-201 [P3] Креатив: мгновенное ломание, drop creative mode, сброс предметов
 
@@ -500,7 +500,7 @@
 - [ ] TODO-405 [P3] Bedrock — не цель (другая игра/протокол)
 
 ## Глава 19. Оптимизация (непрерывно, с главы 2)
-- [ ] TODO-406 [P0] Профайлинг-инфраструктура: tracy/puffin + perf, GPU timestamp queries, кадровые бюджеты
+- [~] TODO-406 [P0] (2026-11-09: samply + llvm-symbolizer работают, см. docs/ref/perf-fps-2026-11-09.md; GPU timestamp queries и бенчмарк с неподвижной камерой — не сделаны) Профайлинг-инфраструктура: tracy/puffin + perf, GPU timestamp queries, кадровые бюджеты
 - [ ] TODO-407 [P0] Бенчмарки: парсинг чанка, декомпрессия, меш секции, приём пакетов, рендер кадр (синтетический мир)
 - [ ] TODO-408 [P0] Аллокации: арены/пулы для пакетов и мешей, `no-alloc in frame` проверка (dhat/счётчик аллокатора)
 - [ ] TODO-409 [P1] Zero-copy парсинг пакетов (`bytes`), переиспользование буферов декомпрессии

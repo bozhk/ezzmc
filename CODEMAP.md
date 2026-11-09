@@ -141,11 +141,14 @@
 - `crates/world/src/lightning.rs` — клиентские молнии (Bolts, тик); `Level.bolts/sky_flash_time`, разбор add_entity/remove_entities в `level.rs`. `crates/render/src/lightningdraw.rs` + `shaders/lightning.wgsl` — рендер молнии (`build_bolt`).
 
 - `crates/client/src/physics.rs` — игрок: тик движения, коллизии (Entity#collide), прыжок/спринт/sneak/полёт, вода+лава (`update_fluid_state`, `travel_in_water/lava`, течение), лестницы (`on_climbable`); `Collider` trait (тесты без мира).
-- `crates/render/src/entitymodel.rs`: база моделей сущностей (`Model::add/reset_pose/part_matrices/bake`, `BoxDef`, `Pose`) — для всех будущих мобов; `keyframe.rs`: AnimationDefinition/Channel/Keyframe (apply, apply_walk, catmullrom); `humanoid.rs`: `player_mesh`/`humanoid_mesh`/`setup_anim`/`HumanoidState`. `particledraw.rs::prepare_raw` — сырые квады моделей.
+- `crates/render/src/entitymodel.rs`: база моделей сущностей (`Model::add/reset_pose/part_matrices/bake`, `BoxDef`, `Pose`) — для всех будущих мобов; `keyframe.rs`+`keyframes_data.rs` (генерат. из tools/gen_keyframes.py): AnimationDefinition/Channel/Keyframe (apply, apply_walk, catmullrom); `humanoid.rs`: `player_mesh`/`humanoid_mesh`/`setup_anim`/`HumanoidState`. `particledraw.rs::prepare_raw` — сырые квады моделей.
+- `crates/client/src/mobs.rs`: рендер мобов (таблица `spec()` тип→модель/текстура/масштаб, `Mobs::bake/prepare/draw`); гуманоиды + pig/cow/mooshroom/creeper/spider/cave_spider/chicken/sheep/enderman/iron_golem/blaze/slime/magma_cube/ghast/silverfish/endermite/villager/wolf/ocelot/cat/piglin/piglin_brute/zombified_piglin/drowned/zombie_villager/witch/illagers/polar_bear/rabbit/squid/fox/turtle/panda/horse/skeleton_horse/zombie_horse/donkey/mule/goat/llama/trader_llama/snow_golem/camel.
+- `crates/render/src/animals.rs`: модели и анимация не-гуманоидов (quadruped, creeper, spider, chicken, sheep+шерсть, enderman, iron_golem, blaze, slime, magma_cube, ghast, silverfish, endermite, villager, wolf, feline, piglin, drowned, zombie_villager, witch, illager, polar_bear, rabbit, squid, fox, turtle, panda, equine, goat, llama, snow_golem, camel, cod, salmon, dolphin, hoglin, guardian, phantom, ravager, strider, vex, bee, parrot, bat [keyframe], frog [keyframe], tadpole).
 - `crates/world/src/entities.rs`: хранилище сущностей `Level.entities` (add/move/teleport/sync/rotate_head, лерп); `Entity.flags` (метаданные #0, `set_entity_data` в `level.rs`: присед/плавание); рисуются в `worldview.rs::bake_remote_players`.
 - `crates/client/src/avatar.rs`: `AvatarAnim` (тело/голова/ходьба/взмах), в `physics::Player.anim`; рендер — `worldview.rs::prepare_player_model`, `entity_draw`. Плавание: `swim_amount`; рука 1-го лица — `worldview.rs::prepare_hand` (`hand_draw`, проход «hand»); вода — `physics.rs::update_fluid_state`/`travel_in_water`.
 - `crates/client/src/dig.rs` — `Digger`/`destroy_progress` (185, подключён: `WorldView::tick_dig`); `pick.rs` — `Target{face,hit,inside}`, `BLOCK_REACH`; `protocol/item.rs` — ItemStack/компоненты (230a); `client/inventory.rs` — Inventory+пакеты (230b, не подключён); `world/level.rs` — предсказание блоков (187); `world/entity_size.rs` — хитбоксы типов; `pick::raycast_entity`; `netthread.rs` — `NetCmd` (main→net), `NetEvt::{GameMode,Abilities,Motion}`, `FLAG_*` в SharedPos.
 
+- `crates/client/src/cooldown.rs` — кулдауны предметов (пакет cooldown, плашка в `hud::stack_icon`)
 - `crates/client/src/itemicon.rs` — иконки предметов из items/*.json + моделей (софт-рендер, TODO-234)
 - `crates/client/src/tooltip.rs` — подсказка предмета (235): имя, редкость, чары (ENCHANTS из netthread), lore
 
@@ -178,6 +181,12 @@
 
 - `crates/world/src/piston.rs` — поршни: резолвер, piston_event, MovingPiston, tick_pistons; `crates/world/data/piston_data.txt` ← `tools/gen_piston_data.py`
 - `crates/client/src/pistonview.rs` — рендер движущихся блоков поршня + коллизия moving_piston + `push_player` (толкание игрока)
+- docs/ref/lod-distant-terrain-2026-11-09.md — заметка: нагрев CPU на больших дальностях, идея LOD (не реализовано)
+- `crates/net/src/chunkbatch.rs` — ChunkBatchSize (желаемое число чанков за тик)
 - docs/ref/eating-animation-2026-11-09.md — выжимка по анимации поедания/use-item (не реализовано)
 - `worldview.rs` Using/tick_using/release_using, `itemdata::consumable` — еда/питьё (first-person eat в prepare_hand)
 - `hudbars.rs` — сердца/броня/еда/XP-бар и уровень; локатор-бар (`draw_locator`, `Wp`, пакет `waypoint` в netthread): docs/ref/hud-bars-locator-2026-11-09.md
+
+- Perf-правки 2026-11-09: `render/src/terrain.rs` (`track_src_cmds` — запись `src_cmds` только для замороженного `GpuCuller`; `prepare_draws` с предвычисленной дистанцией; `FxHashMap`), `mesh/src/{queue,sort,pool}.rs` и `client/src/worldview.rs` (Fx-хеши, `select_nth`), `render/src/text.rs` (глифы на `FxHashMap`), `client/src/mobs.rs` (`bake` пропускает мобов дальше 64×scale), `client/src/debugscreen.rs` (кеш `rss_mib`). Зависимость `rustc-hash` в mesh/render/client.
+
+- `crates/client/src/armor.rs` — броня игроков (`ArmorKit::bake/raster`, `Look`, `looks_of_menu/entity`); `charpreview.rs` — превью игрока в инвентаре (броня, предметы, присед/плавание через `Snap`)

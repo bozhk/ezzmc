@@ -8,7 +8,7 @@ import base64, json, os, socket, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PORT = int(os.environ.get("EZZMC_CONTROL_PORT", "25573"))
-BIN = os.environ.get("EZZMC_BIN", os.path.join(ROOT, "target/release/ezzmc-client"))
+BIN = os.environ.get("EZZMC_BIN", os.path.join(ROOT, "target/fast/ezzmc-client"))
 LOG = "/tmp/ezzmc-client.log"
 proc = sock = fh = None
 
@@ -49,7 +49,7 @@ def launch(args):
     if connect(0.5):
         return send({"cmd": "ping"})
     if not os.path.exists(BIN):
-        return {"ok": False, "error": f"{BIN} missing: cargo build --release -p ezzmc-client"}
+        return {"ok": False, "error": f"{BIN} missing: cargo build --profile fast -p ezzmc-client"}
     cmd = [BIN, "--control", f"127.0.0.1:{PORT}", "--name", args.get("name") or os.environ.get("EZZMC_NAME", "EzzBot")]
     if args.get("addr"):
         cmd += ["--connect", args["addr"]]

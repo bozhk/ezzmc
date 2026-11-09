@@ -1,4 +1,5 @@
 //! TCP, фрейминг, компрессия, состояния соединения.
+pub mod chunkbatch;
 pub mod conn;
 pub mod error;
 pub mod frame;

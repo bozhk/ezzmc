@@ -1231,6 +1231,7 @@ pub fn draw_sprites(
     tab_btn(p, st.tab, true);
     if st.is_inventory() {
         if let Some(cp) = preview {
+            cp.set_armor(&inv.slots);
             cp.draw(p, dev, q, scale, l, t, mx, my, PREVIEW_RECT, PREVIEW_SIZE);
         }
     } else if st.kind() == Kind::Hotbar {

@@ -168,6 +168,27 @@ impl TintCache {
 }
 
 /// VANILLA: SectionCompiler#compile
+/// Секция целиком из одного SOLID_RENDER-блока, и шесть соседних секций (все загружены) — тоже.
+fn uniform_solid(sec: &ezzmc_world::chunk::Section) -> bool {
+    sec.states()
+        .single_value()
+        .and_then(BlockState::from_id)
+        .is_some_and(|b| blockinfo::has(b, SOLID_RENDER))
+}
+
+fn enclosed_solid(hood: &Neighborhood, pos: SectionPos, sec: &ezzmc_world::chunk::Section) -> bool {
+    if !uniform_solid(sec) {
+        return false;
+    }
+    let col = |dx: i32, dz: i32| hood.chunks[((dz + 1) * 3 + dx + 1) as usize].as_ref();
+    let ok = |dx: i32, dy: i32, dz: i32| {
+        col(dx, dz)
+            .and_then(|c| c.chunk.section_at((pos.y + dy) * 16))
+            .is_some_and(uniform_solid)
+    };
+    ok(-1, 0, 0) && ok(1, 0, 0) && ok(0, 0, -1) && ok(0, 0, 1) && ok(0, -1, 0) && ok(0, 1, 0)
+}
+
 pub fn mesh_section(
     pos: SectionPos,
     hood: &Neighborhood,
@@ -179,6 +200,18 @@ pub fn mesh_section(
     };
     if pos.y * 16 < center.chunk.min_y() || pos.y * 16 >= center.chunk.max_y() {
         return mesh;
+    }
+    // Быстрые выходы без копирования 20³ блоков: воздушная секция и секция внутри сплошной породы
+    // не дают ни одной грани (грани между двумя SOLID_RENDER-блоками не рисуются).
+    if let Some(sec) = center.chunk.section_at(pos.y * 16) {
+        if sec.has_only_air() {
+            mesh.visibility = VisibilitySet::all(true);
+            return mesh;
+        }
+        if enclosed_solid(hood, pos, sec) {
+            mesh.visibility = VisibilitySet::all(false);
+            return mesh;
+        }
     }
     let pad = Padded::fill(hood, pos);
     let cutout_leaves = models.cutout_leaves();

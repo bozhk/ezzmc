@@ -80,3 +80,6 @@ inherits = "release"
 lto = "off"
 codegen-units = 16
 incremental = true
+# Символы для samply (имена функций в профиле)
+debug = "line-tables-only"
+strip = "none"

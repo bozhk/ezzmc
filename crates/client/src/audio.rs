@@ -375,10 +375,13 @@ fn decode(bytes: Vec<u8>) -> Option<Pcm> {
             }
         }
     }
+    data.shrink_to_fit();
     (ch > 0 && !data.is_empty()).then_some(Pcm { rate, ch, data })
 }
 
 const MAX_VOICES: usize = 247;
+/// Потолок кэша коротких звуков (байт PCM).
+const PCM_CACHE_MAX: usize = 64 << 20;
 
 fn worker(rx: Receiver<Cmd>) {
     let (mtx, mrx) = unbounded::<MixCmd>();
@@ -391,6 +394,7 @@ fn worker(rx: Receiver<Cmd>) {
         return;
     };
     let mut cache: HashMap<String, Option<Arc<Pcm>>> = HashMap::new();
+    let mut cache_bytes = 0usize;
     let mut warned: std::collections::HashSet<String> = Default::default();
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ std::process::id() as u64);
     use ezzmc_assets::source::ResourceSource;
@@ -417,16 +421,29 @@ fn worker(rx: Receiver<Cmd>) {
                 if vol <= 0.0 || (!long && cat_volume(r.cat) <= 0.0) {
                     continue;
                 }
-                let pcm = cache
-                    .entry(p.path.clone())
-                    .or_insert_with(|| {
-                        let d = reg.store.read(&p.path).and_then(decode);
-                        if d.is_none() {
-                            tracing::debug!("звук: не декодирован {}", p.path);
-                        }
-                        d.map(Arc::new)
-                    })
-                    .clone();
+                // Длинные звуки (музыка/пластинки/петли) не кэшируем: трек ≈ 30 МБ PCM,
+                // освобождается вместе с голосом. Короткие — в кэше с потолком по размеру.
+                let pcm = if long {
+                    reg.store.read(&p.path).and_then(decode).map(Arc::new)
+                } else {
+                    if cache_bytes > PCM_CACHE_MAX {
+                        cache.clear();
+                        cache_bytes = 0;
+                    }
+                    cache
+                        .entry(p.path.clone())
+                        .or_insert_with(|| {
+                            let d = reg.store.read(&p.path).and_then(decode);
+                            if d.is_none() {
+                                tracing::debug!("звук: не декодирован {}", p.path);
+                            }
+                            d.map(|d| {
+                                cache_bytes += d.data.len() * 2;
+                                Arc::new(d)
+                            })
+                        })
+                        .clone()
+                };
                 let Some(pcm) = pcm else { continue };
                 let pitch = (r.pitch * p.pitch).clamp(0.5, 2.0);
                 let looping = r.gain.is_some();

@@ -194,6 +194,19 @@ fn run(
         return Err("сервер просит transfer (не поддержано в M1)".into());
     };
     let reg = |n: &str| cfg.registries.iter().find(|r| r.registry == n);
+    if let Ok(mut g) = crate::mobs::VARIANT_REGS.lock() {
+        *g = cfg
+            .registries
+            .iter()
+            .filter(|r| r.registry.ends_with("_variant"))
+            .map(|r| {
+                (
+                    r.registry.clone(),
+                    r.entries.iter().map(|(n, _)| n.clone()).collect(),
+                )
+            })
+            .collect();
+    }
     let chat_types = crate::chatnet::chat_types(reg("minecraft:chat_type"));
     let (Some(dims), Some(biomes)) = (
         reg("minecraft:dimension_type"),
@@ -223,6 +236,15 @@ fn run(
             })
             .collect();
     }
+    // Трим брони: имена материалов/паттернов в порядке holder id.
+    if let Ok(mut g) = crate::armor::TRIM_REGISTRY.lock() {
+        let names = |k: &str| {
+            reg(k)
+                .map(|r| r.entries.iter().map(|(n, _)| n.clone()).collect())
+                .unwrap_or_default()
+        };
+        *g = (names("minecraft:trim_material"), names("minecraft:trim_pattern"));
+    }
     // Id часов overworld в реестре world_clock (holder = индекс в порядке registry_data).
     let clock_id = reg("minecraft:world_clock").and_then(|r| {
         r.entries
@@ -232,6 +254,7 @@ fn run(
     });
     let mut h = PlayHandler::new(ids);
     let mut loaded_sent = false;
+    let mut batch_size = ezzmc_net::chunkbatch::ChunkBatchSize::default();
     // VANILLA: LocalPlayer#sendChanges каждый клиентский тик: player_input при изменении, команда спринта,
     // затем один из MovePlayer (PosRot/Pos/Rot/StatusOnly) по порогу 2e-4 и heartbeat раз в 20 тиков.
     // Без этого сервер считает игрока стоящим на месте и не шлёт новые чанки.
@@ -510,6 +533,14 @@ fn run(
                     }
                     continue;
                 }
+                if pname == "cooldown" {
+                    // VANILLA: handleItemCooldown (Identifier group, varint duration).
+                    let mut rd = ezzmc_protocol::wire::Reader::new(&body);
+                    if let (Ok(g), Ok(d)) = (rd.string(256), rd.var_int()) {
+                        crate::cooldown::add(&g, d);
+                    }
+                    continue;
+                }
                 if pname == "waypoint" {
                     if let Some((op, wp)) = parse_waypoint(&body) {
                         let _ = tx.send(NetEvt::Waypoint(op, wp));
@@ -608,8 +639,14 @@ fn run(
                     }
                 };
                 match &ev {
-                    LevelEvent::BatchFinished { .. } => {
-                        h.send_chunk_batch_received(&mut c, 9.0)
+                    LevelEvent::BatchStart => batch_size.on_batch_start(),
+                    LevelEvent::BatchFinished { size } => {
+                        batch_size.on_batch_finished(*size);
+                        tracing::info!(
+                            "chunk batch: size={size} desired/tick={:.1}",
+                            batch_size.desired_chunks_per_tick()
+                        );
+                        h.send_chunk_batch_received(&mut c, batch_size.desired_chunks_per_tick())
                             .map_err(|x| e(&x))?;
                     }
                     LevelEvent::ChunkLoaded { .. } if !loaded_sent => {

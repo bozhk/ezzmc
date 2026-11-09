@@ -9,6 +9,18 @@ use ezzmc_render::gui::GuiPainter;
 use ezzmc_render::humanoid::{self, HumanoidParts, HumanoidState};
 use glam::{Mat4, Vec3};
 
+/// Состояние игрока для превью (собирает `WorldView::preview_snapshot`).
+#[derive(Clone)]
+pub struct Snap {
+    pub state: HumanoidState,
+    pub crouching: bool,
+    pub swim: crate::worldview::SwimPose,
+    pub right: Option<std::rc::Rc<crate::handitem::HandMesh>>,
+    pub left: Option<std::rc::Rc<crate::handitem::HandMesh>>,
+    pub blocks: std::rc::Rc<(Vec<u8>, u32, u32)>,
+    pub items: Option<std::rc::Rc<(Vec<u8>, u32, u32)>>,
+}
+
 /// Прямоугольник превью в координатах GUI меню (x0, y0, x1, y1) и размер модели.
 pub const RECT: (f32, f32, f32, f32) = (26.0, 8.0, 75.0, 78.0);
 pub const SIZE: f32 = 30.0;
@@ -21,6 +33,12 @@ pub struct CharPreview {
     skin: Option<(Vec<u8>, u32, u32)>,
     model: Model,
     parts: HumanoidParts,
+    /// Броня на превью (VANILLA: InventoryScreen рисует LocalPlayer целиком, с экипировкой).
+    armor: crate::armor::ArmorKit,
+    looks: [Option<crate::armor::Look>; 4],
+    snap: Option<Snap>,
+    /// Отпечаток снимка состояния (поза, предметы).
+    snap_hash: u64,
     /// Ключ последней отрисованной текстуры: (масштаб GUI, углы в десятитысячных).
     key: Option<(u32, i32, i32, [i32; 5])>,
 }
@@ -37,7 +55,40 @@ impl CharPreview {
             skin,
             model,
             parts,
+            armor: crate::armor::ArmorKit::new(rm),
+            looks: [None; 4],
+            snap: None,
+            snap_hash: 0,
             key: None,
+        }
+    }
+
+    /// Состояние игрока (присед/плавание/предметы); изменение сбрасывает кэш текстуры.
+    pub fn set_snap(&mut self, snap: Snap) {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let s = &snap.state;
+        for f in [s.walk_pos, s.walk_speed, s.swim_amount, s.swing, snap.swim.amount] {
+            ((f * 1000.0) as i32).hash(&mut h);
+        }
+        (snap.crouching, snap.swim.in_water, snap.swim.visually).hash(&mut h);
+        for m in [&snap.right, &snap.left] {
+            m.as_ref().map(|m| std::rc::Rc::as_ptr(m) as usize).hash(&mut h);
+        }
+        let hash = h.finish();
+        if hash != self.snap_hash {
+            self.snap_hash = hash;
+            self.key = None;
+        }
+        self.snap = Some(snap);
+    }
+
+    /// Надетая броня из слотов InventoryMenu; смена сбрасывает кэш текстуры.
+    pub fn set_armor(&mut self, slots: &[Option<ezzmc_protocol::item::ItemStack>]) {
+        let looks = crate::armor::looks_of_menu(slots);
+        if looks != self.looks {
+            self.looks = looks;
+            self.key = None;
         }
     }
 
@@ -94,17 +145,29 @@ impl CharPreview {
             return px;
         };
         // VANILLA: bodyRot = 180 + xAngle*20, yRot = xAngle*20, xRot = -yAngle*20 (градусы).
+        let snap = self.snap.clone();
         let st = HumanoidState {
             y_rot: xa * 20.0,
             x_rot: -ya * 20.0,
-            ..Default::default()
+            ..snap.as_ref().map(|s| s.state).unwrap_or_default()
         };
+        let crouching = snap.as_ref().is_some_and(|s| s.crouching);
+        let mut swim = snap.as_ref().map(|s| s.swim).unwrap_or_default();
+        swim.x_rot = st.x_rot;
+        let mut st = st;
+        st.crouching = crouching;
         humanoid::setup_anim(&mut self.model, &self.parts, &st);
         let body = 180.0 + xa * 20.0;
-        let root = Mat4::from_translation(Vec3::new(0.0, BOX_HEIGHT / 2.0 + OFFSET_Y, 0.0))
-            * Mat4::from_rotation_z(std::f32::consts::PI)
+        // VANILLA: AvatarRenderer#getRenderOffset — приседание сдвигает вниз на 2/16.
+        let crouch_off = if crouching { 2.0 / 16.0 } else { 0.0 };
+        let root = Mat4::from_translation(Vec3::new(
+            0.0,
+            BOX_HEIGHT / 2.0 + OFFSET_Y + crouch_off,
+            0.0,
+        )) * Mat4::from_rotation_z(std::f32::consts::PI)
             * Mat4::from_rotation_x((ya * 20.0).to_radians())
             * Mat4::from_rotation_y((180.0 - body).to_radians())
+            * swim.matrix()
             * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0))
             * Mat4::from_scale(Vec3::splat(0.9375))
             * Mat4::from_translation(Vec3::new(0.0, -1.501, 0.0));
@@ -113,13 +176,51 @@ impl CharPreview {
         // VANILLA: Lighting.ENTITY_IN_UI.
         let l0 = Vec3::new(0.2, -1.0, 1.0).normalize();
         let l1 = Vec3::new(-0.2, -1.0, 0.0).normalize();
-        for quad in self.model.quads(root) {
+        // Слой скина, затем слои брони (атлас: v внутри строки → v всего атласа).
+        let mut jobs: Vec<(ezzmc_render::entitymodel::RasterQuad, Option<(u32, [u8; 3])>)> = self
+            .model
+            .quads(root)
+            .into_iter()
+            .map(|q| (q, None))
+            .collect();
+        jobs.extend(
+            self.armor
+                .raster(&self.looks, &st, root)
+                .into_iter()
+                .map(|(q, row, tint)| (q, Some((row, tint)))),
+        );
+        // Предметы в руках. VANILLA: ItemInHandLayer — рука, X−90°, Y180°, translate(±1/16, 2/16, −10/16).
+        let mut item_jobs = Vec::new();
+        if let Some(sn) = &snap {
+            let mats = self.model.part_matrices(root);
+            for (mesh, arm, dx, view) in [
+                (&sn.right, self.parts.right_arm, 1.0, crate::handitem::View::ThirdPerson),
+                (&sn.left, self.parts.left_arm, -1.0, crate::handitem::View::ThirdPersonLeft),
+            ] {
+                if let Some(mesh) = mesh {
+                    let m = mats[arm]
+                        * Mat4::from_rotation_x((-90.0f32).to_radians())
+                        * Mat4::from_rotation_y(180.0f32.to_radians())
+                        * Mat4::from_translation(Vec3::new(dx / 16.0, 0.125, -0.625));
+                    item_jobs.extend(mesh.raster(m, view));
+                }
+            }
+        }
+        for (quad, arm) in jobs {
             // Ось Z зеркалим: зритель смотрит с +Z, лицо персонажа обращено к нему.
             let n = Vec3::new(quad.normal.x, quad.normal.y, -quad.normal.z);
             let shade = (((l0.dot(n)).max(0.0) + (l1.dot(n)).max(0.0)) * 0.6 + 0.4).min(1.0);
             let v: [Vec3; 4] = quad
                 .pos
                 .map(|p| Vec3::new(ox + p.x * k, oy + p.y * k, -p.z));
+            let (tex, uv, tint) = match arm {
+                None => ((skin.as_slice(), *sw, *sh), quad.uv, [255u8; 3]),
+                Some((row, tint)) => (
+                    (self.armor.rgba.as_slice(), self.armor.width, self.armor.height),
+                    quad.uv.map(|uv| self.armor.atlas_uv(row, uv)),
+                    tint,
+                ),
+            };
             for tri in [[0, 1, 2], [0, 2, 3]] {
                 fill_tri(
                     &mut px,
@@ -127,9 +228,35 @@ impl CharPreview {
                     w,
                     h,
                     tri.map(|i| v[i]),
-                    tri.map(|i| quad.uv[i]),
-                    (skin, *sw, *sh),
+                    tri.map(|i| uv[i]),
+                    tex,
                     shade,
+                    tint,
+                );
+            }
+        }
+        for q in item_jobs {
+            let Some(sn) = &snap else { break };
+            let tex = if q.items {
+                match &sn.items {
+                    Some(t) => t,
+                    None => continue,
+                }
+            } else {
+                &sn.blocks
+            };
+            let v: [Vec3; 4] = q.pos.map(|p| Vec3::new(ox + p.x * k, oy + p.y * k, -p.z));
+            for tri in [[0, 1, 2], [0, 2, 3]] {
+                fill_tri(
+                    &mut px,
+                    &mut depth,
+                    w,
+                    h,
+                    tri.map(|i| v[i]),
+                    tri.map(|i| q.uv[i]),
+                    (tex.0.as_slice(), tex.1, tex.2),
+                    1.0,
+                    q.color,
                 );
             }
         }
@@ -148,6 +275,7 @@ fn fill_tri(
     uv: [[f32; 2]; 3],
     skin: (&[u8], u32, u32),
     shade: f32,
+    tint: [u8; 3],
 ) {
     let area = (v[1].x - v[0].x) * (v[2].y - v[0].y) - (v[2].x - v[0].x) * (v[1].y - v[0].y);
     if area.abs() < 1e-6 {
@@ -204,7 +332,7 @@ fn fill_tri(
             depth[di] = z;
             let o = di * 4;
             for c in 0..3 {
-                px[o + c] = (f32::from(skin.0[s + c]) * shade) as u8;
+                px[o + c] = (f32::from(skin.0[s + c]) * f32::from(tint[c]) / 255.0 * shade) as u8;
             }
             px[o + 3] = 255;
         }
@@ -223,6 +351,10 @@ mod tests {
             skin: Some((vec![200; 64 * 64 * 4], 64, 64)),
             model,
             parts,
+            armor: crate::armor::ArmorKit::new(&ResourceManager::new(Vec::new())),
+            looks: [None; 4],
+            snap: None,
+            snap_hash: 0,
             key: None,
         };
         if let Ok(f) = std::env::var("EZZMC_PREVIEW_SKIN") {

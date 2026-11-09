@@ -405,20 +405,35 @@ mod tests {
 /// VANILLA: ArrowModel (32×32) — оперение (`back`) и два креста (`cross_1/2`), масштаб 0.9.
 /// Текстуры трёх стрел лежат стопкой 32×96: `row` = 0 обычная, 1 spectral, 2 tipped.
 /// `root` — матрица после поворотов сущности (Y yRot−90, Z xRot), камера в начале координат.
-pub fn bake_arrow(root: Mat4, row: u32, light: (u8, u8), out: &mut Vec<u8>) {
+pub fn bake_arrow(root: Mat4, row: u32, light: (u8, u8), shake: f32, out: &mut Vec<u8>) {
     let uv = |u: f32, v: f32| [u / 32.0, (v + 32.0 * row as f32) / 96.0];
-    let base = root * Mat4::from_scale(Vec3::splat(0.9 / 16.0));
+    // VANILLA: ArrowModel#setupAnim — root.zRot += −sin(shake·3)·shake (градусы).
+    let shake_rot = if shake > 0.0 {
+        (-(shake * 3.0).sin() * shake).to_radians()
+    } else {
+        0.0
+    };
+    let base = root * Mat4::from_rotation_z(shake_rot) * Mat4::from_scale(Vec3::splat(0.9 / 16.0));
     let mut quad = |m: Mat4, pos: [[f32; 3]; 4], tx: [[f32; 2]; 4], n: [f32; 3]| {
         let shade = mix_light(m.transform_vector3(Vec3::from(n)).normalize_or_zero());
-        let c = [(255.0 * shade) as u8, (255.0 * shade) as u8, (255.0 * shade) as u8, 255];
+        let c = [
+            (255.0 * shade) as u8,
+            (255.0 * shade) as u8,
+            (255.0 * shade) as u8,
+            255,
+        ];
         for i in 0..4 {
             let p = m.transform_point3(Vec3::from(pos[i]));
             push_vertex(out, p.to_array(), uv(tx[i][0], tx[i][1]), c, light);
         }
     };
-    // cross: addBox(-12,-2,0, 16,4,0) uScale 1.0 vScale 0.8 → v 0..3.2.
-    let (x0, x1, y0, y1, vh) = (-12.0, 4.0, -2.0, 2.0, 3.2);
-    for rot in [std::f32::consts::FRAC_PI_4, std::f32::consts::PI * 3.0 / 4.0] {
+    // cross: addBox(-12,-2,0, 16,4,0) uScale 1.0 vScale 0.8: размер текстуры по v = 32·0.8 = 25.6,
+    // значит 4 px высоты куба = 4/25.6 текстуры = 5 px в сетке 32 (ModelPart.Cube/Polygon).
+    let (x0, x1, y0, y1, vh) = (-12.0, 4.0, -2.0, 2.0, 5.0);
+    for rot in [
+        std::f32::consts::FRAC_PI_4,
+        std::f32::consts::PI * 3.0 / 4.0,
+    ] {
         let m = base * Mat4::from_rotation_x(rot);
         quad(
             m,
@@ -440,13 +455,23 @@ pub fn bake_arrow(root: Mat4, row: u32, light: (u8, u8), out: &mut Vec<u8>) {
         * Mat4::from_scale(Vec3::splat(0.8));
     quad(
         m,
-        [[0.0, -2.5, -2.5], [0.0, -2.5, 2.5], [0.0, 2.5, 2.5], [0.0, 2.5, -2.5]],
+        [
+            [0.0, -2.5, -2.5],
+            [0.0, -2.5, 2.5],
+            [0.0, 2.5, 2.5],
+            [0.0, 2.5, -2.5],
+        ],
         [[5.0, 5.0], [0.0, 5.0], [0.0, 10.0], [5.0, 10.0]],
         [-1.0, 0.0, 0.0],
     );
     quad(
         m,
-        [[0.0, -2.5, 2.5], [0.0, -2.5, -2.5], [0.0, 2.5, -2.5], [0.0, 2.5, 2.5]],
+        [
+            [0.0, -2.5, 2.5],
+            [0.0, -2.5, -2.5],
+            [0.0, 2.5, -2.5],
+            [0.0, 2.5, 2.5],
+        ],
         [[10.0, 5.0], [5.0, 5.0], [5.0, 10.0], [10.0, 10.0]],
         [1.0, 0.0, 0.0],
     );

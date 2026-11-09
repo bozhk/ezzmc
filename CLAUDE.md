@@ -71,7 +71,7 @@
 Подробности стенда (время 12700, clear, невидимость, `nocol`): `docs/ref/vanilla-compare-2026-11-08.md`.
 
 ## Живая проверка: СНАЧАЛА пересобери бинарник — НЕ ЗАБЫВАТЬ
-MCP (`tools/ezzmc_mcp.py`, `game_launch`) запускает **`target/release/ezzmc-client`**, а `cargo check`/`cargo build` (debug) его **не обновляют**. Перед любой проверкой вживую: `cargo build --release -p ezzmc-client`, затем `game_stop` + `game_launch` (запущенный процесс остаётся старым). Не уверен, свежий ли бинарник: `find crates -newer target/release/ezzmc-client -name '*.rs'` — если что-то нашлось, он устарел. Результат «не работает» без этой проверки недействителен.
+MCP (`tools/ezzmc_mcp.py`, `game_launch`) запускает **`target/fast/ezzmc-client` (профиль `fast`: без LTO, инкрементальный)**, а `cargo check`/`cargo build` (debug) его **не обновляют**. Перед любой проверкой вживую: `cargo build --profile fast -p ezzmc-client`, затем `game_stop` + `game_launch` (запущенный процесс остаётся старым). Не уверен, свежий ли бинарник: `find crates -newer target/fast/ezzmc-client -name '*.rs'` — если что-то нашлось, он устарел. Результат «не работает» без этой проверки недействителен.
 
 ## Запрещено
 Работа вне фокуса · игровая логика «по памяти» · аккаунты/онлайн-логин · публикация репозитория · дубли документов/README · мусорные абстракции «на будущее» · `unwrap()` на сетевых данных · «готово» без проверки · правка без обновления STATUS/CODEMAP/TASKS.
