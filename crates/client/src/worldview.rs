@@ -242,6 +242,9 @@ pub struct WorldView {
     pub fluid_target: Option<crate::pick::Target>,
     /// Дальность 20 (F3 «looking at»), без ограничения interaction range.
     pub look_target: Option<crate::pick::Target>,
+    /// Блок для постановки/использования (ПКМ): выбирается в конце тика физики от глаз,
+    /// которые уже ушли в пакет движения (VANILLA: Minecraft#tick → pick(1.0F)).
+    pub place_target: Option<crate::pick::Target>,
     pub look_fluid: Option<crate::pick::Target>,
     /// Сущность под прицелом (id) — ближе блока (Minecraft#hitResult = EntityHitResult).
     pub entity_target: Option<i32>,
@@ -914,6 +917,7 @@ impl WorldView {
             target: None,
             fluid_target: None,
             look_target: None,
+            place_target: None,
             look_fluid: None,
             entity_target: None,
             visible_sections: 0,
@@ -1754,6 +1758,7 @@ impl WorldView {
             if let Some(t) = self_fov {
                 let (_, cur) = self.fov_mod;
                 self.fov_mod = (cur, cur + (t - cur) * 0.5);
+                self.update_place_target(yaw, pitch);
             }
             // VANILLA: LocalPlayer#sendChanges — один пакет движения на каждый тик физики.
             if self_fov.is_some() && self.have_pos && !self.no_send {
@@ -1764,6 +1769,28 @@ impl WorldView {
             self.tick_acc = 0.0;
         }
         self.cam = self.player.eye_lerp(self.tick_acc / 0.05);
+    }
+
+    /// VANILLA: Minecraft#tick → pick(1.0F) после тика: цель клика от глаз конца тика.
+    /// Сервер проверяет луч от позиции последнего пакета движения, поэтому берём именно её,
+    /// а не кадровую (интерполированную вперёд) камеру `self.cam`.
+    fn update_place_target(&mut self, yaw: f32, pitch: f32) {
+        self.place_target = None;
+        if !self.have_pos || self.game_mode == 3 {
+            return;
+        }
+        let eye = self.player.eye_lerp(1.0);
+        let d = look_dir(yaw, pitch);
+        let reach = if self.game_mode == 1 {
+            crate::pick::CREATIVE_BLOCK_REACH
+        } else {
+            crate::pick::BLOCK_REACH
+        };
+        if let Ok(g) = self.net.level.lock() {
+            if let Some(l) = g.as_ref() {
+                self.place_target = crate::pick::raycast_t(l, eye, d, false, reach).map(|(t, _)| t);
+            }
+        }
     }
 
     /// Отправляет сетевому потоку состояние после тика физики. Тики до применения телепорта не шлём.
@@ -3313,7 +3340,7 @@ impl WorldView {
                 (f64::from(t.pos[1]) - self.cam[1]) as f32,
                 (f64::from(t.pos[2]) - self.cam[2]) as f32,
             ];
-            let o = ezzmc_mesh::blockinfo::block_offset(t.state, t.pos[0], t.pos[2]);
+            let o = ezzmc_mesh::blockinfo::outline_offset(t.state, t.pos[0], t.pos[2]);
             let off = [off[0] + o[0], off[1] + o[1], off[2] + o[2]];
             let segs: Vec<_> = ezzmc_mesh::blockinfo::outline_boxes(t.state)
                 .iter()
@@ -3780,13 +3807,22 @@ impl WorldView {
                 .copied()
         });
         let mut consumed = false;
-        if let Some(t) = self.target {
+        if let Some(t) = self.place_target {
             let seq = self.next_seq();
             let rel = [
                 (t.hit[0] - f64::from(t.pos[0])) as f32,
                 (t.hit[1] - f64::from(t.pos[1])) as f32,
                 (t.hit[2] - f64::from(t.pos[2])) as f32,
             ];
+            // DIAG-PLACE: камера кадра и взгляд, с которыми выбран блок (сравнить с sent_* в netthread).
+            // DIAG-PLACE: имя состояния и смещения блока (block_offset — рендер, outline_offset — контур).
+            let diag_off = ezzmc_mesh::blockinfo::block_offset(t.state, t.pos[0], t.pos[2]);
+            let diag_outline = ezzmc_mesh::blockinfo::outline_offset(t.state, t.pos[0], t.pos[2]);
+            tracing::info!(
+                target: "place",
+                "target hit={:.6?} pos={:?} face={} state={} block_offset={:.4?} outline_offset={:.4?} cam={:.6?} frame_yaw={:.4} frame_pitch={:.4}",
+                t.hit, t.pos, t.face, t.state.name(), diag_off, diag_outline, self.cam, self.yaw, self.pitch
+            );
             let _ = self.net.cmd.send(crate::netthread::NetCmd::UseItemOn {
                 pos: t.pos,
                 face: t.face,

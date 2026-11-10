@@ -154,6 +154,42 @@ pub fn block_offset(state: BlockState, x: i32, z: i32) -> [f32; 3] {
     [dx as f32, dy as f32, dz as f32]
 }
 
+/// VANILLA: сдвиг контура выбора (`getShape`) на `getOffset`. Двигают только блоки, чей `getShape`
+/// вызывает `.move(state.getOffset(pos))`: FlowerBlock (и наследники: EyeblossomBlock, WitherRoseBlock),
+/// BambooStalkBlock, BambooSaplingBlock, MangrovePropaguleBlock, SpeleothemBlock (pointed_dripstone).
+/// У травы, папоротника, двойных растений, SmallDripleafBlock контур НЕ сдвигается; рендер модели сдвигается
+/// у всех (см. `block_offset`), поэтому для пикера и контура используем эту функцию, а не `block_offset`.
+pub fn outline_offset(state: BlockState, x: i32, z: i32) -> [f32; 3] {
+    let moved = matches!(
+        state.name(),
+        "dandelion"
+            | "torchflower"
+            | "poppy"
+            | "blue_orchid"
+            | "allium"
+            | "azure_bluet"
+            | "red_tulip"
+            | "orange_tulip"
+            | "white_tulip"
+            | "pink_tulip"
+            | "oxeye_daisy"
+            | "cornflower"
+            | "wither_rose"
+            | "lily_of_the_valley"
+            | "open_eyeblossom"
+            | "closed_eyeblossom"
+            | "bamboo"
+            | "bamboo_sapling"
+            | "mangrove_propagule"
+            | "pointed_dripstone"
+    );
+    if moved {
+        block_offset(state, x, z)
+    } else {
+        [0.0; 3]
+    }
+}
+
 /// Жидкость в клетке (`BlockState#getFluidState`).
 // VANILLA: LiquidBlock#getFluidState (level 0 = источник, 1..7 = течение amount 8−level, ≥8 = падающая),
 // BlockStateProperties.WATERLOGGED → источник воды, ламинарные «водные» блоки (келп, морская трава, пузыри).
@@ -285,6 +321,18 @@ mod tests {
     fn st(name: &str) -> BlockState {
         let b = BLOCKS.iter().find(|b| b.name == name).unwrap();
         BlockState::from_id(b.default_state).unwrap()
+    }
+
+    #[test]
+    fn outline_offset_only_for_moved_shapes() {
+        // Трава и двойные растения: рендер сдвинут (block_offset), контур выбора — нет (ванильный getShape).
+        let grass = st("short_grass");
+        assert!(block_offset(grass, 1, 1).iter().any(|v| *v != 0.0));
+        assert_eq!(outline_offset(grass, 1, 1), [0.0; 3]);
+        assert_eq!(outline_offset(st("tall_grass"), 1, 1), [0.0; 3]);
+        // Цветы (FlowerBlock#getShape → .move(getOffset)): контур сдвинут так же, как рендер.
+        let poppy = st("poppy");
+        assert_eq!(outline_offset(poppy, 1, 1), block_offset(poppy, 1, 1));
     }
 
     #[test]

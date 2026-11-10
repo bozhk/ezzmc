@@ -15,14 +15,16 @@ const GRAVITY: f64 = 0.08;
 const JUMP_STRENGTH: f32 = 0.42;
 const MOVEMENT_SPEED: f32 = 0.1;
 const SNEAKING_SPEED: f32 = 0.3;
-/// VANILLA: Abilities#getFlyingSpeed.
-const WIDTH: f64 = 0.6;
-const HEIGHT_STANDING: f64 = 1.8;
-const HEIGHT_CROUCHING: f64 = 1.5;
+/// VANILLA: EntityType.PLAYER = EntityDimensions.scalable(0.6F, 1.8F).
+/// Размеры хранятся как f32, как в ванили (EntityDimensions: float width/height);
+/// в f64 переводим только при расчёте AABB, иначе полуширина расходится с сервером.
+const WIDTH: f32 = 0.6;
+const HEIGHT_STANDING: f32 = 1.8;
+const HEIGHT_CROUCHING: f32 = 1.5;
 const EYE_STANDING: f64 = 1.62;
 const EYE_CROUCHING: f64 = 1.27;
 /// VANILLA: Pose.SWIMMING — хитбокс 0.6×0.6, глаза 0.4.
-const HEIGHT_SWIMMING: f64 = 0.6;
+const HEIGHT_SWIMMING: f32 = 0.6;
 const EYE_SWIMMING: f64 = 0.4;
 
 /// Доступ к миру для физики (позволяет тестировать без чанков).
@@ -239,6 +241,9 @@ pub struct Player {
     /// VANILLA: Options#sprintWindow (по умолчанию 7, 0 — двойное нажатие выключено).
     pub sprint_window: u8,
     was_jump: bool,
+    /// Приседание (Shift) прошлого тика. VANILLA: LocalPlayer#aiStep читает keyPresses.shift()
+    /// до input.tick(), поэтому поза движения и медленный ход отстают на тик от нажатия.
+    was_sneak: bool,
     /// VANILLA: Options#autoJump, LocalPlayer#autoJumpTime.
     pub auto_jump: bool,
     auto_jump_time: u8,
@@ -297,6 +302,7 @@ impl Player {
             sprint_trigger_time: 0,
             sprint_window: 7,
             was_jump: false,
+            was_sneak: false,
             auto_jump: false,
             auto_jump_time: 0,
             last_move: (0.0, 0.0),
@@ -332,11 +338,11 @@ impl Player {
 
     fn height(&self) -> f64 {
         if self.swimming || self.crawling {
-            HEIGHT_SWIMMING
+            f64::from(HEIGHT_SWIMMING)
         } else if self.crouching {
-            HEIGHT_CROUCHING
+            f64::from(HEIGHT_CROUCHING)
         } else {
-            HEIGHT_STANDING
+            f64::from(HEIGHT_STANDING)
         }
     }
 
@@ -443,26 +449,32 @@ impl Player {
 
         let was_jump = self.was_jump;
         self.was_jump = input.jump;
+        // VANILLA: LocalPlayer#aiStep — crouching и wasShiftKeyDown берутся из keyPresses ДО input.tick(),
+        // то есть из Shift прошлого тика. Grim: PlayerBaseTick.isSlowMovement → wasSneaking.
+        let was_sneak = self.was_sneak;
+        self.was_sneak = input.sneak;
         let had_forward = self.had_forward;
         let (left, fwd) = input.move_vector();
         self.had_forward = fwd > 1.0e-5;
 
         // crouching: pose
-        let want_crouch = !self.flying && !self.swimming && input.sneak;
-        let stand_fits = self.fits(w, HEIGHT_STANDING);
+        let want_crouch = !self.flying && !self.swimming && was_sneak;
+        let stand_fits = self.fits(w, f64::from(HEIGHT_STANDING));
         // Player#updatePlayerPose: не влезаем в стоя/присед → поза SWIMMING (ползём).
         // VANILLA: Player#updatePlayerPose — поза меняется, только если влезает хотя бы SWIMMING (0.6);
         // внутри блока/двери поза остаётся прежней.
-        if self.fits(w, HEIGHT_SWIMMING) {
+        if self.fits(w, f64::from(HEIGHT_SWIMMING)) {
             let want = !self.flying && !self.swimming && (want_crouch || !stand_fits);
-            self.crawling =
-                !self.flying && !self.swimming && !stand_fits && !self.fits(w, HEIGHT_CROUCHING);
+            self.crawling = !self.flying
+                && !self.swimming
+                && !stand_fits
+                && !self.fits(w, f64::from(HEIGHT_CROUCHING));
             self.crouching = want && !self.crawling;
         }
 
         // спринт
         // VANILLA: LocalPlayer#aiStep — isSlowDueToUsingItem обнуляет sprintTriggerTime.
-        if input.sneak || input.back || self.using_item {
+        if was_sneak || input.back || self.using_item {
             self.sprint_trigger_time = 0;
         }
         let moving_slowly = self.crouching || self.crawling;
@@ -1089,7 +1101,7 @@ impl Player {
             self.pos[1],
             self.pos[2] + f64::from(za) + dir[2] * f64::from(look),
         ];
-        let (pw, ph) = (WIDTH, bb[4] - bb[1]);
+        let (pw, ph) = (f64::from(WIDTH), bb[4] - bb[1]);
         let pw_f = f64::from(pw as f32);
         let test = [
             begin[0].min(end[0]) - pw_f,
@@ -1178,7 +1190,7 @@ impl Player {
                     if self.pos[1] > f64::from(y) + 0.9375 - 1.0e-7 || old_dy >= -0.08 {
                         continue;
                     }
-                    let ov = 0.4375 + WIDTH / 2.0;
+                    let ov = 0.4375 + f64::from(WIDTH / 2.0);
                     let dx = (f64::from(x) + 0.5 - self.pos[0]).abs();
                     let dz = (f64::from(z) + 0.5 - self.pos[2]).abs();
                     if dx + 1.0e-7 <= ov && dz + 1.0e-7 <= ov {
@@ -1394,13 +1406,15 @@ fn len_sq(v: [f64; 3]) -> f64 {
 }
 
 fn aabb_at(p: [f64; 3], h: f64) -> [f64; 6] {
+    // VANILLA: EntityDimensions#makeBoundingBox — w = width / 2.0F (float), затем x ± w.
+    let half = f64::from(WIDTH / 2.0);
     [
-        p[0] - WIDTH / 2.0,
+        p[0] - half,
         p[1],
-        p[2] - WIDTH / 2.0,
-        p[0] + WIDTH / 2.0,
+        p[2] - half,
+        p[0] + half,
         p[1] + h,
-        p[2] + WIDTH / 2.0,
+        p[2] + half,
     ]
 }
 
@@ -1805,6 +1819,77 @@ mod tests {
         }
         assert!(p.pos[2] > 3.0, "не взошёл: z={}", p.pos[2]);
         assert!((p.pos[1] - 0.5).abs() < 1e-6, "y={}", p.pos[1]);
+    }
+
+    /// VANILLA: Shift меняет медленный ход только со следующего тика (LocalPlayer#aiStep читает
+    /// keyPresses прошлого тика). Нажатие и отпускание не должны замедлять/ускорять текущий тик.
+    #[test]
+    fn sneak_takes_effect_one_tick_later() {
+        struct Floor;
+        impl Collider for Floor {
+            fn boxes(&self, _: i32, y: i32, _: i32) -> &'static [[f64; 6]] {
+                if y == -1 {
+                    &FULL
+                } else {
+                    &[]
+                }
+            }
+            fn name(&self, _: i32, _: i32, _: i32) -> &'static str {
+                "stone"
+            }
+            fn has_chunk(&self, _: i32, _: i32) -> bool {
+                true
+            }
+        }
+        let w = Floor;
+        let walk = Input {
+            forward: true,
+            ..Input::default()
+        };
+        let sneak = Input {
+            sneak: true,
+            ..walk
+        };
+        let mut a = Player::new([0.5, 0.0, 0.5]);
+        let mut b = Player::new([0.5, 0.0, 0.5]);
+        a.on_ground = true;
+        b.on_ground = true;
+        // разгон без Shift
+        for _ in 0..20 {
+            a.tick(&w, walk, 0.0);
+            b.tick(&w, walk, 0.0);
+        }
+        let step = |p: &mut Player, inp: Input| {
+            let z0 = p.pos[2];
+            p.tick(&w, inp, 0.0);
+            p.pos[2] - z0
+        };
+        // нажатие Shift: тик нажатия идёт на полной скорости, следующий — медленно
+        let base = step(&mut b, walk);
+        let press = step(&mut a, sneak);
+        assert!((press - base).abs() < 1e-9, "нажатие замедлило тот же тик: {press} vs {base}");
+        let press_next = step(&mut a, sneak);
+        let base_next = step(&mut b, walk);
+        assert!(
+            press_next < base_next * 0.8,
+            "со следующего тика должно быть подкрадывание: {press_next} vs {base_next}"
+        );
+        // отпускание: тик отпускания ещё медленный, со следующего — полная скорость
+        for _ in 0..10 {
+            a.tick(&w, sneak, 0.0);
+            b.tick(&w, sneak, 0.0);
+        }
+        // копия в том же состоянии: её тик с Shift даёт базу для тика отпускания
+        let mut c = a.clone();
+        let release = step(&mut a, walk);
+        let base_rel = step(&mut c, sneak);
+        assert!((release - base_rel).abs() < 1e-9, "отпускание ускорило тот же тик: {release} vs {base_rel}");
+        let release_next = step(&mut a, walk);
+        let base_rel_next = step(&mut c, walk);
+        assert!(
+            release_next > base_rel_next * 1.2,
+            "после отпускания должна быть полная скорость: {release_next} vs {base_rel_next}"
+        );
     }
 
     #[test]

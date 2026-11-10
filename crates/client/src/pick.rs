@@ -119,7 +119,8 @@ pub fn raycast_t(
             } else {
                 bi::outline_boxes(st)
             };
-            let off = bi::block_offset(st, cell[0], cell[2]);
+            // VANILLA: контур (getShape) сдвигается на getOffset только у части блоков — см. outline_offset.
+            let off = bi::outline_offset(st, cell[0], cell[2]);
             let rel = [
                 o[0] - f64::from(cell[0]) - f64::from(off[0]),
                 o[1] - f64::from(cell[1]) - f64::from(off[1]),

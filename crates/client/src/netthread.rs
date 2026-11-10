@@ -58,6 +58,13 @@ pub enum NetCmd {
     CreativeSlot(i16, Option<ezzmc_protocol::item::ItemStack>),
     /// 233: выбран слот хотбара (0–8).
     SetCarried(i16),
+    /// TEMP-RAW-MOVE: один пакет движения с заданной позицией (A/B точного f64), физику не трогает.
+    RawMove {
+        pos: [f64; 3],
+        yaw: f32,
+        pitch: f32,
+        on_ground: bool,
+    },
     /// Смена настроек (дальность, части скина, рука, частицы, цвета чата).
     ClientInfo(Box<ezzmc_net::session::ClientInformation>),
     Attack {
@@ -182,6 +189,62 @@ pub fn spawn(addr: String, name: String) -> NetHandle {
         level,
         cmd: cmd_tx,
         tp_gen,
+    }
+}
+
+/// DIAG-STALL: порог, после которого фаза цикла сетевого потока считается зависанием.
+const STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Сколько команд в очереди допускаем до того, как догон тиков начинает пропускать старые тики.
+/// Иначе пейсинг (sleep до 50 мс на тик) на сотнях тиков блокирует сетевой поток на секунды,
+/// и keepalive уходит в таймаут. Пропуск безопасен: пакет движения несёт абсолютную позицию.
+const MAX_CATCHUP_QUEUE: usize = 4;
+
+/// DIAG-STALL: пишет предупреждение, если фаза `what` шла дольше `limit` с момента `since`.
+/// Только диагностика: поведение сетевого потока не меняется.
+fn stall_check(what: &str, since: std::time::Instant, limit: std::time::Duration) {
+    let el = since.elapsed();
+    if el > limit {
+        tracing::warn!(target: "stall", "netthread: фаза «{what}» заняла {} мс", el.as_millis());
+    }
+}
+
+/// Отправка действия игрока, которое ваниль шлёт внутри тика до пакета движения
+/// (Minecraft#handleKeybinds / MultiPlayerGameMode). Вызывается только из PhysTick-пути.
+fn send_tick_action(h: &mut PlayHandler, c: &mut Connection, cmd: NetCmd) -> Result<(), String> {
+    let e = |x: &dyn std::fmt::Display| x.to_string();
+    match cmd {
+        NetCmd::PlayerAction {
+            action,
+            pos: bp,
+            face,
+            seq,
+        } => h
+            .send_player_action(c, action, bp, face, seq)
+            .map_err(|x| e(&x)),
+        NetCmd::Attack { entity_id } => h.send_attack(c, entity_id).map_err(|x| e(&x)),
+        NetCmd::SetCarried(s) => h.send_set_carried_item(c, s).map_err(|x| e(&x)),
+        NetCmd::Swing => h.send_swing(c).map_err(|x| e(&x)),
+        NetCmd::UseItem { seq, yaw, pitch } => {
+            h.send_use_item(c, seq, yaw, pitch).map_err(|x| e(&x))
+        }
+        NetCmd::UseItemOn {
+            pos: bp,
+            face,
+            rel,
+            inside,
+            seq,
+        } => {
+            // DIAG-PLACE: состояние для офлайн-повтора луча Grim (RotationPlace). Поведение не меняется.
+            tracing::info!(
+                target: "place",
+                "UseItemOn bp={:?} face={} rel={:?} inside={} seq={} sent_pos={:.6?} sent_yaw={:.4} sent_pitch={:.4}",
+                bp, face, rel, inside, seq, h.player.pos, h.player.yaw, h.player.pitch
+            );
+            h.send_use_item_on(c, bp, face, rel, inside, seq)
+                .map_err(|x| e(&x))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -335,6 +398,8 @@ fn run(
     let mut was_sprinting = false;
     let mut was_flying = false;
     let mut last_move_at: Option<std::time::Instant> = None;
+    // Действия игрока (копание, слот, свинг, use), ждущие пакета движения тика (см. PhysTick).
+    let mut deferred: Vec<NetCmd> = Vec::new();
     let mut view_radius = 12;
     // VANILLA: Minecraft#runTick — тики по фиксированной сетке 50 мс с догоном (не «50 мс после прошлого»),
     // иначе game_time клиента отстаёт от серверного и текстуры дождя/снега прыгают при каждом set_time.
@@ -342,17 +407,23 @@ fn run(
     let mut next_tick = std::time::Instant::now() + tick_len;
     loop {
         let wait = next_tick.saturating_duration_since(std::time::Instant::now());
+        let t_poll = std::time::Instant::now();
         let polled = c.poll(wait.max(std::time::Duration::from_millis(1)));
+        // DIAG-STALL: сторожок цикла. Если фаза заняла дольше 1 с — пишем, где именно.
+        stall_check("poll", t_poll, wait + STALL_LIMIT);
+        let t_cmds = std::time::Instant::now();
         while let Ok(cmd) = cmds.try_recv() {
+            // DIAG-CMDS: время одной команды (замер, поведение прежнее).
+            let t_one = std::time::Instant::now();
+            let tag = if matches!(cmd, NetCmd::PhysTick { .. }) {
+                "PhysTick"
+            } else {
+                "другая"
+            };
+            // Была пауза пейсинга: дальше команды разбираем на следующей итерации, после poll().
+            let mut paced = false;
             match cmd {
-                NetCmd::PlayerAction {
-                    action,
-                    pos: bp,
-                    face,
-                    seq,
-                } => h
-                    .send_player_action(&mut c, action, bp, face, seq)
-                    .map_err(|x| e(&x))?,
+                NetCmd::PlayerAction { .. } => deferred.push(cmd),
                 NetCmd::PhysTick {
                     pos: p3,
                     yaw,
@@ -360,8 +431,23 @@ fn run(
                     flags,
                     gen,
                 } => {
+                    // Действия, накопленные до этого тика, уходят перед его пакетом движения
+                    // (VANILLA: ввод и клики тика раньше sendChanges). Иначе Grim `Post` флагует.
+                    for a in deferred.drain(..) {
+                        // VANILLA: клик обрабатывается в тике (Minecraft#tick), поэтому углы ServerboundUseItem
+                        // берём те же, что у пакета движения этого тика. Иначе BadPacketsJ (Grim): клик в кадре,
+                        // а тик позже, мышь успела повернуться — углы use_item и move расходятся.
+                        let a = match a {
+                            NetCmd::UseItem { seq, .. } => NetCmd::UseItem { seq, yaw, pitch },
+                            other => other,
+                        };
+                        send_tick_action(&mut h, &mut c, a).map_err(|x| e(&x))?;
+                    }
                     // Тик посчитан до телепорта: позиция уже не наша, не шлём.
-                    if gen == tp_gen.load(Ordering::SeqCst) {
+                    // Очередь длинная — это догон. Старые тики не шлём: последний тик очереди
+                    // несёт актуальную позицию и кадр ввода, а пейсинг на них не тратим.
+                    let behind = cmds.len() > MAX_CATCHUP_QUEUE;
+                    if !behind && gen == tp_gen.load(Ordering::SeqCst) {
                         let ground = flags & FLAG_ON_GROUND != 0;
                         let hcol = flags & FLAG_HCOL != 0;
                         let sprinting = flags & FLAG_SPRINTING != 0;
@@ -391,7 +477,13 @@ fn run(
                                 let el = t.elapsed();
                                 let pace = std::time::Duration::from_millis(50);
                                 if el < pace {
+                                    // DIAG-CMDS: сон пейсинга (замер, поведение прежнее).
+                                    let t_sl = std::time::Instant::now();
                                     std::thread::sleep(pace - el);
+                                    paced = true;
+                                    if t_sl.elapsed().as_millis() > 100 {
+                                        tracing::warn!(target: "stall", "DIAG-CMDS sleep {} мс", t_sl.elapsed().as_millis());
+                                    }
                                 }
                             }
                             tracing::debug!(
@@ -401,7 +493,14 @@ fn run(
                                 ground,
                                 hcol
                             );
+                            // TEMP-DBG-BITS: точный f64 исходящего X (удалить после A/B)
+                            tracing::debug!(target: "dbg", "TEMP-DBG-BITS x={:?} bits={:#018x}", p3[0], p3[0].to_bits());
+                            // DIAG-CMDS: время записи пакета движения (замер).
+                            let t_mv = std::time::Instant::now();
                             h.send_move(&mut c, kind, ground, hcol).map_err(|x| e(&x))?;
+                            if t_mv.elapsed().as_millis() > 100 {
+                                tracing::warn!(target: "stall", "DIAG-CMDS send_move {} мс", t_mv.elapsed().as_millis());
+                            }
                             last_move_at = Some(std::time::Instant::now());
                         }
                         // VANILLA: один тик = [move] + ClientTickEnd. Пара шлётся вместе, поэтому
@@ -413,9 +512,7 @@ fn run(
                     // Версии до 1.21.5 пакета не знают — молча игнорируем.
                     let _ = h.send_pick_item_from_block(&mut c, bp, data);
                 }
-                NetCmd::Attack { entity_id } => {
-                    h.send_attack(&mut c, entity_id).map_err(|x| e(&x))?
-                }
+                NetCmd::Attack { .. } => deferred.push(cmd),
                 NetCmd::ContainerClick {
                     container,
                     state_id,
@@ -445,25 +542,41 @@ fn run(
                 NetCmd::ClientInfo(i) => {
                     h.send_client_information(&mut c, &i).map_err(|x| e(&x))?
                 }
-                NetCmd::SetCarried(s) => h.send_set_carried_item(&mut c, s).map_err(|x| e(&x))?,
+                NetCmd::SetCarried(_) => deferred.push(cmd),
+                // TEMP-RAW-MOVE: пишем позицию в h.player на время отправки и возвращаем обратно.
+                NetCmd::RawMove {
+                    pos: p3,
+                    yaw,
+                    pitch,
+                    on_ground,
+                } => {
+                    let saved = (h.player.pos, h.player.yaw, h.player.pitch);
+                    h.player.pos = ezzmc_protocol::types::Vec3::new(p3[0], p3[1], p3[2]);
+                    h.player.yaw = yaw;
+                    h.player.pitch = pitch;
+                    tracing::debug!(target: "dbg", "TEMP-RAW-MOVE x={:?} bits={:#018x} y={:?} z={:?} og={}", p3[0], p3[0].to_bits(), p3[1], p3[2], on_ground);
+                    let r =
+                        h.send_move(&mut c, ezzmc_net::play::MoveKind::PosRot, on_ground, false);
+                    (h.player.pos, h.player.yaw, h.player.pitch) = saved;
+                    r.map_err(|x| e(&x))?;
+                }
                 NetCmd::Respawn => h.send_respawn(&mut c).map_err(|x| e(&x))?,
-                NetCmd::Swing => h.send_swing(&mut c).map_err(|x| e(&x))?,
-                NetCmd::UseItem { seq, yaw, pitch } => h
-                    .send_use_item(&mut c, seq, yaw, pitch)
-                    .map_err(|x| e(&x))?,
-                NetCmd::UseItemOn {
-                    pos: bp,
-                    face,
-                    rel,
-                    inside,
-                    seq,
-                } => h
-                    .send_use_item_on(&mut c, bp, face, rel, inside, seq)
-                    .map_err(|x| e(&x))?,
+                NetCmd::Swing => deferred.push(cmd),
+                NetCmd::UseItem { .. } => deferred.push(cmd),
+                NetCmd::UseItemOn { .. } => deferred.push(cmd),
+            }
+            if t_one.elapsed().as_millis() > 100 {
+                tracing::warn!(target: "stall", "DIAG-CMDS команда {tag}: {} мс, в очереди {}", t_one.elapsed().as_millis(), cmds.len());
+            }
+            if paced {
+                break;
             }
         }
+        stall_check("cmds", t_cmds, STALL_LIMIT);
         while std::time::Instant::now() >= next_tick {
+            let t_lock = std::time::Instant::now();
             if let Ok(mut g) = shared.lock() {
+                stall_check("shared.lock(тик)", t_lock, STALL_LIMIT);
                 if let Some(l) = g.as_mut() {
                     // partial_tick считаем от фактического применения тика: сетевой поток может
                     // запаздывать относительно сетки, и сущности иначе замирают и прыгают.
@@ -477,283 +590,142 @@ fn run(
                 next_tick = std::time::Instant::now() + tick_len;
             }
         }
-        let Some(p) = polled.map_err(|x| e(&x))? else {
-            continue;
-        };
-        let pid = p.id;
-        let pname = ids.name_of(State::Play, Direction::Clientbound, p.id);
-        // Лог входящих игровых пакетов (`--log-packets`, цель `packets`).
-        tracing::trace!(target: "packets", "in play {pname:?} id={pid} len={}", p.body.len());
-        let body = p.body.clone();
-        let ev = h.handle(&mut c, p).map_err(|x| e(&x))?;
-        match ev {
-            PlayEvent::Login(_) | PlayEvent::Respawn { .. } => {
-                // VANILLA: handleLogin / handleRespawn — новый ClientLevel (смена измерения).
-                let (dim_type, radius, is_flat) = match &ev {
-                    PlayEvent::Login(l) => {
-                        crate::itemdyn::set_dimension(&l.spawn.dimension);
-                        crate::itemdyn::set_death(
-                            l.spawn
-                                .last_death
-                                .as_ref()
-                                .map(|(d, p)| (d.clone(), p.x, p.z)),
-                        );
-                        let _ = tx.send(NetEvt::GameMode(l.spawn.game_type));
-                        let _ = tx.send(NetEvt::Hardcore(l.hardcore));
-                        view_radius = l.chunk_radius;
-                        (l.spawn.dimension_type, l.chunk_radius, l.spawn.is_flat)
-                    }
-                    PlayEvent::Respawn { spawn, .. } => {
-                        crate::itemdyn::set_dimension(&spawn.dimension);
-                        crate::itemdyn::set_death(
-                            spawn
-                                .last_death
-                                .as_ref()
-                                .map(|(d, p)| (d.clone(), p.x, p.z)),
-                        );
-                        // После экрана загрузки ваниль снова шлёт Player Loaded.
-                        loaded_sent = false;
-                        let _ = tx.send(NetEvt::GameMode(spawn.game_type));
-                        (spawn.dimension_type, view_radius, spawn.is_flat)
-                    }
-                    _ => continue,
-                };
-                let tag = dims
-                    .entries
-                    .get(dim_type as usize)
-                    .and_then(|x| x.1.as_ref())
-                    .ok_or("нет dimension_type в реестре")?;
-                let dim = DimensionType::from_nbt(tag).map_err(|x| e(&x))?;
-                let fmt = dim.chunk_format(
-                    ceil_log2(ezzmc_world::generated::b26_3::STATE_COUNT),
-                    ceil_log2(biomes.entries.len() as u32),
-                );
-                if let Ok(mut g) = shared.lock() {
-                    let mut lv = Level::new(fmt, radius);
-                    lv.overworld_clock = clock_id;
-                    lv.skybox = dim.skybox;
-                    lv.dimension = Some(dim.clone());
-                    lv.audio = ezzmc_world::audio_attr::AudioAttrs::from_attributes(
-                        dim.attributes.as_ref(),
+        // Все уже буферизованные входящие пакеты за итерацию, а не один: иначе пейсинг движения
+        // (sleep до 50 мс на пакет движения) растягивает приём чанков и чата на секунды.
+        let mut inbox = vec![polled];
+        while matches!(inbox.last(), Some(Ok(Some(_)))) {
+            match c.poll(std::time::Duration::ZERO) {
+                Ok(None) => break,
+                r => inbox.push(r),
+            }
+        }
+        for polled in inbox {
+            let Some(p) = polled.map_err(|x| e(&x))? else {
+                continue;
+            };
+            let pid = p.id;
+            let pname = ids.name_of(State::Play, Direction::Clientbound, p.id);
+            // Лог входящих игровых пакетов (`--log-packets`, цель `packets`).
+            tracing::trace!(target: "packets", "in play {pname:?} id={pid} len={}", p.body.len());
+            let body = p.body.clone();
+            let t_handle = std::time::Instant::now();
+            let ev = h.handle(&mut c, p).map_err(|x| e(&x))?;
+            if t_handle.elapsed() > STALL_LIMIT {
+                tracing::warn!(target: "stall", "netthread: обработка пакета {pname:?} заняла {} мс", t_handle.elapsed().as_millis());
+            }
+            match ev {
+                PlayEvent::Login(_) | PlayEvent::Respawn { .. } => {
+                    // VANILLA: handleLogin / handleRespawn — новый ClientLevel (смена измерения).
+                    let (dim_type, radius, is_flat) = match &ev {
+                        PlayEvent::Login(l) => {
+                            crate::itemdyn::set_dimension(&l.spawn.dimension);
+                            crate::itemdyn::set_death(
+                                l.spawn
+                                    .last_death
+                                    .as_ref()
+                                    .map(|(d, p)| (d.clone(), p.x, p.z)),
+                            );
+                            let _ = tx.send(NetEvt::GameMode(l.spawn.game_type));
+                            let _ = tx.send(NetEvt::Hardcore(l.hardcore));
+                            view_radius = l.chunk_radius;
+                            (l.spawn.dimension_type, l.chunk_radius, l.spawn.is_flat)
+                        }
+                        PlayEvent::Respawn { spawn, .. } => {
+                            crate::itemdyn::set_dimension(&spawn.dimension);
+                            crate::itemdyn::set_death(
+                                spawn
+                                    .last_death
+                                    .as_ref()
+                                    .map(|(d, p)| (d.clone(), p.x, p.z)),
+                            );
+                            // После экрана загрузки ваниль снова шлёт Player Loaded.
+                            loaded_sent = false;
+                            let _ = tx.send(NetEvt::GameMode(spawn.game_type));
+                            (spawn.dimension_type, view_radius, spawn.is_flat)
+                        }
+                        _ => continue,
+                    };
+                    let tag = dims
+                        .entries
+                        .get(dim_type as usize)
+                        .and_then(|x| x.1.as_ref())
+                        .ok_or("нет dimension_type в реестре")?;
+                    let dim = DimensionType::from_nbt(tag).map_err(|x| e(&x))?;
+                    let fmt = dim.chunk_format(
+                        ceil_log2(ezzmc_world::generated::b26_3::STATE_COUNT),
+                        ceil_log2(biomes.entries.len() as u32),
                     );
-                    *g = Some(lv);
-                }
-                let _ = tx.send(NetEvt::Joined {
-                    biomes: biome_colors.clone(),
-                    min_y: dim.min_y,
-                    height: dim.height,
-                    view_radius: radius,
-                    is_flat,
-                });
-            }
-            PlayEvent::Abilities {
-                flags, fly_speed, ..
-            } => {
-                was_flying = flags & 2 != 0;
-                let _ = tx.send(NetEvt::Abilities { flags, fly_speed });
-            }
-            PlayEvent::UseComplete => {
-                let _ = tx.send(NetEvt::UseComplete);
-            }
-            PlayEvent::OpLevel(l) => {
-                let _ = tx.send(NetEvt::OpLevel(l));
-            }
-            PlayEvent::Motion(v) => {
-                let _ = tx.send(NetEvt::Motion(v));
-            }
-            PlayEvent::Teleport { state, .. } => {
-                // Позиция и событие уходят под одним локом `pos`: главный поток берёт лок до разбора
-                // событий, поэтому старая камера не затрёт телепорт (иначе «moved too quickly» и откат).
-                if let Ok(mut g) = pos.lock() {
-                    *g = Some([
-                        state.pos.x,
-                        state.pos.y,
-                        state.pos.z,
-                        f64::from(state.yaw),
-                        f64::from(state.pitch),
-                        0.0,
-                    ]);
-                    // VANILLA: handleMovePlayer обновляет xLast/yRotLast — следующий пакет считается от телепорта.
-                    tracker.reset(
-                        [state.pos.x, state.pos.y, state.pos.z],
-                        [state.yaw, state.pitch],
-                    );
-                    // Поколение растёт до события: тики главного потока со старым поколением не пройдут.
-                    let gen = tp_gen.fetch_add(1, Ordering::SeqCst) + 1;
-                    let _ = tx.send(NetEvt::Teleport {
-                        pos: [state.pos.x, state.pos.y, state.pos.z],
-                        vel: [state.delta.x, state.delta.y, state.delta.z],
-                        yaw: state.yaw,
-                        pitch: state.pitch,
-                        gen,
+                    if let Ok(mut g) = shared.lock() {
+                        let mut lv = Level::new(fmt, radius);
+                        lv.overworld_clock = clock_id;
+                        lv.skybox = dim.skybox;
+                        lv.dimension = Some(dim.clone());
+                        lv.audio = ezzmc_world::audio_attr::AudioAttrs::from_attributes(
+                            dim.attributes.as_ref(),
+                        );
+                        *g = Some(lv);
+                    }
+                    let _ = tx.send(NetEvt::Joined {
+                        biomes: biome_colors.clone(),
+                        min_y: dim.min_y,
+                        height: dim.height,
+                        view_radius: radius,
+                        is_flat,
                     });
                 }
-            }
-            PlayEvent::Disconnect(t) => return Err(t),
-            PlayEvent::GameEvent { event, param } => {
-                tracing::trace!("game_event {event} {param}");
-                if event == ezzmc_net::play::game_event::CHANGE_GAME_MODE {
-                    let _ = tx.send(NetEvt::GameMode(param as i8));
+                PlayEvent::Abilities {
+                    flags, fly_speed, ..
+                } => {
+                    was_flying = flags & 2 != 0;
+                    let _ = tx.send(NetEvt::Abilities { flags, fly_speed });
                 }
-                // Погодные события (дождь/гроза) разбирает Level по сырому телу пакета.
-                if let Ok(mut g) = shared.lock() {
-                    if let Some(l) = g.as_mut() {
-                        if let Ok(LevelEvent::WeatherChanged) = l.handle("game_event", &body) {
-                            tracing::debug!(
-                                "погода: raining={} rain={} thunder={}",
-                                l.raining,
-                                l.rain_level,
-                                l.thunder_level
-                            );
-                        }
-                    }
+                PlayEvent::UseComplete => {
+                    let _ = tx.send(NetEvt::UseComplete);
                 }
-            }
-            PlayEvent::DefaultSpawn(d) => {
-                // VANILLA: handleSetSpawn → ClientLevel#setRespawnData.
-                crate::itemdyn::set_spawn(&d.dimension, d.pos.x, d.pos.z);
-            }
-            PlayEvent::Other(_) => {
-                let Some(pname) = pname else { continue };
-                if pname == "set_health" {
-                    // VANILLA: ClientPacketListener#handleSetHealth (float health, varint food, float saturation).
-                    let mut rd = ezzmc_protocol::wire::Reader::new(&body);
-                    if let (Ok(hp), Ok(food), Ok(sat)) = (rd.f32(), rd.var_int(), rd.f32()) {
-                        let _ = tx.send(NetEvt::Health(hp, food, sat));
-                    }
-                    continue;
+                PlayEvent::OpLevel(l) => {
+                    let _ = tx.send(NetEvt::OpLevel(l));
                 }
-                if pname == "set_experience" {
-                    // VANILLA: handleSetExperience (float progress, varint level, varint total).
-                    let mut rd = ezzmc_protocol::wire::Reader::new(&body);
-                    if let (Ok(pr), Ok(lv)) = (rd.f32(), rd.var_int()) {
-                        let _ = tx.send(NetEvt::Experience(pr, lv));
-                    }
-                    continue;
+                PlayEvent::Motion(v) => {
+                    let _ = tx.send(NetEvt::Motion(v));
                 }
-                if pname == "cooldown" {
-                    // VANILLA: handleItemCooldown (Identifier group, varint duration).
-                    let mut rd = ezzmc_protocol::wire::Reader::new(&body);
-                    if let (Ok(g), Ok(d)) = (rd.string(256), rd.var_int()) {
-                        crate::cooldown::add(&g, d);
-                    }
-                    continue;
-                }
-                if pname == "waypoint" {
-                    if let Some((op, wp)) = parse_waypoint(&body) {
-                        let _ = tx.send(NetEvt::Waypoint(op, wp));
-                    }
-                    continue;
-                }
-                if pname == "update_attributes" {
-                    parse_attributes(&body, h.player_id, &tx);
-                    continue;
-                }
-                if matches!(pname, "system_chat" | "player_chat" | "disguised_chat") {
-                    use crate::chat::Tag;
-                    let r = match pname {
-                        "system_chat" => crate::chatnet::parse_system(&body).map(|(c, o)| {
-                            if o {
-                                NetEvt::Overlay(c)
-                            } else {
-                                NetEvt::Chat(c, Tag::System)
-                            }
-                        }),
-                        "player_chat" => crate::chatnet::parse_player(&body, &chat_types)
-                            .map(|c| NetEvt::Chat(c, Tag::NotSecure)),
-                        _ => crate::chatnet::parse_disguised(&body, &chat_types)
-                            .map(|c| NetEvt::Chat(c, Tag::System)),
-                    };
-                    match r {
-                        Ok(ev) => {
-                            let _ = tx.send(ev);
-                        }
-                        Err(x) => tracing::warn!("{pname}: {x}"),
-                    }
-                    continue;
-                }
-                if pname == "command_suggestions" {
-                    match crate::chatnet::parse_suggestions(&body) {
-                        Ok((id, st, len, v)) => {
-                            let _ = tx.send(NetEvt::Suggestions(id, st, len, v));
-                        }
-                        Err(x) => tracing::warn!("{pname}: {x}"),
-                    }
-                    continue;
-                }
-                if pname == "take_item_entity" {
-                    // VANILLA: handleTakeItemEntity — звук до удаления сущности из мира.
-                    if let Ok(id) = ezzmc_protocol::wire::Reader::new(&body).var_int() {
-                        let hit = shared.lock().ok().and_then(|g| {
-                            g.as_ref().and_then(|l| {
-                                l.entities.map.get(&id).map(|e| {
-                                    let xp = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
-                                        .get(e.ty)
-                                        .is_some_and(|n| *n == "experience_orb");
-                                    (e.pos, xp)
-                                })
-                            })
-                        });
-                        if let Some((pos, xp)) = hit {
-                            crate::levelsound::pickup(pos, xp);
-                        }
-                    }
-                }
-                if pname == "explode" {
-                    if let Some(ex) = handle_explode(&body) {
-                        let _ = tx.send(NetEvt::Explosion(Box::new(ex)));
-                    }
-                    continue;
-                }
-                if matches!(pname, "sound" | "sound_entity" | "stop_sound") {
-                    handle_sound_packet(pname, &body, shared);
-                    continue;
-                }
-                match crate::inventory::parse_packet(pname, &body) {
-                    Ok(Some(iev)) => {
-                        let _ = tx.send(NetEvt::Inventory(iev));
-                        continue;
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        tracing::warn!("{pname}: {err} [len={}]", body.len());
-                        continue;
-                    }
-                }
-                let ev = {
-                    let Ok(mut g) = shared.lock() else { continue };
-                    let Some(level) = g.as_mut() else { continue };
-                    match level.handle(pname, &body) {
-                        Ok(ev) => ev,
-                        Err(err) => {
-                            tracing::warn!(
-                                "{pname}: {err} [id={} len={} head={:02x?}]",
-                                pid,
-                                body.len(),
-                                &body[..body.len().min(24)]
-                            );
-                            continue;
-                        }
-                    }
-                };
-                match &ev {
-                    LevelEvent::BatchStart => batch_size.on_batch_start(),
-                    LevelEvent::BatchFinished { size } => {
-                        batch_size.on_batch_finished(*size);
-                        tracing::info!(
-                            "chunk batch: size={size} desired/tick={:.1}",
-                            batch_size.desired_chunks_per_tick()
+                PlayEvent::Teleport { state, .. } => {
+                    // Позиция и событие уходят под одним локом `pos`: главный поток берёт лок до разбора
+                    // событий, поэтому старая камера не затрёт телепорт (иначе «moved too quickly» и откат).
+                    if let Ok(mut g) = pos.lock() {
+                        *g = Some([
+                            state.pos.x,
+                            state.pos.y,
+                            state.pos.z,
+                            f64::from(state.yaw),
+                            f64::from(state.pitch),
+                            0.0,
+                        ]);
+                        // VANILLA: handleMovePlayer обновляет xLast/yRotLast — следующий пакет считается от телепорта.
+                        tracker.reset(
+                            [state.pos.x, state.pos.y, state.pos.z],
+                            [state.yaw, state.pitch],
                         );
-                        h.send_chunk_batch_received(&mut c, batch_size.desired_chunks_per_tick())
-                            .map_err(|x| e(&x))?;
+                        // Поколение растёт до события: тики главного потока со старым поколением не пройдут.
+                        let gen = tp_gen.fetch_add(1, Ordering::SeqCst) + 1;
+                        let _ = tx.send(NetEvt::Teleport {
+                            pos: [state.pos.x, state.pos.y, state.pos.z],
+                            vel: [state.delta.x, state.delta.y, state.delta.z],
+                            yaw: state.yaw,
+                            pitch: state.pitch,
+                            gen,
+                        });
                     }
-                    LevelEvent::ChunkLoaded { .. } if !loaded_sent => {
-                        loaded_sent = true;
-                        h.send_player_loaded(&mut c).map_err(|x| e(&x))?;
+                }
+                PlayEvent::Disconnect(t) => return Err(t),
+                PlayEvent::GameEvent { event, param } => {
+                    tracing::trace!("game_event {event} {param}");
+                    if event == ezzmc_net::play::game_event::CHANGE_GAME_MODE {
+                        let _ = tx.send(NetEvt::GameMode(param as i8));
                     }
-                    LevelEvent::WeatherChanged => {
-                        if let Ok(g) = shared.lock() {
-                            if let Some(l) = g.as_ref() {
+                    // Погодные события (дождь/гроза) разбирает Level по сырому телу пакета.
+                    if let Ok(mut g) = shared.lock() {
+                        if let Some(l) = g.as_mut() {
+                            if let Ok(LevelEvent::WeatherChanged) = l.handle("game_event", &body) {
                                 tracing::debug!(
                                     "погода: raining={} rain={} thunder={}",
                                     l.raining,
@@ -763,10 +735,177 @@ fn run(
                             }
                         }
                     }
-                    _ => {}
                 }
-                if !matches!(ev, LevelEvent::None) {
-                    let _ = tx.send(NetEvt::Level(ev));
+                PlayEvent::DefaultSpawn(d) => {
+                    // VANILLA: handleSetSpawn → ClientLevel#setRespawnData.
+                    crate::itemdyn::set_spawn(&d.dimension, d.pos.x, d.pos.z);
+                }
+                PlayEvent::Other(_) => {
+                    let Some(pname) = pname else { continue };
+                    if pname == "set_health" {
+                        // VANILLA: ClientPacketListener#handleSetHealth (float health, varint food, float saturation).
+                        let mut rd = ezzmc_protocol::wire::Reader::new(&body);
+                        if let (Ok(hp), Ok(food), Ok(sat)) = (rd.f32(), rd.var_int(), rd.f32()) {
+                            let _ = tx.send(NetEvt::Health(hp, food, sat));
+                        }
+                        continue;
+                    }
+                    if pname == "set_experience" {
+                        // VANILLA: handleSetExperience (float progress, varint level, varint total).
+                        let mut rd = ezzmc_protocol::wire::Reader::new(&body);
+                        if let (Ok(pr), Ok(lv)) = (rd.f32(), rd.var_int()) {
+                            let _ = tx.send(NetEvt::Experience(pr, lv));
+                        }
+                        continue;
+                    }
+                    if pname == "cooldown" {
+                        // VANILLA: handleItemCooldown (Identifier group, varint duration).
+                        let mut rd = ezzmc_protocol::wire::Reader::new(&body);
+                        if let (Ok(g), Ok(d)) = (rd.string(256), rd.var_int()) {
+                            crate::cooldown::add(&g, d);
+                        }
+                        continue;
+                    }
+                    if pname == "waypoint" {
+                        if let Some((op, wp)) = parse_waypoint(&body) {
+                            let _ = tx.send(NetEvt::Waypoint(op, wp));
+                        }
+                        continue;
+                    }
+                    if pname == "update_attributes" {
+                        parse_attributes(&body, h.player_id, &tx);
+                        continue;
+                    }
+                    if matches!(pname, "system_chat" | "player_chat" | "disguised_chat") {
+                        use crate::chat::Tag;
+                        let r = match pname {
+                            "system_chat" => crate::chatnet::parse_system(&body).map(|(c, o)| {
+                                if o {
+                                    NetEvt::Overlay(c)
+                                } else {
+                                    NetEvt::Chat(c, Tag::System)
+                                }
+                            }),
+                            "player_chat" => crate::chatnet::parse_player(&body, &chat_types)
+                                .map(|c| NetEvt::Chat(c, Tag::NotSecure)),
+                            _ => crate::chatnet::parse_disguised(&body, &chat_types)
+                                .map(|c| NetEvt::Chat(c, Tag::System)),
+                        };
+                        match r {
+                            Ok(ev) => {
+                                let _ = tx.send(ev);
+                            }
+                            Err(x) => tracing::warn!("{pname}: {x}"),
+                        }
+                        continue;
+                    }
+                    if pname == "command_suggestions" {
+                        match crate::chatnet::parse_suggestions(&body) {
+                            Ok((id, st, len, v)) => {
+                                let _ = tx.send(NetEvt::Suggestions(id, st, len, v));
+                            }
+                            Err(x) => tracing::warn!("{pname}: {x}"),
+                        }
+                        continue;
+                    }
+                    if pname == "take_item_entity" {
+                        // VANILLA: handleTakeItemEntity — звук до удаления сущности из мира.
+                        if let Ok(id) = ezzmc_protocol::wire::Reader::new(&body).var_int() {
+                            let hit = shared.lock().ok().and_then(|g| {
+                                g.as_ref().and_then(|l| {
+                                    l.entities.map.get(&id).map(|e| {
+                                        let xp = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+                                            .get(e.ty)
+                                            .is_some_and(|n| *n == "experience_orb");
+                                        (e.pos, xp)
+                                    })
+                                })
+                            });
+                            if let Some((pos, xp)) = hit {
+                                crate::levelsound::pickup(pos, xp);
+                            }
+                        }
+                    }
+                    if pname == "explode" {
+                        if let Some(ex) = handle_explode(&body) {
+                            let _ = tx.send(NetEvt::Explosion(Box::new(ex)));
+                        }
+                        continue;
+                    }
+                    if matches!(pname, "sound" | "sound_entity" | "stop_sound") {
+                        handle_sound_packet(pname, &body, shared);
+                        continue;
+                    }
+                    match crate::inventory::parse_packet(pname, &body) {
+                        Ok(Some(iev)) => {
+                            let _ = tx.send(NetEvt::Inventory(iev));
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            tracing::warn!("{pname}: {err} [len={}]", body.len());
+                            continue;
+                        }
+                    }
+                    let ev = {
+                        // DIAG-LOCK: сколько ждём замок уровня и сколько держим его на пакет.
+                        let t_wait = std::time::Instant::now();
+                        let Ok(mut g) = shared.lock() else { continue };
+                        let waited = t_wait.elapsed();
+                        let t_hold = std::time::Instant::now();
+                        let Some(level) = g.as_mut() else { continue };
+                        let r = level.handle(pname, &body);
+                        if waited.as_millis() > 100 || t_hold.elapsed().as_millis() > 100 {
+                            tracing::warn!(target: "stall", "DIAG-LOCK {pname}: ждали замок {} мс, держали {} мс", waited.as_millis(), t_hold.elapsed().as_millis());
+                        }
+                        match r {
+                            Ok(ev) => ev,
+                            Err(err) => {
+                                tracing::warn!(
+                                    "{pname}: {err} [id={} len={} head={:02x?}]",
+                                    pid,
+                                    body.len(),
+                                    &body[..body.len().min(24)]
+                                );
+                                continue;
+                            }
+                        }
+                    };
+                    match &ev {
+                        LevelEvent::BatchStart => batch_size.on_batch_start(),
+                        LevelEvent::BatchFinished { size } => {
+                            batch_size.on_batch_finished(*size);
+                            tracing::info!(
+                                "chunk batch: size={size} desired/tick={:.1}",
+                                batch_size.desired_chunks_per_tick()
+                            );
+                            h.send_chunk_batch_received(
+                                &mut c,
+                                batch_size.desired_chunks_per_tick(),
+                            )
+                            .map_err(|x| e(&x))?;
+                        }
+                        LevelEvent::ChunkLoaded { .. } if !loaded_sent => {
+                            loaded_sent = true;
+                            h.send_player_loaded(&mut c).map_err(|x| e(&x))?;
+                        }
+                        LevelEvent::WeatherChanged => {
+                            if let Ok(g) = shared.lock() {
+                                if let Some(l) = g.as_ref() {
+                                    tracing::debug!(
+                                        "погода: raining={} rain={} thunder={}",
+                                        l.raining,
+                                        l.rain_level,
+                                        l.thunder_level
+                                    );
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    if !matches!(ev, LevelEvent::None) {
+                        let _ = tx.send(NetEvt::Level(ev));
+                    }
                 }
             }
         }

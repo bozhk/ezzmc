@@ -487,6 +487,22 @@ impl App {
                     .type_text(c["text"].as_str().unwrap_or(""), &self.item_lang);
                 ok(json!({"search": self.creative.search}))
             }
+            "raw_move" => {
+                // TEMP-RAW-MOVE: разовый пакет move_player_pos_rot с точными x,y,z (для A/B).
+                // x_bits: точный f64 через битовое представление (serde_json без float_roundtrip может промахнуться на 1 ULP).
+                let x = c["x_bits"].as_u64().map(f64::from_bits).or_else(|| f("x"));
+                if let (Some(v), Some(x), Some(y), Some(z)) = (self.view.as_ref(), x, f("y"), f("z")) {
+                    v.send(crate::netthread::NetCmd::RawMove {
+                        pos: [x, y, z],
+                        yaw: f("yaw").unwrap_or(0.0) as f32,
+                        pitch: f("pitch").unwrap_or(0.0) as f32,
+                        on_ground: c["on_ground"].as_bool().unwrap_or(true),
+                    });
+                    ok(json!({}))
+                } else {
+                    err("raw_move: нет вида или x/y/z")
+                }
+            }
             "look" => {
                 if let Some(y) = f("yaw") {
                     self.yaw = y as f32;
