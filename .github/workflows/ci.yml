@@ -25,18 +25,3 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
-
-  arch:
-    runs-on: ubuntu-latest
-    container:
-      image: archlinux:latest
-    steps:
-      - name: Системные пакеты (Arch)
-        run: |
-          pacman -Syu --noconfirm base-devel rustup nodejs git alsa-lib systemd-libs libxkbcommon wayland pkgconf
-          rustup default stable
-          rustup component add rustfmt clippy
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
