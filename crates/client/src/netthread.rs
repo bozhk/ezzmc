@@ -9,6 +9,7 @@ use ezzmc_world::biome_color::BiomeColors;
 use ezzmc_world::dimension::DimensionType;
 use ezzmc_world::level::{Level, LevelEvent};
 use ezzmc_world::palette::ceil_log2;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Протокол 26.3.
@@ -23,6 +24,15 @@ pub enum NetCmd {
         seq: i32,
     },
     Swing,
+    /// Один тик физики игрока (главный поток): позиция, углы, флаги `FLAG_*`, поколение телепорта.
+    /// Сетевой поток шлёт по одному MovePlayer на каждый такой тик (VANILLA: LocalPlayer#sendChanges).
+    PhysTick {
+        pos: [f64; 3],
+        yaw: f32,
+        pitch: f32,
+        flags: u32,
+        gen: u64,
+    },
     /// СКМ по блоку (key.pickItem): pos, includeData (Ctrl в креативе).
     PickBlock([i32; 3], bool),
     /// Возрождение (экран смерти).
@@ -109,6 +119,8 @@ pub enum NetEvt {
         vel: [f64; 3],
         yaw: f32,
         pitch: f32,
+        /// Поколение телепорта (см. `NetHandle::tp_gen`).
+        gen: u64,
     },
     /// ClientboundExplodePacket (звук играет сетевой поток).
     Explosion(Box<ExplosionEvt>),
@@ -143,6 +155,9 @@ pub struct NetHandle {
     pub pos: SharedPos,
     pub level: SharedLevel,
     pub cmd: Sender<NetCmd>,
+    /// Поколение телепортов: сетевой поток увеличивает на каждый `Teleport`; тики физики со старым
+    /// поколением (посчитаны до телепорта) отбрасываются.
+    pub tp_gen: Arc<AtomicU64>,
 }
 
 pub fn spawn(addr: String, name: String) -> NetHandle {
@@ -152,10 +167,12 @@ pub fn spawn(addr: String, name: String) -> NetHandle {
     let pos: SharedPos = Arc::new(Mutex::new(None));
     let pp = pos.clone();
     let (cmd_tx, cmd_rx) = unbounded();
+    let tp_gen = Arc::new(AtomicU64::new(0));
+    let tg = tp_gen.clone();
     let _ = std::thread::Builder::new()
         .name("net".into())
         .spawn(move || {
-            if let Err(e) = run(&addr, &name, &tx, &lv, &pp, &cmd_rx) {
+            if let Err(e) = run(&addr, &name, &tx, &lv, &pp, &tg, &cmd_rx) {
                 let _ = tx.send(NetEvt::Disconnected(e));
             }
         });
@@ -164,6 +181,7 @@ pub fn spawn(addr: String, name: String) -> NetHandle {
         pos,
         level,
         cmd: cmd_tx,
+        tp_gen,
     }
 }
 
@@ -173,6 +191,7 @@ fn run(
     tx: &Sender<NetEvt>,
     shared: &SharedLevel,
     pos: &SharedPos,
+    tp_gen: &Arc<AtomicU64>,
     cmds: &Receiver<NetCmd>,
 ) -> Result<(), String> {
     let e = |x: &dyn std::fmt::Display| x.to_string();
@@ -315,6 +334,7 @@ fn run(
     let mut last_input = 0u8;
     let mut was_sprinting = false;
     let mut was_flying = false;
+    let mut last_move_at: Option<std::time::Instant> = None;
     let mut view_radius = 12;
     // VANILLA: Minecraft#runTick — тики по фиксированной сетке 50 мс с догоном (не «50 мс после прошлого»),
     // иначе game_time клиента отстаёт от серверного и текстуры дождя/снега прыгают при каждом set_time.
@@ -333,6 +353,62 @@ fn run(
                 } => h
                     .send_player_action(&mut c, action, bp, face, seq)
                     .map_err(|x| e(&x))?,
+                NetCmd::PhysTick {
+                    pos: p3,
+                    yaw,
+                    pitch,
+                    flags,
+                    gen,
+                } => {
+                    // Тик посчитан до телепорта: позиция уже не наша, не шлём.
+                    if gen == tp_gen.load(Ordering::SeqCst) {
+                        let ground = flags & FLAG_ON_GROUND != 0;
+                        let hcol = flags & FLAG_HCOL != 0;
+                        let sprinting = flags & FLAG_SPRINTING != 0;
+                        let input = (flags >> FLAG_INPUT_SHIFT) as u8;
+                        // VANILLA: LocalPlayer#sendChanges — player_input, затем abilities, sprint, move.
+                        if input != last_input {
+                            h.send_player_input(&mut c, input).map_err(|x| e(&x))?;
+                            last_input = input;
+                        }
+                        let flying = flags & FLAG_FLYING != 0;
+                        if flying != was_flying {
+                            h.send_abilities(&mut c, flying).map_err(|x| e(&x))?;
+                            was_flying = flying;
+                        }
+                        if sprinting != was_sprinting {
+                            h.send_sprint(&mut c, sprinting).map_err(|x| e(&x))?;
+                            was_sprinting = sprinting;
+                        }
+                        h.player.pos = ezzmc_protocol::types::Vec3::new(p3[0], p3[1], p3[2]);
+                        h.player.yaw = yaw;
+                        h.player.pitch = pitch;
+                        if let Some(kind) = tracker.step(p3, [yaw, pitch], ground, hcol) {
+                            // Догон тиков после задержки кадра (несколько PhysTick подряд) шлём
+                            // не чаще одного пакета на 50 мс: сервер считает пакеты по своим тикам,
+                            // два подряд в один тик дают TickTimer и откат. Тики не теряем, только растягиваем.
+                            if let Some(t) = last_move_at {
+                                let el = t.elapsed();
+                                let pace = std::time::Duration::from_millis(50);
+                                if el < pace {
+                                    std::thread::sleep(pace - el);
+                                }
+                            }
+                            tracing::debug!(
+                                target: "dbg",
+                                "send_move pos={:.3?} ground={} horiz_col={}",
+                                p3,
+                                ground,
+                                hcol
+                            );
+                            h.send_move(&mut c, kind, ground, hcol).map_err(|x| e(&x))?;
+                            last_move_at = Some(std::time::Instant::now());
+                        }
+                        // VANILLA: один тик = [move] + ClientTickEnd. Пара шлётся вместе, поэтому
+                        // TickTimer (Grim) видит не больше одного move между двумя tick_end.
+                        h.send_client_tick_end(&mut c).map_err(|x| e(&x))?;
+                    }
+                }
                 NetCmd::PickBlock(bp, data) => {
                     // Версии до 1.21.5 пакета не знают — молча игнорируем.
                     let _ = h.send_pick_item_from_block(&mut c, bp, data);
@@ -386,8 +462,6 @@ fn run(
                     .map_err(|x| e(&x))?,
             }
         }
-        let cur = pos.lock().ok().and_then(|g| *g);
-        let mut ticked = false;
         while std::time::Instant::now() >= next_tick {
             if let Ok(mut g) = shared.lock() {
                 if let Some(l) = g.as_mut() {
@@ -398,51 +472,9 @@ fn run(
                 }
             }
             next_tick += tick_len;
-            ticked = true;
             // Отстали больше чем на секунду (пауза/нагрузка) — не догоняем.
             if next_tick + std::time::Duration::from_secs(1) < std::time::Instant::now() {
                 next_tick = std::time::Instant::now() + tick_len;
-            }
-        }
-        if ticked {
-            if let Some(cur) = cur {
-                let flags = cur[5] as u32;
-                let (ground, hcol) = (flags & FLAG_ON_GROUND != 0, flags & FLAG_HCOL != 0);
-                let sprinting = flags & FLAG_SPRINTING != 0;
-                let input = (flags >> FLAG_INPUT_SHIFT) as u8;
-                if input != last_input {
-                    h.send_player_input(&mut c, input).map_err(|x| e(&x))?;
-                    last_input = input;
-                }
-                // VANILLA: Player#onUpdateAbilities → ServerboundPlayerAbilitiesPacket при смене полёта.
-                let flying = flags & FLAG_FLYING != 0;
-                if flying != was_flying {
-                    h.send_abilities(&mut c, flying).map_err(|x| e(&x))?;
-                    was_flying = flying;
-                }
-                if sprinting != was_sprinting {
-                    h.send_sprint(&mut c, sprinting).map_err(|x| e(&x))?;
-                    was_sprinting = sprinting;
-                }
-                h.player.pos = ezzmc_protocol::types::Vec3::new(cur[0], cur[1], cur[2]);
-                h.player.yaw = cur[3] as f32;
-                h.player.pitch = cur[4] as f32;
-                if let Some(kind) = tracker.step(
-                    [cur[0], cur[1], cur[2]],
-                    [cur[3] as f32, cur[4] as f32],
-                    ground,
-                    hcol,
-                ) {
-                    tracing::debug!(
-                        target: "dbg",
-                        "send_move pos={:.3?} ground={} horiz_col={}",
-                        cur,
-                        ground,
-                        hcol
-                    );
-                    h.send_move(&mut c, kind, ground, hcol).map_err(|x| e(&x))?;
-                }
-                h.send_client_tick_end(&mut c).map_err(|x| e(&x))?;
             }
         }
         let Some(p) = polled.map_err(|x| e(&x))? else {
@@ -450,6 +482,8 @@ fn run(
         };
         let pid = p.id;
         let pname = ids.name_of(State::Play, Direction::Clientbound, p.id);
+        // Лог входящих игровых пакетов (`--log-packets`, цель `packets`).
+        tracing::trace!(target: "packets", "in play {pname:?} id={pid} len={}", p.body.len());
         let body = p.body.clone();
         let ev = h.handle(&mut c, p).map_err(|x| e(&x))?;
         match ev {
@@ -498,6 +532,7 @@ fn run(
                     let mut lv = Level::new(fmt, radius);
                     lv.overworld_clock = clock_id;
                     lv.skybox = dim.skybox;
+                    lv.dimension = Some(dim.clone());
                     lv.audio = ezzmc_world::audio_attr::AudioAttrs::from_attributes(
                         dim.attributes.as_ref(),
                     );
@@ -543,11 +578,14 @@ fn run(
                         [state.pos.x, state.pos.y, state.pos.z],
                         [state.yaw, state.pitch],
                     );
+                    // Поколение растёт до события: тики главного потока со старым поколением не пройдут.
+                    let gen = tp_gen.fetch_add(1, Ordering::SeqCst) + 1;
                     let _ = tx.send(NetEvt::Teleport {
                         pos: [state.pos.x, state.pos.y, state.pos.z],
                         vel: [state.delta.x, state.delta.y, state.delta.z],
                         yaw: state.yaw,
                         pitch: state.pitch,
+                        gen,
                     });
                 }
             }

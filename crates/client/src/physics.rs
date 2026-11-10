@@ -197,6 +197,9 @@ pub struct Player {
     pub vel: [f64; 3],
     pub on_ground: bool,
     pub horizontal_collision: bool,
+    /// VANILLA: Entity#minorHorizontalCollision (LocalPlayer#isHorizontalCollisionMinor):
+    /// упор скользящий, ввод почти совпадает с фактическим движением (< 8°).
+    pub minor_horizontal_collision: bool,
     pub crouching: bool,
     /// VANILLA: LivingEntity#isUsingItem (еда/питьё: ввод ×0.2, спринт не стартует).
     pub using_item: bool,
@@ -242,6 +245,8 @@ pub struct Player {
     /// Последний ввод движения (left, forward) и yaw — для updateAutoJump.
     last_move: (f32, f32),
     last_yaw: f32,
+    /// Модифицированный ввод (xxa, zza) и yaw текущего тика — для minor-проверки упора.
+    move_input: (f32, f32, f32),
     had_forward: bool,
     /// VANILLA: ClientAvatarState walkDist/walkDistO/bob/bobO (боббинг камеры).
     walk_dist: f32,
@@ -262,6 +267,7 @@ impl Player {
             vel: [0.0; 3],
             on_ground: false,
             horizontal_collision: false,
+            minor_horizontal_collision: false,
             crouching: false,
             using_item: false,
             crawling: false,
@@ -295,6 +301,7 @@ impl Player {
             auto_jump_time: 0,
             last_move: (0.0, 0.0),
             last_yaw: 0.0,
+            move_input: (0.0, 0.0, 0.0),
             had_forward: false,
             walk_dist: 0.0,
             walk_dist_o: 0.0,
@@ -487,7 +494,8 @@ impl Player {
                 moving_slowly
                     || (shallow && !self.flying)
                     || fwd <= 1.0e-5
-                    || self.horizontal_collision
+                    // VANILLA: LocalPlayer#shouldStopRunSprinting — horizontalCollision && !minorHorizontalCollision
+                    || (self.horizontal_collision && !self.minor_horizontal_collision)
             };
             if stop {
                 self.sprinting = false;
@@ -571,6 +579,7 @@ impl Player {
             }
         }
         let oy = self.vel[1];
+        self.move_input = (xxa, zza, yaw);
         if self.in_water {
             self.travel_in_water(w, (xxa, zza), yaw);
         } else if self.in_lava {
@@ -915,6 +924,7 @@ impl Player {
         }
         let delta = self.back_off_from_edge(w, delta);
         let m = self.collide(w, delta);
+        tracing::debug!(target: "dbg", "do_move req={:.6?} res={:.6?} pos={:.6?} on_ground_before={}", delta, m, self.pos, self.on_ground);
         let ml = len_sq(m);
         if ml > 1.0e-7 || len_sq(delta) - ml < 1.0e-7 {
             for (p, d) in self.pos.iter_mut().zip(m) {
@@ -964,6 +974,9 @@ impl Player {
         let x_col = !mth_equal(delta[0], m[0]);
         let z_col = !mth_equal(delta[2], m[2]);
         self.horizontal_collision = x_col || z_col;
+        // VANILLA: Entity#move → minorHorizontalCollision = isHorizontalCollisionMinor(movement)
+        self.minor_horizontal_collision = self.horizontal_collision
+            && is_horizontal_collision_minor(self.move_input, [m[0], m[2]]);
         let vertical = delta[1] != m[1];
         let below = vertical && delta[1] < 0.0;
         self.on_ground = below;
@@ -1272,6 +1285,7 @@ impl Player {
             region[5],
         ];
         let colliders = gather(w, region);
+        tracing::debug!(target: "dbg", "collide bb={:.3?} m={:.6?} boxes={:.3?}", bb, m, colliders);
         let step = if len_sq(m) == 0.0 {
             m
         } else {
@@ -1355,6 +1369,24 @@ struct FluidAcc {
 
 fn mth_equal(a: f64, b: f64) -> bool {
     (b - a).abs() < 1.0e-5
+}
+
+/// VANILLA: LocalPlayer#isHorizontalCollisionMinor — угол между вводом (в мировых осях по yaw)
+/// и фактическим горизонтальным движением меньше 8° (0.13962634 рад).
+fn is_horizontal_collision_minor(input: (f32, f32, f32), movement: [f64; 2]) -> bool {
+    let (xxa, zza, yaw) = input;
+    let rad = yaw * (std::f32::consts::PI / 180.0);
+    let (sin, cos) = (f64::from(rad.sin()), f64::from(rad.cos()));
+    let (xa, za) = (f64::from(xxa), f64::from(zza));
+    let gx = xa * cos - za * sin;
+    let gz = za * cos + xa * sin;
+    let a2 = gx * gx + gz * gz;
+    let m2 = movement[0] * movement[0] + movement[1] * movement[1];
+    if a2 < 1.0e-5 || m2 < 1.0e-5 {
+        return false;
+    }
+    let dot = gx * movement[0] + gz * movement[1];
+    (dot / (a2 * m2).sqrt()).acos() < 0.139_626_34
 }
 
 fn len_sq(v: [f64; 3]) -> f64 {
@@ -1578,6 +1610,42 @@ mod tests {
             forward: true,
             ..Input::default()
         }
+    }
+
+    /// Упор лбом в стену (стенд владельца): стена на x∈[-12,-11], игрок на x=-10.698, идёт на -x.
+    #[test]
+    fn wall_hug_does_not_jitter() {
+        struct Wall;
+        impl Collider for Wall {
+            fn boxes(&self, x: i32, y: i32, z: i32) -> &'static [[f64; 6]] {
+                if y < 0 || (x == -12 && (0..=2).contains(&y) && (-3..=3).contains(&z)) {
+                    &FULL
+                } else {
+                    &[]
+                }
+            }
+            fn name(&self, _: i32, y: i32, _: i32) -> &'static str {
+                if y < 0 { "stone" } else { "air" }
+            }
+            fn has_chunk(&self, _: i32, _: i32) -> bool {
+                true
+            }
+        }
+        let w = Wall;
+        let mut p = Player::new([-10.698, 0.0, 0.0]);
+        for _ in 0..5 {
+            p.tick(&w, Input::default(), 90.0);
+        }
+        let mut xs = Vec::new();
+        for _ in 0..40 {
+            p.tick(&w, fwd(), 90.0);
+            xs.push(p.pos[0]);
+        }
+        eprintln!("xs={xs:?}");
+        // После упора позиция должна стоять, а не дёргаться.
+        let last = &xs[20..];
+        let spread = last.iter().cloned().fold(f64::MIN, f64::max) - last.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(spread < 1e-9, "дрожание: spread={spread} xs={last:?}");
     }
 
     struct Special(&'static str);
@@ -1972,5 +2040,24 @@ mod tests {
         p.tick(&w, Input::default(), 0.0);
         p.tick(&w, j, 0.0);
         assert!(p.flying);
+    }
+}
+
+#[cfg(test)]
+mod minor_collision_tests {
+    use super::is_horizontal_collision_minor;
+
+    /// Ввод вперёд (yaw 0 → движение по +Z). Скольжение почти параллельно стене — minor.
+    #[test]
+    fn slide_within_8_degrees_is_minor() {
+        let input = (0.0, 1.0, 0.0);
+        assert!(is_horizontal_collision_minor(input, [0.02, 0.5]));
+        assert!(!is_horizontal_collision_minor(input, [0.1, 0.5]));
+    }
+
+    /// Полный упор (нулевое движение) — не minor: обычный горизонтальный упор.
+    #[test]
+    fn full_stop_is_not_minor() {
+        assert!(!is_horizontal_collision_minor((0.0, 1.0, 0.0), [0.0, 0.0]));
     }
 }

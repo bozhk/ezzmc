@@ -176,6 +176,8 @@ pub struct Level {
     pub sky_flash_time: i32,
     /// VANILLA: DimensionType#skybox (Overworld/End/None) — что рисовать вместо неба.
     pub skybox: crate::dimension::Skybox,
+    /// Полный DimensionType текущего измерения (атрибуты среды: туман, лайтмап Нижнего мира).
+    pub dimension: Option<crate::dimension::DimensionType>,
     /// Звуковые атрибуты dimension_type (музыка, mood).
     pub audio: crate::audio_attr::AudioAttrs,
     /// VANILLA: PistonMovingBlockEntity по позиции блока `moving_piston`.
@@ -221,6 +223,7 @@ impl Level {
             death_poofs: Vec::new(),
             sky_flash_time: 0,
             skybox: crate::dimension::Skybox::Overworld,
+            dimension: None,
             audio: Default::default(),
             pistons: Default::default(),
         }

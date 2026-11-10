@@ -109,6 +109,32 @@ impl DimensionType {
     pub fn teleportation_scale(from: &DimensionType, to: &DimensionType) -> f64 {
         from.coordinate_scale / to.coordinate_scale
     }
+
+    /// Число из `attributes` измерения (`minecraft:visual/...`, `minecraft:gameplay/...`).
+    /// `None`, если атрибута нет — тогда вызывающий берёт дефолт из EnvironmentAttributes.
+    pub fn attr_f32(&self, key: &str) -> Option<f32> {
+        match self.attribute(key)? {
+            Tag::Float(f) => Some(*f),
+            Tag::Double(d) => Some(*d as f32),
+            other => other.as_i64().map(|n| n as f32),
+        }
+    }
+
+    /// Цвет `#rrggbb` (или Int) из `attributes` измерения.
+    pub fn attr_color(&self, key: &str) -> Option<u32> {
+        match self.attribute(key)? {
+            Tag::Int(i) => Some(*i as u32),
+            Tag::String(s) => u32::from_str_radix(s.strip_prefix('#')?, 16).ok(),
+            _ => None,
+        }
+    }
+
+    fn attribute(&self, key: &str) -> Option<&Tag> {
+        let attrs = self.attributes.as_ref()?;
+        attrs
+            .get(&format!("minecraft:{key}"))
+            .or_else(|| attrs.get(key))
+    }
 }
 
 #[cfg(test)]
@@ -137,6 +163,21 @@ mod tests {
         assert_eq!(n.skybox, Skybox::None);
         assert!(n.has_ceiling && n.has_fixed_time && n.attributes.is_none());
         assert_eq!(DimensionType::teleportation_scale(&d, &n), 0.125);
+    }
+
+    #[test]
+    fn nether_visual_attributes() {
+        let n = parse_snbt(
+            "{ambient_light:0.1f,cardinal_light:\"nether\",coordinate_scale:8.0d,has_ceiling:1b,has_fixed_time:1b,has_skylight:0b,height:256,logical_height:128,min_y:0,skybox:\"none\",attributes:{\"minecraft:visual/fog_start_distance\":10.0f,\"minecraft:visual/fog_end_distance\":96.0f,\"minecraft:visual/sky_light_color\":\"#7a7aff\",\"minecraft:visual/ambient_light_color\":\"#302821\",\"minecraft:gameplay/fast_lava\":1b}}",
+        )
+        .unwrap();
+        let n = DimensionType::from_nbt(&n).unwrap();
+        assert_eq!(n.attr_f32("visual/fog_start_distance"), Some(10.0));
+        assert_eq!(n.attr_f32("visual/fog_end_distance"), Some(96.0));
+        assert_eq!(n.attr_f32("visual/sky_fog_end_distance"), None);
+        assert_eq!(n.attr_color("visual/sky_light_color"), Some(0x7a7aff));
+        assert_eq!(n.attr_color("visual/ambient_light_color"), Some(0x302821));
+        assert_eq!(n.attr_f32("gameplay/fast_lava"), Some(1.0));
     }
 
     #[test]

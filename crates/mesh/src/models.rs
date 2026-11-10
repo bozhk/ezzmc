@@ -2,6 +2,7 @@
 //! VANILLA: BlockStateModelSet / BlockModelDefinition#instantiate / BlockColors#createDefault (1.21.11).
 use crate::fluid::FluidSprites;
 use crate::layers::{layer_of_name, RenderLayer};
+use crate::lighting::{CARDINAL_DEFAULT, CARDINAL_NETHER};
 use crate::section::{ModelPart, ModelProvider, Neighborhood, SectionPos};
 use ezzmc_assets::atlas::Identifier;
 use ezzmc_assets::bake::{bake_elements, ModelState, QuadCollection, SpriteGetter, SpriteUv};
@@ -15,6 +16,7 @@ use ezzmc_world::block::{BlockInfo, BlockState};
 use ezzmc_world::generated::b26_3::{BLOCKS, STATE_COUNT};
 use ezzmc_world::noise::LegacyRandom;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Запечённая модель: квады + флаг AO модели.
@@ -179,6 +181,8 @@ pub struct BlockModels {
     pub tints: Tints,
     cutout_leaves: bool,
     fluid_sprites: Option<FluidSprites>,
+    /// `CardinalLight::Nether` текущего измерения (выставляет клиент при смене измерения).
+    nether_shading: AtomicBool,
 }
 
 struct Props(HashMap<String, String>);
@@ -362,7 +366,13 @@ impl BlockModels {
             },
             cutout_leaves,
             fluid_sprites: load_fluid_sprites(sprites),
+            nether_shading: AtomicBool::new(false),
         }
+    }
+
+    /// VANILLA: DimensionType#cardinalLight — `nether` → CardinalLighting.NETHER.
+    pub fn set_nether_shading(&self, on: bool) {
+        self.nether_shading.store(on, Ordering::Relaxed);
     }
 
     /// VANILLA: BlockStateModelSet#getParticleMaterial — слот `particle` первой части модели.
@@ -469,6 +479,14 @@ impl ModelProvider for BlockModels {
 
     fn cutout_leaves(&self) -> bool {
         self.cutout_leaves
+    }
+
+    fn cardinal(&self) -> [f32; 6] {
+        if self.nether_shading.load(Ordering::Relaxed) {
+            CARDINAL_NETHER
+        } else {
+            CARDINAL_DEFAULT
+        }
     }
 
     fn fluid_sprites(&self) -> Option<&FluidSprites> {

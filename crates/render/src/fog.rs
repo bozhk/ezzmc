@@ -63,6 +63,9 @@ pub struct FogInput {
     pub water_vision: f32,
     /// Options#cloudRange (чанки).
     pub cloud_range: i32,
+    /// Есть ли у измерения дневной цикл (таймлайн `day`, skybox overworld). Нет — Nether/End:
+    /// дневная дорожка и закатный туман не применяются, цвет = чистый FOG_COLOR биома.
+    pub day_cycle: bool,
 }
 
 /// Плавный множитель дождевого тумана (AtmosphericFogEnvironment#rainFogMultiplier).
@@ -153,16 +156,21 @@ pub fn setup_fog(i: &FogInput, st: &FogState) -> FogUniform {
             (rgb(a.water_fog_color), a.water_fog_start, e, e, e)
         }
         FogType::Atmospheric => {
-            let c = atmospheric_fog_color(
-                i.day_time,
-                i.rain,
-                i.thunder,
-                a.base_fog,
-                a.base_sky,
-                i.view_chunks,
-                i.forward_x,
-                a.sky_fog_end,
-            );
+            // VANILLA: без дневного таймлайна (in_nether) SKY_FOG_END=512 даёт фактор 0 → чистый FOG_COLOR.
+            let c = if i.day_cycle {
+                atmospheric_fog_color(
+                    i.day_time,
+                    i.rain,
+                    i.thunder,
+                    a.base_fog,
+                    a.base_sky,
+                    i.view_chunks,
+                    i.forward_x,
+                    a.sky_fog_end,
+                )
+            } else {
+                rgb(a.base_fog)
+            };
             let m = st.rain_fog_multiplier;
             let s = a.fog_start - 160.0 * m;
             let e = (a.fog_end - 256.0 * m).max(96.0_f32.min(a.fog_end));
@@ -222,6 +230,7 @@ mod tests {
             void_darkness_onset: 32.0,
             water_vision: 1.0,
             cloud_range: 64,
+            day_cycle: true,
         }
     }
 
@@ -262,5 +271,26 @@ mod tests {
         let dark = setup_fog(&i, &FogState::default());
         let day = setup_fog(&input(FogType::Atmospheric), &FogState::default());
         assert!(dark.color[2] < day.color[2] * 0.01);
+    }
+
+    #[test]
+    fn nether_fog_is_biome_color_without_day_cycle() {
+        let mut i = input(FogType::Atmospheric);
+        i.day_cycle = false;
+        i.day_time = 18000;
+        i.attrs.fog_start = 10.0;
+        i.attrs.fog_end = 96.0;
+        i.attrs.base_fog = 0x33_08_08;
+        let f = setup_fog(&i, &FogState::default());
+        assert_eq!(f.environmental_start, 10.0);
+        assert_eq!(f.environmental_end, 96.0);
+        let c = [
+            0x33 as f32 / 255.0,
+            0x08 as f32 / 255.0,
+            0x08 as f32 / 255.0,
+        ];
+        for (got, want) in f.color[..3].iter().zip(c) {
+            assert!((got - want).abs() < 1e-5, "{got} != {want}");
+        }
     }
 }

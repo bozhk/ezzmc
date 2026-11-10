@@ -1,7 +1,7 @@
 //! Связка клиент → арена террейна → render pass (M1.4): сетевые события → очередь перестроения →
 //! rayon-меш → `TerrainArena` → отрисовка слоёв террейна. Камера свободная (M1.6, без физики).
 use crate::audio;
-use crate::netthread::{NetEvt, NetHandle};
+use crate::netthread::{NetCmd, NetEvt, NetHandle};
 use ezzmc_assets::block_atlas::BlockAtlas;
 use ezzmc_assets::pack::ResourceManager;
 use ezzmc_assets::texture::Image;
@@ -24,6 +24,7 @@ use ezzmc_world::block::BlockState;
 use ezzmc_world::level::{Level, LevelEvent};
 use glam::{Mat4, Vec3};
 use rustc_hash::FxHashSet as HashSet;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 /// Настройки рендера. `use_compute_renderer`: цельные кубы рисует compute-`Renderer`
@@ -149,7 +150,7 @@ pub struct WorldView {
     vignette_b: f32,
     vignette_acc: f32,
     last_frame: Option<std::time::Instant>,
-    lightmap_key: Option<(f32, [f32; 3], f32)>,
+    lightmap_key: Option<(f32, [f32; 3], f32, f32, [f32; 3])>,
     group1: wgpu::BindGroup,
     projection_buf: wgpu::Buffer,
     /// Рука от 1-го лица: свой проход, своя проекция (70°, без глубины мира).
@@ -209,6 +210,11 @@ pub struct WorldView {
     is_flat: bool,
     pub cam: [f64; 3],
     pub have_pos: bool,
+    /// Поколение телепорта, которое главный поток уже применил (см. `NetHandle::tp_gen`).
+    tp_gen_applied: u64,
+    /// Последнее значение общей позиции, которое записал главный поток (или телепорт сервера).
+    /// Если общая позиция другая — сетевой поток записал телепорт, его ещё не применили.
+    last_pos_sent: Option<[f64; 6]>,
     /// Физика игрока (ходьба); `walking == false` — отладочный свободный полёт (EZZMC_FREECAM=1).
     pub player: crate::physics::Player,
     pub walking: bool,
@@ -864,6 +870,8 @@ impl WorldView {
             is_flat: false,
             cam: [0.0, 100.0, 0.0],
             have_pos: false,
+            last_pos_sent: None,
+            tp_gen_applied: 0,
             player: crate::physics::Player::new([0.0; 3]),
             last_input: crate::physics::Input::default(),
             game_mode: 0,
@@ -1207,7 +1215,9 @@ impl WorldView {
                     vel,
                     yaw,
                     pitch,
+                    gen,
                 } => {
+                    self.tp_gen_applied = gen;
                     // VANILLA: ClientPacketListener#handleMovePlayer — позиция сервера всегда применяется
                     // (раньше только первая: после /tp камера оставалась на старом месте и сервер
                     // перестал слать чанки).
@@ -1231,9 +1241,11 @@ impl WorldView {
                                     for y in a[1].floor() as i32..=(a[4] - 1e-6).floor() as i32 {
                                         for z in a[2].floor() as i32..=(a[5] - 1e-6).floor() as i32
                                         {
+                                            let loaded = l.chunks.get(x >> 4, z >> 4).is_some();
                                             cells.push(format!(
-                                                "({x},{y},{z})={}",
-                                                l.chunks.block(x, y, z).name()
+                                                "({x},{y},{z})={}{}",
+                                                l.chunks.block(x, y, z).name(),
+                                                if loaded { "" } else { "[NO_CHUNK]" }
                                             ));
                                         }
                                     }
@@ -1248,6 +1260,9 @@ impl WorldView {
                     self.yaw = yaw;
                     self.pitch = pitch;
                     self.have_pos = true;
+                    // То же значение, что сетевой поток записал при телепорте (флаги = 0).
+                    self.last_pos_sent =
+                        Some([pos[0], pos[1], pos[2], f64::from(yaw), f64::from(pitch), 0.0]);
                 }
                 NetEvt::Disconnected(why) => {
                     tracing::error!("отключён: {why}");
@@ -1574,19 +1589,26 @@ impl WorldView {
         if self.have_pos && !self.no_send {
             // Сетевой поток шлёт это серверу как позицию игрока (иначе новые чанки не приходят).
             if let Some(g) = guard.as_mut() {
-                let feet = if self.walking {
-                    self.player.pos
-                } else {
-                    [self.cam[0], self.cam[1] - 1.62, self.cam[2]]
-                };
-                **g = Some([
-                    feet[0],
-                    feet[1],
-                    feet[2],
-                    f64::from(self.yaw),
-                    f64::from(self.pitch),
-                    f64::from(self.net_flags()),
-                ]);
+                // Сетевой поток уже записал телепорт, а событие ещё не разобрано: не затираем его
+                // старой позицией (иначе уходит «moved too quickly» и сервер откатывает игрока).
+                let net_teleported = matches!(**g, Some(cur) if Some(cur) != self.last_pos_sent);
+                if !net_teleported {
+                    let feet = if self.walking {
+                        self.player.pos
+                    } else {
+                        [self.cam[0], self.cam[1] - 1.62, self.cam[2]]
+                    };
+                    let sent = [
+                        feet[0],
+                        feet[1],
+                        feet[2],
+                        f64::from(self.yaw),
+                        f64::from(self.pitch),
+                        f64::from(self.net_flags()),
+                    ];
+                    **g = Some(sent);
+                    self.last_pos_sent = Some(sent);
+                }
             }
         }
         drop(guard);
@@ -1733,11 +1755,30 @@ impl WorldView {
                 let (_, cur) = self.fov_mod;
                 self.fov_mod = (cur, cur + (t - cur) * 0.5);
             }
+            // VANILLA: LocalPlayer#sendChanges — один пакет движения на каждый тик физики.
+            if self_fov.is_some() && self.have_pos && !self.no_send {
+                self.send_phys_tick(yaw, pitch);
+            }
         }
         if n == 5 {
             self.tick_acc = 0.0;
         }
         self.cam = self.player.eye_lerp(self.tick_acc / 0.05);
+    }
+
+    /// Отправляет сетевому потоку состояние после тика физики. Тики до применения телепорта не шлём.
+    fn send_phys_tick(&self, yaw: f32, pitch: f32) {
+        let gen = self.net.tp_gen.load(Ordering::SeqCst);
+        if gen != self.tp_gen_applied {
+            return;
+        }
+        let _ = self.net.cmd.send(NetCmd::PhysTick {
+            pos: self.player.pos,
+            yaw,
+            pitch,
+            flags: self.net_flags(),
+            gen,
+        });
     }
 
     pub fn set_cfg(&mut self, cfg: crate::settings::ViewCfg) {
@@ -2883,15 +2924,52 @@ impl WorldView {
                     - (4.0 + (st.sky_light_factor - 0.24) / 0.76 * 11.0)
                         .round()
                         .clamp(4.0, 15.0) as i32;
-                let key = (st.sky_light_factor, st.sky_light_color, self.cfg.gamma);
+                // VANILLA: без дневного таймлайна (Nether/End) SKY_LIGHT_* и AMBIENT берутся из атрибутов
+                // измерения; у Overworld ambient_light_color = #0a0a0a и ambient_light 0 — это дефолты.
+                let day_cycle = l.skybox == ezzmc_world::dimension::Skybox::Overworld;
+                let dim = l.dimension.as_ref();
+                let rgb01 = |c: u32| {
+                    [
+                        ((c >> 16) & 255) as f32 / 255.0,
+                        ((c >> 8) & 255) as f32 / 255.0,
+                        (c & 255) as f32 / 255.0,
+                    ]
+                };
+                let (sky_factor, sky_light_color) = if day_cycle {
+                    (st.sky_light_factor, st.sky_light_color)
+                } else {
+                    (
+                        dim.and_then(|d| d.attr_f32("visual/sky_light_factor"))
+                            .unwrap_or(1.0),
+                        dim.and_then(|d| d.attr_color("visual/sky_light_color"))
+                            .map_or([1.0; 3], rgb01),
+                    )
+                };
+                // VANILLA: CardinalLighting по cardinal_light измерения (затенение граней в Nether).
+                self.models.set_nether_shading(dim.is_some_and(|d| {
+                    d.cardinal_light == ezzmc_world::dimension::CardinalLight::Nether
+                }));
+                let ambient_light = dim.map_or(0.0, |d| d.ambient_light);
+                let ambient_color = dim
+                    .and_then(|d| d.attr_color("visual/ambient_light_color"))
+                    .map_or([10.0 / 255.0; 3], rgb01);
+                let key = (
+                    sky_factor,
+                    sky_light_color,
+                    self.cfg.gamma,
+                    ambient_light,
+                    ambient_color,
+                );
                 if self.lightmap_key != Some(key) {
                     self.lightmap_key = Some(key);
                     self.lightmap.update(
                         &gpu.queue,
                         &LightmapParams {
-                            sky_factor: key.0,
-                            sky_light_color: key.1,
+                            sky_factor,
+                            sky_light_color,
                             gamma: key.2,
+                            ambient_light,
+                            ambient_color,
                             ..LightmapParams::default()
                         },
                     );
@@ -3324,6 +3402,16 @@ impl WorldView {
         };
         let fog_type = fluid_in_camera(l, self.cam, self.yaw, self.pitch, aspect);
         let mut attrs = FogAttrs::default();
+        // VANILLA: атрибуты измерения (visual/fog_*_distance; у Overworld их нет → дефолты).
+        if let Some(d) = l.dimension.as_ref() {
+            attrs.fog_start = d
+                .attr_f32("visual/fog_start_distance")
+                .unwrap_or(attrs.fog_start);
+            attrs.fog_end = d
+                .attr_f32("visual/fog_end_distance")
+                .unwrap_or(attrs.fog_end);
+        }
+        let day_cycle = l.skybox == ezzmc_world::dimension::Skybox::Overworld;
         let mut sky_light = 15u8;
         let mut block_light = 0u8;
         if let Some(c) = l.chunks.get(bx >> 4, bz >> 4) {
@@ -3369,6 +3457,7 @@ impl WorldView {
                 void_darkness_onset: if self.is_flat { 1.0 } else { 32.0 },
                 water_vision,
                 cloud_range: 64,
+                day_cycle,
             },
             &self.fog_state,
         )
