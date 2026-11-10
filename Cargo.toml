@@ -63,6 +63,11 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.ezzmc-mesh]
 opt-level = 3
+# wgpu-core 28.0.1: debug_assert в батчинге multi-draw-indirect (render.rs:2914) падает на DX12/Metal
+# в debug-тестах render (путь ComputeIndirect). Это sanity-проверка смещений, не корректность; отключаем
+# только для wgpu-core в dev-профиле.
+[profile.dev.package.wgpu-core]
+debug-assertions = false
 
 [profile.bench]
 inherits = "release"
