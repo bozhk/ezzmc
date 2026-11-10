@@ -213,6 +213,8 @@ pub struct Player {
     pub in_water: bool,
     pub in_lava: bool,
     pub under_water: bool,
+    /// EXPERIMENT(hyp1): глаза были в воде на прошлом тике (wasEyeInWater).
+    pub eye_in_water: bool,
     pub swimming: bool,
     /// Наклон камеры (градусы) — для плавания «по взгляду».
     pub pitch: f32,
@@ -281,6 +283,7 @@ impl Player {
             in_water: false,
             in_lava: false,
             under_water: false,
+            eye_in_water: false,
             swimming: false,
             pitch: 0.0,
             x_bob: 0.0,
@@ -701,7 +704,10 @@ impl Player {
             self.pos[2].floor() as i32,
         );
         let eh = w.water_height(ex, ey, ez);
-        self.under_water = eh > 0.0 && eye_y <= f64::from(ey) + f64::from(eh);
+        let eye_in = eh > 0.0 && eye_y <= f64::from(ey) + f64::from(eh);
+        // EXPERIMENT(hyp1): ванилья isUnderWater = wasEyeInWater && isInWater (Entity.java:1660).
+        self.under_water = self.eye_in_water && self.in_water;
+        self.eye_in_water = eye_in;
         // Entity#updateSwimming.
         let here = block_pos(self.pos);
         // VANILLA: Player#isSwimming = !flying && !spectator && super.isSwimming.
