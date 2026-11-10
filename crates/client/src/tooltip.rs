@@ -38,6 +38,7 @@ pub static ATTRIBUTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 pub static JUKEBOX_DESC: Mutex<Vec<(String, Option<Tag>)>> = Mutex::new(Vec::new());
 
 /// Трим: описания материалов и узоров (порядок = holder id) из реестров `trim_material` / `trim_pattern`.
+#[allow(clippy::type_complexity)]
 pub static TRIM_DESC: Mutex<(Vec<Option<Tag>>, Vec<Option<Tag>>)> =
     Mutex::new((Vec::new(), Vec::new()));
 

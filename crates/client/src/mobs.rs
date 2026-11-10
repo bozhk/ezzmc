@@ -820,15 +820,9 @@ impl Mobs {
                         }
                         Kind::Fox => animals::fox_anim(model, yr, xr, wp, ws),
                         Kind::Squid => animals::squid_anim(model, state.age_in_ticks),
-                        Kind::Witch => animals::witch_anim(
-                            model,
-                            yr,
-                            xr,
-                            wp,
-                            ws,
-                            state.age_in_ticks,
-                            e.id as i32,
-                        ),
+                        Kind::Witch => {
+                            animals::witch_anim(model, yr, xr, wp, ws, state.age_in_ticks, e.id)
+                        }
                         Kind::Villager => animals::villager_anim(model, yr, xr, wp, ws),
                         Kind::Wolf => animals::wolf_anim(model, yr, xr, wp, ws),
                         Kind::Feline => {

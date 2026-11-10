@@ -491,7 +491,9 @@ impl App {
                 // TEMP-RAW-MOVE: разовый пакет move_player_pos_rot с точными x,y,z (для A/B).
                 // x_bits: точный f64 через битовое представление (serde_json без float_roundtrip может промахнуться на 1 ULP).
                 let x = c["x_bits"].as_u64().map(f64::from_bits).or_else(|| f("x"));
-                if let (Some(v), Some(x), Some(y), Some(z)) = (self.view.as_ref(), x, f("y"), f("z")) {
+                if let (Some(v), Some(x), Some(y), Some(z)) =
+                    (self.view.as_ref(), x, f("y"), f("z"))
+                {
                     v.send(crate::netthread::NetCmd::RawMove {
                         pos: [x, y, z],
                         yaw: f("yaw").unwrap_or(0.0) as f32,

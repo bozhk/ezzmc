@@ -319,7 +319,6 @@ pub struct Consume {
     /// Едят при сытости (canAlwaysEat / питьё без FOOD).
     pub always: bool,
     pub sound: &'static str,
-    pub particles: bool,
 }
 
 /// VANILLA: Items.java/Consumables.java/Foods.java — Consumable по умолчанию (компонент patch не разбирается).
@@ -329,14 +328,12 @@ pub fn consumable(name: &str) -> Option<Consume> {
         drink: false,
         always,
         sound: "entity.generic.eat",
-        particles: true,
     };
     let drink = |ticks, sound| Consume {
         ticks,
         drink: true,
         always: true,
         sound,
-        particles: false,
     };
     Some(match name {
         "dried_kelp" => eat(16, false),

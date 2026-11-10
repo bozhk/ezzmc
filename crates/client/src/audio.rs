@@ -89,13 +89,11 @@ struct Req {
 enum Cmd {
     Play(Req),
     Stop(Option<String>, Option<Cat>),
-    StopAll,
 }
 
 enum MixCmd {
     Add(Voice),
     Stop(Option<String>, Option<Cat>),
-    StopAll,
 }
 
 struct Pcm {
@@ -181,9 +179,6 @@ pub fn play_loop(event: &str, cat: Cat, gain: Arc<AtomicU32>) {
 /// VANILLA: ClientboundStopSoundPacket.
 pub fn stop(event: Option<&str>, cat: Option<Cat>) {
     send(Cmd::Stop(event.map(norm), cat));
-}
-pub fn stop_all() {
-    send(Cmd::StopAll);
 }
 
 fn norm(e: &str) -> String {
@@ -403,9 +398,6 @@ fn worker(rx: Receiver<Cmd>) {
             Cmd::Stop(e, c) => {
                 let _ = mtx.send(MixCmd::Stop(e, c));
             }
-            Cmd::StopAll => {
-                let _ = mtx.send(MixCmd::StopAll);
-            }
             Cmd::Play(r) => {
                 let Some(p) = reg.pick(&r.event, &mut rng, 0) else {
                     if !reg.events.contains_key(&r.event) && warned.insert(r.event.clone()) {
@@ -503,7 +495,6 @@ fn mixer<T: cpal::SizedSample + cpal::FromSample<f32>>(
                 MixCmd::Stop(e, c) => voices.retain(|v| {
                     !(e.as_ref().is_none_or(|e| *e == v.event) && c.is_none_or(|c| c == v.cat))
                 }),
-                MixCmd::StopAll => voices.clear(),
             }
         }
         let l = LISTENER.try_lock().map(|g| *g).unwrap_or(Listener {

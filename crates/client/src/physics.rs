@@ -1639,7 +1639,11 @@ mod tests {
                 }
             }
             fn name(&self, _: i32, y: i32, _: i32) -> &'static str {
-                if y < 0 { "stone" } else { "air" }
+                if y < 0 {
+                    "stone"
+                } else {
+                    "air"
+                }
             }
             fn has_chunk(&self, _: i32, _: i32) -> bool {
                 true
@@ -1658,7 +1662,8 @@ mod tests {
         eprintln!("xs={xs:?}");
         // После упора позиция должна стоять, а не дёргаться.
         let last = &xs[20..];
-        let spread = last.iter().cloned().fold(f64::MIN, f64::max) - last.iter().cloned().fold(f64::MAX, f64::min);
+        let spread = last.iter().cloned().fold(f64::MIN, f64::max)
+            - last.iter().cloned().fold(f64::MAX, f64::min);
         assert!(spread < 1e-9, "дрожание: spread={spread} xs={last:?}");
     }
 
@@ -1867,7 +1872,10 @@ mod tests {
         // нажатие Shift: тик нажатия идёт на полной скорости, следующий — медленно
         let base = step(&mut b, walk);
         let press = step(&mut a, sneak);
-        assert!((press - base).abs() < 1e-9, "нажатие замедлило тот же тик: {press} vs {base}");
+        assert!(
+            (press - base).abs() < 1e-9,
+            "нажатие замедлило тот же тик: {press} vs {base}"
+        );
         let press_next = step(&mut a, sneak);
         let base_next = step(&mut b, walk);
         assert!(
@@ -1883,7 +1891,10 @@ mod tests {
         let mut c = a.clone();
         let release = step(&mut a, walk);
         let base_rel = step(&mut c, sneak);
-        assert!((release - base_rel).abs() < 1e-9, "отпускание ускорило тот же тик: {release} vs {base_rel}");
+        assert!(
+            (release - base_rel).abs() < 1e-9,
+            "отпускание ускорило тот же тик: {release} vs {base_rel}"
+        );
         let release_next = step(&mut a, walk);
         let base_rel_next = step(&mut c, walk);
         assert!(

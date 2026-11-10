@@ -1062,6 +1062,7 @@ fn tab_lines(lang: &Lang, s: &ItemStack) -> Vec<String> {
 }
 
 /// Предмет под курсором и его тултип; иначе подсказка вкладки/корзины.
+#[allow(clippy::too_many_arguments)]
 pub fn hover_text(
     t: &TextRenderer,
     st: &State,
@@ -1096,10 +1097,8 @@ pub fn hover_text(
                 }
             }
         }
-        let mut i = 1;
-        for t in tab_lines(lang, s) {
-            lines.insert(i.min(lines.len()), (t, BLUE));
-            i += 1;
+        for (k, t) in tab_lines(lang, s).into_iter().enumerate() {
+            lines.insert((1 + k).min(lines.len()), (t, BLUE));
         }
         lines
     };
@@ -1414,6 +1413,12 @@ pub fn tab_center(gw: f32, gh: f32, i: usize) -> Option<(f32, f32)> {
 
 /// Headless-проверка креатив-инвентаря по спецификации: `cargo test -p ezzmc-client spec -- --nocapture`.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::needless_range_loop,
+    clippy::field_reassign_with_default,
+    clippy::if_same_then_else
+)]
 mod spec {
     use super::*;
 

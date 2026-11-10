@@ -150,6 +150,7 @@ pub struct WorldView {
     vignette_b: f32,
     vignette_acc: f32,
     last_frame: Option<std::time::Instant>,
+    #[allow(clippy::type_complexity)]
     lightmap_key: Option<(f32, [f32; 3], f32, f32, [f32; 3])>,
     group1: wgpu::BindGroup,
     projection_buf: wgpu::Buffer,
@@ -1205,8 +1206,8 @@ impl WorldView {
                         });
                     if let Some(k) = ex.knockback {
                         // VANILLA: LocalPlayer#pushFromExplosion = addDeltaMovement.
-                        for i in 0..3 {
-                            self.player.vel[i] += k[i];
+                        for (v, kk) in self.player.vel.iter_mut().zip(k) {
+                            *v += kk;
                         }
                     }
                 }
@@ -1265,8 +1266,14 @@ impl WorldView {
                     self.pitch = pitch;
                     self.have_pos = true;
                     // То же значение, что сетевой поток записал при телепорте (флаги = 0).
-                    self.last_pos_sent =
-                        Some([pos[0], pos[1], pos[2], f64::from(yaw), f64::from(pitch), 0.0]);
+                    self.last_pos_sent = Some([
+                        pos[0],
+                        pos[1],
+                        pos[2],
+                        f64::from(yaw),
+                        f64::from(pitch),
+                        0.0,
+                    ]);
                 }
                 NetEvt::Disconnected(why) => {
                     tracing::error!("отключён: {why}");
@@ -1412,10 +1419,6 @@ impl WorldView {
         let bg = a.music.as_ref().or(level.audio.music.as_ref())?;
         bg.select(self.game_mode == 1, self.player.under_water)
             .cloned()
-    }
-
-    pub fn skybox(&self) -> Option<ezzmc_world::dimension::Skybox> {
-        self.net.level.lock().ok()?.as_ref().map(|l| l.skybox)
     }
 
     /// Перерисовать изменённые клетки и показать разрушение блоков, раздавленных поршнем.
@@ -2186,7 +2189,7 @@ impl WorldView {
             _ => (0, 15),
         };
         let mesh = self.shown_mesh();
-        if let (Some(mesh), Some(d)) = (mesh, self.hand_item_draw.as_mut()) {
+        if let (Some(mesh), Some(_d)) = (mesh, self.hand_item_draw.as_mut()) {
             // VANILLA: ItemInHandRenderer#renderArmWithItem (одноручный предмет) + applyItemArmAttackTransform.
             let sa = attack.sqrt();
             let g = (sa * pi).sin();
@@ -4174,8 +4177,8 @@ impl WorldView {
 
     /// VANILLA: Item#canDestroyBlock для предмета в основной руке (креатив: TOOL.canDestroyBlocksInCreative).
     fn held_breaks_creative(&self) -> bool {
-        self.inv.held().map_or(true, |s| {
-            crate::handitem::stack_ctx(s).map_or(true, |(n, _)| crate::dig::breaks_in_creative(n))
+        self.inv.held().is_none_or(|s| {
+            crate::handitem::stack_ctx(s).is_none_or(|(n, _)| crate::dig::breaks_in_creative(n))
         })
     }
 

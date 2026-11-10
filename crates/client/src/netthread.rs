@@ -773,7 +773,7 @@ fn run(
                         continue;
                     }
                     if pname == "update_attributes" {
-                        parse_attributes(&body, h.player_id, &tx);
+                        parse_attributes(&body, h.player_id, tx);
                         continue;
                     }
                     if matches!(pname, "system_chat" | "player_chat" | "disguised_chat") {

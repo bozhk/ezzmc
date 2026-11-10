@@ -46,8 +46,6 @@ pub struct TextRenderer {
     screen: wgpu::Buffer,
     vb: wgpu::Buffer,
     ib: wgpu::Buffer,
-    atlas_w: f32,
-    atlas_h: f32,
     glyphs: rustc_hash::FxHashMap<char, Glyph>,
     verts: Vec<Vertex>,
     /// GUI scale текущего кадра.
@@ -237,8 +235,6 @@ impl TextRenderer {
             screen,
             vb,
             ib,
-            atlas_w: atlas_w as f32,
-            atlas_h: atlas_h as f32,
             glyphs,
             verts: Vec::new(),
             scale: 1,
@@ -442,6 +438,7 @@ impl TextRenderer {
 
     /// Рисует строку со стилем Component (цвет 0xRRGGBB, прозрачность `alpha`), возвращает x после неё.
     /// VANILLA: Font.StringRenderOutput#accept.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_fmt(
         &mut self,
         s: &str,
@@ -591,7 +588,7 @@ fn build_atlas(sheets: &[FontSheet]) -> (Vec<u8>, u32, u32, rustc_hash::FxHashMa
                     continue;
                 }
                 let (gx, gy) = (c * cw, r * chh);
-                let right = cell_right(&sh.rgba, sh.w, gx, gy, cw, chh);
+                let right = cell_right(sh.rgba, sh.w, gx, gy, cw, chh);
                 if right == 0 {
                     continue;
                 }

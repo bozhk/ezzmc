@@ -62,7 +62,6 @@ const COLS: u32 = 16;
 pub const HEAD: usize = 0;
 pub const CHEST: usize = 1;
 pub const LEGS: usize = 2;
-pub const FEET: usize = 3;
 const SUFFIX: [&str; 4] = ["_helmet", "_chestplate", "_leggings", "_boots"];
 /// VANILLA: LeatherArmor — цвет без красителя (-6265536).
 const LEATHER_UNDYED: u32 = 0xA0_6540;
@@ -95,7 +94,7 @@ fn trim_of(material: &str, patch: &ezzmc_protocol::item::ComponentPatch) -> Opti
     let id = DATA_COMPONENT_TYPE.iter().position(|x| *x == "trim")? as u32;
     let (_, b) = patch.added.iter().find(|(i, _)| *i == id)?;
     let mut i = 0usize;
-    let mut varint = |i: &mut usize| -> Option<u32> {
+    let varint = |i: &mut usize| -> Option<u32> {
         let mut v = 0u32;
         for sh in (0..35).step_by(7) {
             let byte = *b.get(*i)?;
@@ -435,6 +434,7 @@ impl ArmorKit {
     }
 
     /// Запечь броню (формат `ParticleDraw`, UV под атлас). `state` — поза как у тела игрока.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn bake(
         &mut self,
         looks: &[Option<Look>; 4],
@@ -503,6 +503,7 @@ impl ArmorKit {
     }
 
     /// Квады для программной растеризации превью: (квад, row, tint) на каждый слой.
+    #[allow(clippy::type_complexity)]
     pub fn raster(
         &mut self,
         looks: &[Option<Look>; 4],
@@ -526,7 +527,7 @@ impl ArmorKit {
                     out.extend(
                         quads
                             .iter()
-                            .map(|q| (q.clone(), cell, [tint[0], tint[1], tint[2]])),
+                            .map(|q| (*q, cell, [tint[0], tint[1], tint[2]])),
                     );
                 }
                 if look.foil {
@@ -547,7 +548,7 @@ impl ArmorKit {
                 out.extend(
                     quads
                         .iter()
-                        .map(|q| (q.clone(), cell, [tint[0], tint[1], tint[2]])),
+                        .map(|q| (*q, cell, [tint[0], tint[1], tint[2]])),
                 );
             }
             if look.foil {

@@ -289,6 +289,7 @@ pub fn input_from_glfw(code: i32) -> Input {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

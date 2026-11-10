@@ -410,6 +410,7 @@ pub fn format_num(v: f32, step: f32) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

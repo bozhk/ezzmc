@@ -62,16 +62,6 @@ impl Span {
             line_start,
         }
     }
-
-    fn same_style(&self, o: &Span) -> bool {
-        Span {
-            text: String::new(),
-            ..self.clone()
-        } == Span {
-            text: String::new(),
-            ..o.clone()
-        }
-    }
 }
 
 fn merge(p: &Span, s: &Style) -> Span {
@@ -369,7 +359,7 @@ impl Sugg {
         }
         let before: String = sub_chars(&edit.text, 0, edit.cursor);
         let word = before
-            .rfind(|c: char| c == ' ')
+            .rfind(' ')
             .map_or(0, |i| before[..i].chars().count() + 1);
         let last = sub_chars(&before, word, usize::MAX).to_lowercase();
         let (mut a, mut b) = (Vec::new(), Vec::new());
@@ -595,12 +585,6 @@ impl Chat {
         while self.msgs.len() > 100 {
             self.msgs.pop_front();
         }
-    }
-
-    pub fn clear(&mut self) {
-        self.msgs.clear();
-        self.lines.clear();
-        self.scroll = 0;
     }
 
     /// Текст последних строк (для управления агентом): от старых к новым.

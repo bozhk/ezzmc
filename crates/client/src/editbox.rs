@@ -36,10 +36,6 @@ impl EditBox {
         self.text.chars().count()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.text.is_empty()
-    }
-
     pub fn selection(&self) -> (usize, usize) {
         (self.cursor.min(self.sel), self.cursor.max(self.sel))
     }

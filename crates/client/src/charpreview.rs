@@ -207,6 +207,7 @@ impl CharPreview {
         let l0 = Vec3::new(0.2, -1.0, 1.0).normalize();
         let l1 = Vec3::new(-0.2, -1.0, 0.0).normalize();
         // Слой скина, затем слои брони (атлас: v внутри строки → v всего атласа).
+        #[allow(clippy::type_complexity)]
         let mut jobs: Vec<(
             ezzmc_render::entitymodel::RasterQuad,
             Option<(u32, [u8; 3])>,
@@ -473,6 +474,7 @@ fn fill_tri(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

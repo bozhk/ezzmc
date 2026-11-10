@@ -355,53 +355,6 @@ pub fn mix_light(n: Vec3) -> f32 {
     ((a + b) * 0.6 + 0.4).min(1.0)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cube_uv_layout_matches_vanilla_head() {
-        // Голова 8×8×8 в (0,0), текстура 64×64: верх занимает u 8..16, v 0..8.
-        let c = Cube::new(
-            [-4.0, -8.0, -4.0],
-            [8.0; 3],
-            [0.0; 3],
-            false,
-            [0.0, 0.0],
-            [64.0, 64.0],
-        );
-        let up = &c.polys[0]; // «DOWN» в пространстве Y-вниз = верх головы
-        let us: Vec<f32> = up.v.iter().map(|v| v.uv[0] * 64.0).collect();
-        let vs: Vec<f32> = up.v.iter().map(|v| v.uv[1] * 64.0).collect();
-        assert_eq!(us.iter().cloned().fold(f32::MAX, f32::min), 8.0);
-        assert_eq!(us.iter().cloned().fold(f32::MIN, f32::max), 16.0);
-        assert_eq!(vs.iter().cloned().fold(f32::MIN, f32::max), 8.0);
-    }
-
-    #[test]
-    fn bake_counts_six_quads_per_cube() {
-        let mut m = Model::new([64.0, 64.0]);
-        m.add(
-            "a",
-            None,
-            Pose::default(),
-            &[BoxDef::new([0.0; 2], [0.0; 3], [1.0; 3])],
-        );
-        let mut out = Vec::new();
-        assert_eq!(m.bake(Mat4::IDENTITY, [255; 4], (0, 15), &mut out), 6);
-        assert_eq!(out.len(), 6 * 4 * 32);
-    }
-
-    #[test]
-    fn child_follows_parent_pose() {
-        let mut m = Model::new([16.0, 16.0]);
-        let p = m.add("p", None, Pose::offset(16.0, 0.0, 0.0), &[]);
-        m.add("c", Some(p), Pose::offset(0.0, 16.0, 0.0), &[]);
-        let mats = m.part_matrices(Mat4::IDENTITY);
-        assert_eq!(mats[1].w_axis.truncate(), Vec3::new(1.0, 1.0, 0.0));
-    }
-}
-
 /// VANILLA: ArrowModel (32×32) — оперение (`back`) и два креста (`cross_1/2`), масштаб 0.9.
 /// Текстуры трёх стрел лежат стопкой 32×96: `row` = 0 обычная, 1 spectral, 2 tipped.
 /// `root` — матрица после поворотов сущности (Y yRot−90, Z xRot), камера в начале координат.
@@ -475,4 +428,51 @@ pub fn bake_arrow(root: Mat4, row: u32, light: (u8, u8), shake: f32, out: &mut V
         [[10.0, 5.0], [5.0, 5.0], [5.0, 10.0], [10.0, 10.0]],
         [1.0, 0.0, 0.0],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cube_uv_layout_matches_vanilla_head() {
+        // Голова 8×8×8 в (0,0), текстура 64×64: верх занимает u 8..16, v 0..8.
+        let c = Cube::new(
+            [-4.0, -8.0, -4.0],
+            [8.0; 3],
+            [0.0; 3],
+            false,
+            [0.0, 0.0],
+            [64.0, 64.0],
+        );
+        let up = &c.polys[0]; // «DOWN» в пространстве Y-вниз = верх головы
+        let us: Vec<f32> = up.v.iter().map(|v| v.uv[0] * 64.0).collect();
+        let vs: Vec<f32> = up.v.iter().map(|v| v.uv[1] * 64.0).collect();
+        assert_eq!(us.iter().cloned().fold(f32::MAX, f32::min), 8.0);
+        assert_eq!(us.iter().cloned().fold(f32::MIN, f32::max), 16.0);
+        assert_eq!(vs.iter().cloned().fold(f32::MIN, f32::max), 8.0);
+    }
+
+    #[test]
+    fn bake_counts_six_quads_per_cube() {
+        let mut m = Model::new([64.0, 64.0]);
+        m.add(
+            "a",
+            None,
+            Pose::default(),
+            &[BoxDef::new([0.0; 2], [0.0; 3], [1.0; 3])],
+        );
+        let mut out = Vec::new();
+        assert_eq!(m.bake(Mat4::IDENTITY, [255; 4], (0, 15), &mut out), 6);
+        assert_eq!(out.len(), 6 * 4 * 32);
+    }
+
+    #[test]
+    fn child_follows_parent_pose() {
+        let mut m = Model::new([16.0, 16.0]);
+        let p = m.add("p", None, Pose::offset(16.0, 0.0, 0.0), &[]);
+        m.add("c", Some(p), Pose::offset(0.0, 16.0, 0.0), &[]);
+        let mats = m.part_matrices(Mat4::IDENTITY);
+        assert_eq!(mats[1].w_axis.truncate(), Vec3::new(1.0, 1.0, 0.0));
+    }
 }

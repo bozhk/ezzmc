@@ -687,7 +687,7 @@ mod tests {
         build(&mut out, &q, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
         assert_eq!(out.len(), 4 * VERTEX_SIZE);
         // первая вершина (1,−1): x = +0.5, y = −0.5, u1 v1
-        let f = |i: usize| f32::from_le_bytes(out[i * 4..i * 4 + 4].try_into().unwrap());
+        let f = |i: usize| f32::from_le_bytes(out[i * 4..i * 4 + 4].try_into().expect("4 байта"));
         assert_eq!((f(0), f(1), f(2)), (0.5, -0.5, 5.0));
         assert_eq!((f(3), f(4)), (1.0, 1.0));
     }

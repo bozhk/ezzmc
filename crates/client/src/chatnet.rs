@@ -219,7 +219,23 @@ pub fn parse_player(body: &[u8], types: &[Decoration]) -> ProtocolResult<Compone
     Ok(decorate(&b, msg))
 }
 
+/// VANILLA: ClientboundCommandSuggestionsPacket — varint id, start, length, список (строка + необязательный тултип).
+pub fn parse_suggestions(body: &[u8]) -> ProtocolResult<(i32, i32, i32, Vec<String>)> {
+    let mut r = Reader::new(body);
+    let (id, start, len) = (r.var_int()?, r.var_int()?, r.var_int()?);
+    let n = r.var_int()?.clamp(0, 10_000);
+    let mut v = Vec::new();
+    for _ in 0..n {
+        v.push(r.string(32767)?);
+        if r.bool()? {
+            component(&mut r)?;
+        }
+    }
+    Ok((id, start, len, v))
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use ezzmc_protocol::wire::Writer;
@@ -252,19 +268,4 @@ mod tests {
         assert!(o);
         assert_eq!(c.to_plain(&|_| None), "hi");
     }
-}
-
-/// VANILLA: ClientboundCommandSuggestionsPacket — varint id, start, length, список (строка + необязательный тултип).
-pub fn parse_suggestions(body: &[u8]) -> ProtocolResult<(i32, i32, i32, Vec<String>)> {
-    let mut r = Reader::new(body);
-    let (id, start, len) = (r.var_int()?, r.var_int()?, r.var_int()?);
-    let n = r.var_int()?.clamp(0, 10_000);
-    let mut v = Vec::new();
-    for _ in 0..n {
-        v.push(r.string(32767)?);
-        if r.bool()? {
-            component(&mut r)?;
-        }
-    }
-    Ok((id, start, len, v))
 }

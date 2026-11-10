@@ -1,3 +1,4 @@
+#![allow(clippy::approx_constant)] // VANILLA: литералы углов как в исходнике Mojang
 //! Модели не-гуманоидных мобов: четвероногие (свинья, корова), крипер, паук, курица.
 //! VANILLA: QuadrupedModel, PigModel, CowModel, CreeperModel, SpiderModel, AdultChickenModel (26.3).
 
@@ -1084,6 +1085,7 @@ pub fn endermite_mesh() -> Model {
 }
 
 /// VANILLA: EndermiteModel#setupAnim.
+#[allow(clippy::needless_range_loop)]
 pub fn endermite_anim(m: &mut Model, age: f32) {
     for i in 0..4 {
         let a = age * 0.9 + i as f32 * 0.15 * PI;
@@ -2826,17 +2828,6 @@ pub fn camel_anim(m: &mut Model, y_rot: f32, x_rot: f32, walk_pos: f32, walk_spe
 fn set_y(m: &mut Model, name: &str, v: f32) {
     if let Some(i) = m.index(name) {
         m.parts[i].pose.y_rot = v;
-    }
-}
-
-fn set_pose_xyz(m: &mut Model, name: &str, x: Option<f32>, y: Option<f32>) {
-    if let Some(i) = m.index(name) {
-        if let Some(x) = x {
-            m.parts[i].pose.x = x;
-        }
-        if let Some(y) = y {
-            m.parts[i].pose.y = y;
-        }
     }
 }
 
