@@ -10,6 +10,7 @@ use winit::{
 pub const DEFAULT_WIDTH: u32 = 854;
 pub const DEFAULT_HEIGHT: u32 = 480;
 /// Идентификатор приложения для панели задач (совпадает с `ezzmc.desktop`).
+#[cfg(target_os = "linux")]
 const APP_ID: &str = "ezzmc";
 const MIN_SIZE: (u32, u32) = (320, 240);
 
