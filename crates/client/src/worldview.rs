@@ -96,7 +96,7 @@ pub struct WorldView {
     pub using: Option<Using>,
     attack_item: Option<u32>,
     digger: crate::dig::Digger,
-    net: NetHandle,
+    pub(crate) net: NetHandle,
     /// Клавиши последнего кадра ходьбы (для player_input).
     last_input: crate::physics::Input,
     /// GameType локального игрока (0 survival, 1 creative…).

@@ -2027,7 +2027,37 @@ impl ApplicationHandler for App {
                             let loc_bar =
                                 hudbars::show_locator(!v.waypoints.is_empty(), survival, xp_recent);
                             let loc_wps = if loc_bar {
-                                v.waypoints.clone()
+                                let mut wps = v.waypoints.clone();
+                                if let Ok(g) = v.net.level.lock() {
+                                    if let Some(l) = g.as_ref() {
+                                        let pt = f64::from(l.partial_tick());
+                                        for w in wps.values_mut() {
+                                            let hudbars::WpKind::Pos(x, y, z) = w.kind else {
+                                                continue;
+                                            };
+                                            let Ok(u) = u128::from_str_radix(&w.key, 16) else {
+                                                continue;
+                                            };
+                                            // VANILLA: Vec3iWaypoint#position — manhattan ≤ 3 от вектора.
+                                            if let Some(e) = l.entities.iter().find(|e| {
+                                                e.uuid == u
+                                                    && (e.pos[0].floor() as i32 - x).abs()
+                                                        + (e.pos[1].floor() as i32 - y).abs()
+                                                        + (e.pos[2].floor() as i32 - z).abs()
+                                                        <= 3
+                                            }) {
+                                                w.eye = Some([
+                                                    e.prev_pos[0] + (e.pos[0] - e.prev_pos[0]) * pt,
+                                                    e.prev_pos[1]
+                                                        + (e.pos[1] - e.prev_pos[1]) * pt
+                                                        + 1.62,
+                                                    e.prev_pos[2] + (e.pos[2] - e.prev_pos[2]) * pt,
+                                                ]);
+                                            }
+                                        }
+                                    }
+                                }
+                                wps
                             } else {
                                 Default::default()
                             };

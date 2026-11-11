@@ -1226,6 +1226,7 @@ fn parse_waypoint(body: &[u8]) -> Option<(u32, crate::hudbars::Wp)> {
             hash,
             color,
             kind,
+            eye: None,
         },
     ))
 }

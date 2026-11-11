@@ -362,6 +362,8 @@ pub struct Wp {
     pub hash: i32,
     pub color: Option<u32>,
     pub kind: WpKind,
+    /// VANILLA: Vec3iWaypoint#position — глаза загруженной рядом сущности (partialTick) вместо центра блока.
+    pub eye: Option<[f64; 3]>,
 }
 
 #[derive(Clone, Debug)]
@@ -477,9 +479,10 @@ pub fn draw_locator(
             }
             WpKind::Pos(..) | WpKind::Chunk(..) => {
                 let (tx, ty, tz) = match w.kind {
-                    WpKind::Pos(a, b, c) => {
-                        (f64::from(a) + 0.5, f64::from(b) + 0.5, f64::from(c) + 0.5)
-                    }
+                    WpKind::Pos(a, b, c) => w.eye.map_or(
+                        (f64::from(a) + 0.5, f64::from(b) + 0.5, f64::from(c) + 0.5),
+                        |e| (e[0], e[1], e[2]),
+                    ),
                     WpKind::Chunk(a, b) => {
                         (f64::from(a) * 16.0 + 8.0, cam[1], f64::from(b) * 16.0 + 8.0)
                     }
