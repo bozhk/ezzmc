@@ -82,6 +82,9 @@ pub struct Entity {
     pub squid_reset: u32,
     /// Счётчик crit-анимаций (animate 4/5): 1 — обычный, 2 — магический.
     pub crit_seq: (u32, u8),
+    /// Локальный игрок управляет этим транспортом (Entity#isLocalInstanceAuthoritative): позицию и поворот
+    /// ведёт клиентская симуляция, интерполяция к пакетам сервера отключена.
+    pub local_ctrl: bool,
     steps: u32,
     target: [f64; 3],
     target_rot: [f32; 3],
@@ -150,6 +153,7 @@ impl Entity {
             squid_reset: 0,
             death_at: None,
             crit_seq: (0, 0),
+            local_ctrl: false,
             steps: 0,
             target: pos,
             target_rot: [yaw, pitch, head],
@@ -286,6 +290,10 @@ impl Entity {
 
     /// VANILLA: InterpolationHandler#interpolateTo.
     pub fn set_target(&mut self, pos: Option<[f64; 3]>, rot: Option<(f32, f32)>) {
+        // VANILLA: ClientPacketListener#handleMoveEntity — `!entity.isLocalInstanceAuthoritative()`.
+        if self.local_ctrl {
+            return;
+        }
         // VANILLA: Entity#moveOrInterpolateTo — у снарядов (стрела, жемчуг, снежок…) обработчик
         // интерполяции NO_OP: пакет сервера просто ставит позицию/поворот (setPos/setRot, без сброса
         // xOld), дальше клиент сам считает полёт. Лерп к цели поверх своей физики давал рывки.
@@ -307,6 +315,12 @@ impl Entity {
         self.steps = if direct { 0 } else { LERP_STEPS };
     }
 
+    /// Пассажир: позицию ведёт транспорт (Entity#positionRider), интерполяции нет.
+    pub fn snap_target(&mut self, p: [f64; 3]) {
+        self.target = p;
+        self.steps = 0;
+    }
+
     pub fn target_pos(&self) -> [f64; 3] {
         self.target
     }
@@ -323,6 +337,10 @@ impl Entity {
     /// Один клиентский тик (xOld = x; затем шаг интерполяции).
     pub fn tick(&mut self) {
         self.age = self.age.wrapping_add(1);
+        // Позицию и prev_pos ведёт симуляция главного потока (сетка тиков ходьбы).
+        if self.local_ctrl {
+            return;
+        }
         // VANILLA: PrimedTnt#tick — запал убывает каждый тик (клиент тоже).
         if self.fuse >= 0 {
             self.fuse -= 1;

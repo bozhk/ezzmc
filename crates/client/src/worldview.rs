@@ -241,6 +241,12 @@ pub struct WorldView {
     pub player: crate::physics::Player,
     pub walking: bool,
     tick_acc: f64,
+    /// Игрок сидит на транспорте (set_passengers): ходьба не тикает, шлём только поворот.
+    riding: bool,
+    /// Лодка, которой управляет игрок: id сущности и клиентская симуляция (TODO-206).
+    boat: Option<(i32, crate::boat::BoatSim)>,
+    /// Результат тика лодки для сетевого потока: вёсла, позиция, yaw, on_ground.
+    boat_out: Option<crate::boat::BoatOut>,
     /// VANILLA: GameRenderer#fovModifier / oldFovModifier (сглаживание 0.5 за тик).
     fov_mod: (f32, f32),
     /// Зум по удержанию (клавиша `key.zoom`): цель и текущий множитель FOV (1.0 — без зума).
@@ -958,6 +964,9 @@ impl WorldView {
             digger: crate::dig::Digger::default(),
             walking: std::env::var("EZZMC_FREECAM").map_or(true, |v| v != "1"),
             tick_acc: 0.0,
+            riding: false,
+            boat: None,
+            boat_out: None,
             fov_mod: (1.0, 1.0),
             zoom_held: false,
             zoom_factor: 1.0,
@@ -1639,7 +1648,7 @@ impl WorldView {
     /// Флаги для сетевого потока (`netthread::FLAG_*`): земля, столкновение, спринт, клавиши (player_input).
     fn net_flags(&self) -> u32 {
         use crate::netthread::{
-            FLAG_FLYING, FLAG_HCOL, FLAG_INPUT_SHIFT, FLAG_ON_GROUND, FLAG_SPRINTING,
+            FLAG_FLYING, FLAG_HCOL, FLAG_INPUT_SHIFT, FLAG_ON_GROUND, FLAG_RIDING, FLAG_SPRINTING,
         };
         if !self.walking {
             return 0;
@@ -1665,6 +1674,7 @@ impl WorldView {
             | (u32::from(p.sprinting) * FLAG_SPRINTING)
             | (u32::from(p.flying) * FLAG_FLYING)
             | (u32::from(bits) << FLAG_INPUT_SHIFT)
+            | (u32::from(self.riding) * FLAG_RIDING)
     }
 
     /// Раз в кадр: события сети, постановка в меш, заливка готовых мешей в арену.
@@ -1797,7 +1807,7 @@ impl WorldView {
         }
         self.last_input = input;
         self.tick_acc += dt.min(0.25);
-        let (yaw, pitch) = (self.yaw, self.pitch);
+        let (mut yaw, pitch) = (self.yaw, self.pitch);
         self.player.pitch = pitch;
         let mut n = 0;
         while self.tick_acc >= 0.05 && n < 5 {
@@ -1805,10 +1815,119 @@ impl WorldView {
             n += 1;
             let p = &mut self.player;
             let mut self_fov = None;
-            let ran = self.net.level.lock().ok().and_then(|g| {
-                g.as_ref().map(|l| {
-                    // Мир под игроком ещё не пришёл — стоим (ваниль показывает экран загрузки).
-                    if crate::physics::Collider::has_chunk(
+            let mut riding_now = false;
+            let mut mount_yaw: Option<f32> = None;
+            let was_riding = self.riding;
+            let mut yaw_fix: Option<(f32, f32)> = None;
+            let ran = self.net.level.lock().ok().and_then(|mut g| {
+                g.as_mut().map(|l| {
+                    // VANILLA: AbstractBoat#tick — лодка, где игрок первый пассажир, считается у нас.
+                    let own = l.own_id;
+                    let is_boat = |l: &ezzmc_world::level::Level, v: i32| {
+                        l.entities.map.get(&v).is_some_and(|e| {
+                            let n = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+                                .get(e.ty)
+                                .copied()
+                                .unwrap_or("");
+                            n.ends_with("_boat") || n.ends_with("_raft")
+                        })
+                    };
+                    let ctl = l
+                        .riders
+                        .vehicle_of
+                        .get(&own)
+                        .copied()
+                        .filter(|v| {
+                            l.riders.passengers.get(v).and_then(|p| p.first()) == Some(&own)
+                        })
+                        .filter(|v| is_boat(l, *v));
+                    if let Some((old, _)) = &self.boat {
+                        if Some(*old) != ctl {
+                            if let Some(e) = l.entities.map.get_mut(old) {
+                                e.local_ctrl = false;
+                                e.vel = [0.0; 3];
+                            }
+                            self.boat = None;
+                            self.boat_out = None;
+                        }
+                    }
+                    if let Some(v) = ctl {
+                        if self.boat.is_none() {
+                            if let Some(e) = l.entities.map.get_mut(&v) {
+                                e.local_ctrl = true;
+                                e.vel = [0.0; 3];
+                            }
+                            self.boat = Some((v, crate::boat::BoatSim::default()));
+                        }
+                        let sim = &mut self.boat.as_mut().expect("boat").1;
+                        let body = l.entities.map.get(&v).map(|e| {
+                            let n = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+                                .get(e.ty)
+                                .copied()
+                                .unwrap_or("");
+                            let (w, h) =
+                                ezzmc_world::entity_size::size(n).unwrap_or((1.375, 0.5625));
+                            crate::boat::BoatBody {
+                                pos: e.pos,
+                                vel: e.vel,
+                                yaw: e.yaw,
+                                on_ground: e.on_ground,
+                                width: w,
+                                height: h,
+                            }
+                        });
+                        if let Some(mut body) = body {
+                            let old = (body.pos, body.yaw);
+                            let level: &ezzmc_world::level::Level = l;
+                            let paddle = sim.tick(&mut body, level, &|bb| {
+                                let a = &crate::physics::fluid_accumulate(level, bb)[0];
+                                (a.height, a.cur, a.n)
+                            });
+                            if let Some(e) = l.entities.map.get_mut(&v) {
+                                e.prev_pos = old.0;
+                                e.prev_yaw = old.1;
+                                e.pos = body.pos;
+                                e.yaw = body.yaw;
+                                e.snap_target(body.pos);
+                                e.vel = body.vel;
+                                e.on_ground = body.on_ground;
+                            }
+                            // VANILLA: LocalPlayer#rideTick — ввод ставится после тика лодки.
+                            sim.input = crate::boat::BoatInput {
+                                left: input.left,
+                                right: input.right,
+                                up: input.forward,
+                                down: input.back,
+                            };
+                            yaw_fix = Some((sim.delta_rotation, body.yaw));
+                            self.boat_out = Some((paddle, body.pos, body.yaw, body.on_ground));
+                        }
+                    }
+                    // VANILLA: LocalPlayer#rideTick — deltaMovement=0, позицию ставит транспорт.
+                    let ride = ezzmc_world::entities::player_type()
+                        .and_then(|t| l.ride_position(l.own_id, t));
+                    if let Some(pos) = ride {
+                        riding_now = true;
+                        if !was_riding {
+                            // VANILLA: handleSetEntityPassengersPacket — на лодке взгляд по носу.
+                            let vid = l.riders.vehicle_of.get(&l.own_id).copied().unwrap_or(-1);
+                            if let Some(v) = l.entities.map.get(&vid) {
+                                let name = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+                                    .get(v.ty)
+                                    .copied()
+                                    .unwrap_or("");
+                                if name.ends_with("_boat") || name.ends_with("_raft") {
+                                    mount_yaw = Some(v.yaw);
+                                }
+                            }
+                        }
+                        p.prev_pos = p.pos;
+                        p.pos = pos;
+                        p.vel = [0.0; 3];
+                        p.on_ground = false;
+                        p.sprinting = false;
+                        self_fov = Some(p.fov_target());
+                    } else if crate::physics::Collider::has_chunk(
                         l,
                         p.pos[0].floor() as i32,
                         p.pos[2].floor() as i32,
@@ -1849,6 +1968,31 @@ impl WorldView {
                 })
             });
             let _ = ran;
+            self.riding = riding_now;
+            if let Some((dr, byaw)) = yaw_fix {
+                // VANILLA: AbstractBoat#positionRider — yaw += deltaRotation, затем clampRotation.
+                self.yaw = crate::boat::clamp_passenger_yaw(self.yaw + dr, byaw);
+                yaw = self.yaw;
+            }
+            if riding_now && !was_riding {
+                // VANILLA: handleSetEntityPassengersPacket — подсказка «Нажмите %s, чтобы слезть».
+                use ezzmc_protocol::text::{Component, Content};
+                let mut c = Component::text("");
+                c.content = Content::Translatable {
+                    key: "mount.onboard".into(),
+                    fallback: None,
+                    args: vec![Component {
+                        content: Content::Keybind("key.sneak".into()),
+                        style: Default::default(),
+                        siblings: Vec::new(),
+                    }],
+                };
+                self.chat_in.push((c, None));
+            }
+            if let Some(y) = mount_yaw {
+                self.yaw = y;
+                yaw = y;
+            }
             if self_fov.is_some() {
                 // VANILLA: LocalPlayer#tick — dropSpamThrottler.tick().
                 self.inv.drop_spam = (self.inv.drop_spam - 1).max(0);
@@ -1875,6 +2019,7 @@ impl WorldView {
             }
             // VANILLA: LocalPlayer#sendChanges — один пакет движения на каждый тик физики.
             if self_fov.is_some() && self.have_pos && !self.no_send {
+                self.send_vehicle_tick();
                 self.send_phys_tick(yaw, pitch);
             }
         }
@@ -1899,6 +2044,22 @@ impl WorldView {
             if let Some(l) = g.as_ref() {
                 self.place_target = crate::pick::raycast_t(l, eye, d, false, reach).map(|(t, _)| t);
             }
+        }
+    }
+
+    /// Тик лодки для сетевого потока (paddle_boat перед player_input, move_vehicle после Rot).
+    fn send_vehicle_tick(&mut self) {
+        let gen = self.net.tp_gen.load(Ordering::SeqCst);
+        if gen != self.tp_gen_applied {
+            return;
+        }
+        if let Some((paddle, pos, yaw, on_ground)) = self.boat_out.take() {
+            let _ = self.net.cmd.send(NetCmd::VehicleTick {
+                paddle,
+                pos,
+                yaw,
+                on_ground,
+            });
         }
     }
 

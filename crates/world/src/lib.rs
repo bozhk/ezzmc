@@ -6,6 +6,7 @@ pub mod chunk;
 pub mod chunk_packet;
 pub mod dimension;
 pub mod entities;
+pub mod entity_attach;
 pub mod entity_size;
 pub mod generated;
 pub mod level;
@@ -17,6 +18,7 @@ pub mod palette;
 pub mod piston;
 pub mod precipitation;
 pub mod registry;
+pub mod riding;
 pub mod storage;
 
 #[cfg(test)]

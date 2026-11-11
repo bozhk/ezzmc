@@ -168,6 +168,12 @@ pub struct Level {
     /// Позиции ударов молнии, ждущие звука (клиент забирает `take`).
     pub thunder: Vec<[f64; 3]>,
     pub entities: crate::entities::Entities,
+    /// Пассажиры и транспорт (set_passengers).
+    pub riders: crate::riding::Riders,
+    /// id сущности локального игрока (выставляет сетевой поток).
+    pub own_id: i32,
+    /// Сервер переставил управляемый транспорт (teleport_entity): сетевой поток шлёт move_vehicle.
+    pub vehicle_resync: bool,
     /// VANILLA: ItemPickupParticle — анимация подбора (3 тика).
     pub pickups: Vec<Pickup>,
     /// Места попадания жемчуга Энда (частицы portal); забирает клиент.
@@ -222,6 +228,9 @@ impl Level {
             thunder: Vec::new(),
             entities: Default::default(),
             pickups: Vec::new(),
+            riders: Default::default(),
+            own_id: -1,
+            vehicle_resync: false,
             pearl_hits: Vec::new(),
             death_poofs: Vec::new(),
             sky_flash_time: 0,
@@ -260,6 +269,7 @@ impl Level {
             self.sky_flash_time -= 1;
         }
         self.entities.tick();
+        self.ride_tick();
         {
             let chunks = &self.chunks;
             let solid = |x: f64, y: f64, z: f64| {
@@ -649,7 +659,43 @@ impl Level {
                         }
                     }
                     self.entities.remove(id);
+                    self.riders.removed(id);
                 }
+                LevelEvent::None
+            }
+            "move_vehicle" => {
+                // VANILLA: ClientPacketListener#handleMoveVehicle — управляемый нами транспорт:
+                // absSnapTo при расхождении >1e-5 и ответный ServerboundMoveVehicle всегда.
+                let pos = [r.f64()?, r.f64()?, r.f64()?];
+                let (y_rot, x_rot) = (r.f32()?, r.f32()?);
+                let vid = self.riders.vehicle_of.get(&self.own_id).copied();
+                if let Some(e) = vid
+                    .and_then(|v| self.entities.map.get_mut(&v))
+                    .filter(|e| e.local_ctrl)
+                {
+                    let d = (0..3).map(|i| (pos[i] - e.pos[i]).powi(2)).sum::<f64>();
+                    if d > 1.0e-5 {
+                        e.pos = pos;
+                        e.prev_pos = pos;
+                        e.yaw = y_rot;
+                        e.prev_yaw = y_rot;
+                        e.pitch = x_rot;
+                        e.prev_pitch = x_rot;
+                        e.snap_target(pos);
+                    }
+                    self.vehicle_resync = true;
+                }
+                LevelEvent::None
+            }
+            "set_passengers" => {
+                // VANILLA: ClientboundSetPassengersPacket: id транспорта, VarInt-список пассажиров.
+                let vehicle = r.var_int()?;
+                let n = r.var_int()?;
+                let mut list = Vec::new();
+                for _ in 0..n.clamp(0, 256) {
+                    list.push(r.var_int()?);
+                }
+                self.riders.set(vehicle, list);
                 LevelEvent::None
             }
             "set_entity_data" => {
@@ -842,7 +888,39 @@ impl Level {
                 let (y_rot, x_rot) = (r.f32()?, r.f32()?);
                 let rel = r.i32()?;
                 let on_ground = r.bool()?;
-                if let Some(e) = self.entities.map.get_mut(&id) {
+                if let Some(e) = self.entities.map.get_mut(&id).filter(|e| e.local_ctrl) {
+                    // VANILLA: handleTeleportEntity — управляемый транспорт без относительных XYZ не
+                    // интерполируется (absSnapTo + новая скорость, затем ServerboundMoveVehicle);
+                    // с относительными XYZ ваниль интерполирует, мы просто переставляем.
+                    let p = [0, 1, 2].map(|i| {
+                        if rel & (1 << i) != 0 {
+                            e.pos[i] + pos[i]
+                        } else {
+                            pos[i]
+                        }
+                    });
+                    e.pos = p;
+                    e.prev_pos = p;
+                    e.yaw = if rel & 8 != 0 { e.yaw + y_rot } else { y_rot };
+                    e.prev_yaw = e.yaw;
+                    e.pitch = if rel & 16 != 0 {
+                        e.pitch + x_rot
+                    } else {
+                        x_rot
+                    };
+                    e.prev_pitch = e.pitch;
+                    e.on_ground = on_ground;
+                    for (i, (vel, d)) in e.vel.iter_mut().zip(delta).enumerate() {
+                        *vel = if rel & (1 << (5 + i)) != 0 {
+                            *vel + d
+                        } else {
+                            d
+                        };
+                    }
+                    if rel & 7 == 0 {
+                        self.vehicle_resync = true;
+                    }
+                } else if let Some(e) = self.entities.map.get_mut(&id) {
                     let cur = e.target_pos();
                     let p = [0, 1, 2].map(|i| {
                         if rel & (1 << i) != 0 {

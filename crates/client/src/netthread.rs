@@ -33,6 +33,13 @@ pub enum NetCmd {
         flags: u32,
         gen: u64,
     },
+    /// Тик управляемой лодки (перед PhysTick): вёсла, позиция, yaw, on_ground.
+    VehicleTick {
+        paddle: (bool, bool),
+        pos: [f64; 3],
+        yaw: f32,
+        on_ground: bool,
+    },
     /// СКМ по блоку (key.pickItem): pos, includeData (Ctrl в креативе).
     PickBlock([i32; 3], bool),
     /// Возрождение (экран смерти).
@@ -158,6 +165,8 @@ pub const FLAG_HCOL: u32 = 2;
 pub const FLAG_SPRINTING: u32 = 4;
 pub const FLAG_FLYING: u32 = 8;
 pub const FLAG_INPUT_SHIFT: u32 = 8;
+/// Игрок — пассажир: вместо позиции шлём только поворот (LocalPlayer#sendChanges).
+pub const FLAG_RIDING: u32 = 1 << 16;
 
 pub type SharedPos = Arc<Mutex<Option<[f64; 6]>>>;
 
@@ -404,6 +413,8 @@ fn run(
     let mut last_move_at: Option<std::time::Instant> = None;
     // Действия игрока (копание, слот, свинг, use), ждущие пакета движения тика (см. PhysTick).
     let mut deferred: Vec<NetCmd> = Vec::new();
+    // Тик лодки, ждущий своего PhysTick (порядок VANILLA: paddle_boat, input, Rot, move_vehicle).
+    let mut pending_vehicle: Option<crate::boat::BoatOut> = None;
     let mut view_radius = 12;
     // VANILLA: Minecraft#runTick — тики по фиксированной сетке 50 мс с догоном (не «50 мс после прошлого»),
     // иначе game_time клиента отстаёт от серверного и текстуры дождя/снега прыгают при каждом set_time.
@@ -429,6 +440,12 @@ fn run(
             let mut paced = false;
             match cmd {
                 NetCmd::PlayerAction { .. } => deferred.push(cmd),
+                NetCmd::VehicleTick {
+                    paddle,
+                    pos,
+                    yaw,
+                    on_ground,
+                } => pending_vehicle = Some((paddle, pos, yaw, on_ground)),
                 NetCmd::PhysTick {
                     pos: p3,
                     yaw,
@@ -457,6 +474,11 @@ fn run(
                         let hcol = flags & FLAG_HCOL != 0;
                         let sprinting = flags & FLAG_SPRINTING != 0;
                         let input = (flags >> FLAG_INPUT_SHIFT) as u8;
+                        // VANILLA: AbstractBoat#tick шлёт paddle_boat раньше sendChanges.
+                        let veh = pending_vehicle.take();
+                        if let Some((pd, ..)) = &veh {
+                            h.send_paddle_boat(&mut c, pd.0, pd.1).map_err(|x| e(&x))?;
+                        }
                         // VANILLA: LocalPlayer#sendChanges — player_input, затем abilities, sprint, move.
                         if input != last_input {
                             h.send_player_input(&mut c, input).map_err(|x| e(&x))?;
@@ -474,7 +496,14 @@ fn run(
                         h.player.pos = ezzmc_protocol::types::Vec3::new(p3[0], p3[1], p3[2]);
                         h.player.yaw = yaw;
                         h.player.pitch = pitch;
-                        if let Some(kind) = tracker.step(p3, [yaw, pitch], ground, hcol) {
+                        // VANILLA: LocalPlayer#sendChanges — пассажир шлёт Rot каждый тик, не Pos.
+                        let riding = flags & FLAG_RIDING != 0;
+                        let kind = if riding {
+                            Some(ezzmc_net::play::MoveKind::Rot)
+                        } else {
+                            tracker.step(p3, [yaw, pitch], ground, hcol)
+                        };
+                        if let Some(kind) = kind {
                             // Догон тиков после задержки кадра (несколько PhysTick подряд) шлём
                             // не чаще одного пакета на 50 мс: сервер считает пакеты по своим тикам,
                             // два подряд в один тик дают TickTimer и откат. Тики не теряем, только растягиваем.
@@ -507,6 +536,11 @@ fn run(
                                 tracing::warn!(target: "stall", "DIAG-CMDS send_move {} мс", t_mv.elapsed().as_millis());
                             }
                             last_move_at = Some(std::time::Instant::now());
+                        }
+                        if let Some((_, vp, vy, vg)) = veh {
+                            // VANILLA: LocalPlayer#sendChanges — после Rot игрока: move_vehicle.
+                            h.send_move_vehicle(&mut c, vp, vy, 0.0, vg)
+                                .map_err(|x| e(&x))?;
                         }
                         // VANILLA: один тик = [move] + ClientTickEnd. Пара шлётся вместе, поэтому
                         // TickTimer (Grim) видит не больше одного move между двумя tick_end.
@@ -579,15 +613,26 @@ fn run(
         }
         stall_check("cmds", t_cmds, STALL_LIMIT);
         while std::time::Instant::now() >= next_tick {
+            let mut resync: Option<([f64; 3], f32, f32, bool)> = None;
             let t_lock = std::time::Instant::now();
             if let Ok(mut g) = shared.lock() {
                 stall_check("shared.lock(тик)", t_lock, STALL_LIMIT);
                 if let Some(l) = g.as_mut() {
                     // partial_tick считаем от фактического применения тика: сетевой поток может
                     // запаздывать относительно сетки, и сущности иначе замирают и прыгают.
+                    l.own_id = h.player_id;
                     l.tick_time_at(std::time::Instant::now());
                     crate::itemphys::tick(l);
                     crate::itemphys::tick_falling(l);
+                    // VANILLA: handleMoveVehicle — на каждый move_vehicle сервера отвечаем своим.
+                    if std::mem::take(&mut l.vehicle_resync) {
+                        resync = l
+                            .riders
+                            .vehicle_of
+                            .get(&h.player_id)
+                            .and_then(|v| l.entities.map.get(v))
+                            .map(|v| (v.pos, v.yaw, v.pitch, v.on_ground));
+                    }
                     // VANILLA: Player#getAbsorptionAmount (метаданные #15 игрока).
                     let abs = l.float15.get(&h.player_id).copied().unwrap_or(0.0);
                     if abs != last_abs {
@@ -595,6 +640,10 @@ fn run(
                         let _ = tx.send(NetEvt::Attribute("absorption", abs));
                     }
                 }
+            }
+            if let Some((vp, vy, vx, vg)) = resync {
+                h.send_move_vehicle(&mut c, vp, vy, vx, vg)
+                    .map_err(|x| e(&x))?;
             }
             next_tick += tick_len;
             // Отстали больше чем на секунду (пауза/нагрузка) — не догоняем.

@@ -6,6 +6,7 @@ mod audio;
 mod avatar;
 mod bell;
 mod blocksound;
+mod boat;
 mod charpreview;
 mod chat;
 mod chatnet;

@@ -51,6 +51,10 @@ pub trait Collider {
     fn water_flow(&self, _x: i32, _y: i32, _z: i32) -> [f64; 3] {
         [0.0; 3]
     }
+    /// Вода в блоке — источник (`FluidState#isSource`).
+    fn water_is_source(&self, _x: i32, _y: i32, _z: i32) -> bool {
+        false
+    }
     /// Высота лавы в блоке (как `water_height`).
     fn lava_height(&self, _x: i32, _y: i32, _z: i32) -> f32 {
         0.0
@@ -96,6 +100,9 @@ impl Collider for Level {
     fn water_flow(&self, x: i32, y: i32, z: i32) -> [f64; 3] {
         fluid_flow_of(self, x, y, z, false)
     }
+    fn water_is_source(&self, x: i32, y: i32, z: i32) -> bool {
+        bi::fluid(self.chunks.block(x, y, z)).is_some_and(|f| !f.lava && f.source)
+    }
     fn lava_height(&self, x: i32, y: i32, z: i32) -> f32 {
         fluid_height_of(self, x, y, z, true)
     }
@@ -104,7 +111,7 @@ impl Collider for Level {
     }
 }
 
-fn fluid_height_of(level: &Level, x: i32, y: i32, z: i32, lava: bool) -> f32 {
+pub(crate) fn fluid_height_of(level: &Level, x: i32, y: i32, z: i32, lava: bool) -> f32 {
     let Some(fl) = bi::fluid(level.chunks.block(x, y, z)).filter(|f| f.lava == lava) else {
         return 0.0;
     };
@@ -124,6 +131,22 @@ fn fluid_flow_of(level: &Level, x: i32, y: i32, z: i32, lava: bool) -> [f64; 3] 
 /// VANILLA: EntityFluidInteraction#update для произвольного бокса: (высота, поток·0.014/0.0023333
 /// усреднённый) отдельно для воды и лавы. Возвращает `[(height, push); 2]` (вода, лава).
 pub fn fluid_interaction(level: &Level, b: [f64; 6]) -> [(f64, [f64; 3]); 2] {
+    let acc = fluid_accumulate(level, b);
+    let push = |a: &FluidAcc, scale: f64| -> [f64; 3] {
+        if a.n == 0 || len_sq(a.cur) < f64::from(1.0e-5f32) {
+            return [0.0; 3];
+        }
+        let k = scale / f64::from(a.n);
+        a.cur.map(|c| c * k)
+    };
+    [
+        (acc[0].height, push(&acc[0], 0.014)),
+        (acc[1].height, push(&acc[1], 0.007 / 3.0)),
+    ]
+}
+
+/// VANILLA: EntityFluidInteraction#update — высота и накопленное течение (вода, лава) для бокса.
+pub(crate) fn fluid_accumulate(level: &Level, b: [f64; 6]) -> [FluidAcc; 2] {
     let d = 0.001;
     let bx = [b[0] + d, b[1] + d, b[2] + d, b[3] - d, b[4] - d, b[5] - d];
     let lo = [
@@ -164,17 +187,7 @@ pub fn fluid_interaction(level: &Level, b: [f64; 6]) -> [(f64, [f64; 3]); 2] {
             }
         }
     }
-    let push = |a: &FluidAcc, scale: f64| -> [f64; 3] {
-        if a.n == 0 || len_sq(a.cur) < f64::from(1.0e-5f32) {
-            return [0.0; 3];
-        }
-        let k = scale / f64::from(a.n);
-        a.cur.map(|c| c * k)
-    };
-    [
-        (acc[0].height, push(&acc[0], 0.014)),
-        (acc[1].height, push(&acc[1], 0.007 / 3.0)),
-    ]
+    acc
 }
 
 /// Состояние клавиш на тик.
@@ -1433,11 +1446,11 @@ pub struct EffectLevels {
 }
 
 #[derive(Default)]
-struct FluidAcc {
-    height: f64,
+pub(crate) struct FluidAcc {
+    pub(crate) height: f64,
     cur_h: f64,
-    cur: [f64; 3],
-    n: u32,
+    pub(crate) cur: [f64; 3],
+    pub(crate) n: u32,
 }
 
 fn mth_equal(a: f64, b: f64) -> bool {
@@ -1462,7 +1475,7 @@ fn is_horizontal_collision_minor(input: (f32, f32, f32), movement: [f64; 2]) -> 
     (dot / (a2 * m2).sqrt()).acos() < 0.139_626_34
 }
 
-fn len_sq(v: [f64; 3]) -> f64 {
+pub(crate) fn len_sq(v: [f64; 3]) -> f64 {
     v[0] * v[0] + v[1] * v[1] + v[2] * v[2]
 }
 
@@ -1496,7 +1509,7 @@ pub(crate) fn expand_towards(b: [f64; 6], d: [f64; 3]) -> [f64; 6] {
     r
 }
 
-fn overlaps(a: &[f64; 6], b: &[f64; 6]) -> bool {
+pub(crate) fn overlaps(a: &[f64; 6], b: &[f64; 6]) -> bool {
     a[0] < b[3] && a[3] > b[0] && a[1] < b[4] && a[4] > b[1] && a[2] < b[5] && a[5] > b[2]
 }
 
@@ -1628,7 +1641,7 @@ fn jump_factor_of(name: &str) -> f32 {
 }
 
 /// VANILLA: Entity#getBlockSpeedFactor.
-fn block_speed_factor(w: &dyn Collider, p: [f64; 3]) -> f32 {
+pub(crate) fn block_speed_factor(w: &dyn Collider, p: [f64; 3]) -> f32 {
     let h = block_pos(p);
     let n = w.name(h[0], h[1], h[2]);
     let here = speed_factor_of(n);

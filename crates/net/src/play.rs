@@ -465,6 +465,35 @@ impl PlayHandler {
         conn.send(self.sid(name)?, &w.buf)
     }
 
+    /// VANILLA: ServerboundPaddleBoatPacket(left, right).
+    pub fn send_paddle_boat(
+        &self,
+        conn: &mut Connection,
+        left: bool,
+        right: bool,
+    ) -> NetResult<()> {
+        conn.send(self.sid("paddle_boat")?, &[u8::from(left), u8::from(right)])
+    }
+
+    /// VANILLA: ServerboundMoveVehiclePacket(x, y, z, yRot, xRot, onGround).
+    pub fn send_move_vehicle(
+        &self,
+        conn: &mut Connection,
+        pos: [f64; 3],
+        yaw: f32,
+        pitch: f32,
+        on_ground: bool,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.f64(pos[0])
+            .f64(pos[1])
+            .f64(pos[2])
+            .f32(yaw)
+            .f32(pitch)
+            .u8(u8::from(on_ground));
+        conn.send(self.sid("move_vehicle")?, &w.buf)
+    }
+
     /// VANILLA: ServerboundPlayerInputPacket (байт флагов `input_bits`).
     pub fn send_player_input(&self, conn: &mut Connection, bits: u8) -> NetResult<()> {
         conn.send(self.sid("player_input")?, &[bits])
