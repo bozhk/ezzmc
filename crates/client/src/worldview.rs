@@ -1936,7 +1936,16 @@ impl WorldView {
                                     .unwrap_or("");
                                 n.ends_with("_boat") || n.ends_with("_raft")
                             })
-                            .map(|v| v.yaw);
+                            .map(|v| {
+                                // VANILLA: рендер-yaw лодки по partialTick; чужая лодка (интерполяция
+                                // сервера) иначе клэмпит камеру ступеньками 20 Гц.
+                                if v.local_ctrl {
+                                    v.yaw
+                                } else {
+                                    let d = (v.yaw - v.prev_yaw + 180.0).rem_euclid(360.0) - 180.0;
+                                    v.prev_yaw + d * l.partial_tick()
+                                }
+                            });
                         if !was_riding {
                             // VANILLA: handleSetEntityPassengersPacket — на лодке взгляд по носу.
                             let vid = l.riders.vehicle_of.get(&l.own_id).copied().unwrap_or(-1);
