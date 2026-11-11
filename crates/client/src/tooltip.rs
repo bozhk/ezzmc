@@ -996,6 +996,7 @@ pub fn draw_colored(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod durability_tests {
     use super::*;
 

@@ -208,6 +208,7 @@ pub fn parse_remove(body: &[u8], own_id: i32) -> Option<i32> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

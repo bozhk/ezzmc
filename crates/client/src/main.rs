@@ -826,19 +826,17 @@ impl App {
             }
             return;
         }
-        let Some(v) = &self.view else { return };
+        let Some(v) = &mut self.view else { return };
         let lay = invscreen::layout(&v.inv);
         let Some(slot) = lay.slot_at(gw, gh, mx, my) else {
             return;
         };
-        let cmd = if let Some(b) = swap_btn {
-            invscreen::click_cmd(&v.inv, slot as i16, b, invscreen::SWAP)
+        // VANILLA: предсказание + заявка изменённых слотов (как в клике мышью).
+        if let Some(b) = swap_btn {
+            v.click_slot(slot as i16, b, invscreen::SWAP);
         } else if drop {
-            invscreen::click_cmd(&v.inv, slot as i16, i8::from(ctrl), invscreen::THROW)
-        } else {
-            return;
-        };
-        v.send(cmd);
+            v.click_slot(slot as i16, i8::from(ctrl), invscreen::THROW);
+        }
     }
 
     /// Записывает привязки клавиш в options.txt (`key_<name>`).

@@ -259,6 +259,32 @@ fn stack_max(s: &ItemStack) -> i32 {
         .map_or(64, |n| crate::itemdata::max_stack(n))
 }
 
+/// Предмет, который quick-move может отправить в слот брони/второй руки (по имени; запасной путь — сервер).
+fn is_equippable(s: &ItemStack) -> bool {
+    let name = ezzmc_protocol::generated::r26_3::ITEM
+        .get(s.item as usize)
+        .copied()
+        .unwrap_or("");
+    [
+        "_helmet",
+        "_chestplate",
+        "_leggings",
+        "_boots",
+        "_head",
+        "_skull",
+        "_banner",
+    ]
+    .iter()
+    .any(|p| name.ends_with(p))
+        || matches!(
+            name,
+            "elytra" | "shield" | "carved_pumpkin" | "totem_of_undying" | "saddle" | "wolf_armor"
+        )
+        || name.ends_with("_harness")
+        || name.ends_with("_horse_armor")
+        || name.ends_with("_nautilus_armor")
+}
+
 fn same_item(a: &ItemStack, b: &ItemStack) -> bool {
     a.item == b.item && a.patch == b.patch
 }
@@ -306,12 +332,141 @@ impl Inventory {
         }
         match mode {
             0 => self.predict_pickup(i, button),
+            1 => self.predict_quick_move(i),
+            2 => self.predict_swap(i, button),
+            4 => self.predict_throw(i, button),
             6 => self.predict_pickup_all(),
             _ => {}
         }
         if open {
             self.mirror_player_slots();
         }
+    }
+
+    /// Меню контейнера, где все слоты контейнера принимают любые предметы (ChestMenu-подобные).
+    fn plain_container(&self) -> bool {
+        self.open.as_ref().is_some_and(|o| {
+            let name = ezzmc_protocol::generated::r26_3::MENU
+                .get(o.menu as usize)
+                .copied()
+                .unwrap_or("");
+            name.starts_with("generic_9x") || name == "generic_3x3" || name == "hopper"
+        })
+    }
+
+    /// Слот, из которого/в который можно предсказывать без знания правил меню (mayPlace/mayPickup).
+    fn free_slot(&self, i: usize) -> bool {
+        match &self.open {
+            None => (1..=4).contains(&i) || (MAIN_START..=OFFHAND).contains(&i),
+            Some(o) => {
+                let n = o.slots.len();
+                i < n && (self.plain_container() || i + 36 >= n)
+            }
+        }
+    }
+
+    /// VANILLA: AbstractContainerMenu#doClick SWAP (кнопка 0–8 хотбар, 40 вторая рука).
+    fn predict_swap(&mut self, i: usize, button: i8) {
+        let open = self.open.is_some();
+        let n = self.menu_slots().len();
+        let other = match button {
+            0..=8 if open => n.saturating_sub(9) + button as usize,
+            0..=8 => HOTBAR_START + button as usize,
+            40 if !open => OFFHAND,
+            _ => return,
+        };
+        if other == i || other >= n || !self.free_slot(i) || !self.free_slot(other) {
+            return;
+        }
+        let slots = self.menu_slots_mut();
+        // Слот-источник с переполненным (больше max) стеком или чужим maxStackSize — на сервер.
+        slots.swap(i, other);
+    }
+
+    /// VANILLA: AbstractContainerMenu#doClick THROW (0 — один предмет, 1 — весь стек, Ctrl+Q).
+    fn predict_throw(&mut self, i: usize, button: i8) {
+        if self.cursor.is_some() || !self.free_slot(i) {
+            return;
+        }
+        let Some(cell) = self.menu_slots_mut().get_mut(i) else {
+            return;
+        };
+        let Some(s) = cell.as_mut() else { return };
+        if button == 0 && s.count > 1 {
+            s.count -= 1;
+        } else {
+            *cell = None;
+        }
+    }
+
+    /// VANILLA: AbstractContainerMenu#moveItemStackTo (сперва слияние, затем пустые слоты).
+    fn move_stack_to(&mut self, stack: &mut ItemStack, start: usize, end: usize, reverse: bool) {
+        let max = stack_max(stack);
+        let slots = self.menu_slots_mut();
+        let end = end.min(slots.len());
+        let order: Vec<usize> = if reverse {
+            (start..end).rev().collect()
+        } else {
+            (start..end).collect()
+        };
+        if max > 1 {
+            for &k in &order {
+                if stack.count <= 0 {
+                    return;
+                }
+                if let Some(t) = slots[k].as_mut() {
+                    if same_item(t, stack) {
+                        let mv = (max - t.count).min(stack.count).max(0);
+                        t.count += mv;
+                        stack.count -= mv;
+                    }
+                }
+            }
+        }
+        for &k in &order {
+            if stack.count <= 0 {
+                return;
+            }
+            if slots[k].is_none() {
+                let mut t = stack.clone();
+                t.count = stack.count.min(max);
+                stack.count -= t.count;
+                slots[k] = Some(t);
+            }
+        }
+    }
+
+    /// VANILLA: AbstractContainerMenu#quickMoveStack для ChestMenu и InventoryMenu (основной↔хотбар).
+    /// Меню с особыми правилами (печь, верстак, броня…) — не предсказываем, ответит сервер.
+    fn predict_quick_move(&mut self, i: usize) {
+        let n = self.menu_slots().len();
+        let Some(Some(src)) = self.menu_slots().get(i).cloned() else {
+            return;
+        };
+        if self.open.is_some() {
+            if !self.plain_container() || n < 36 {
+                return;
+            }
+            let mut rest = src;
+            if i < n - 36 {
+                self.move_stack_to(&mut rest, n - 36, n, true);
+            } else {
+                self.move_stack_to(&mut rest, 0, n - 36, false);
+            }
+            self.menu_slots_mut()[i] = (rest.count > 0).then_some(rest);
+            return;
+        }
+        // InventoryMenu: броня/щит/результат/сетка и экипируемое — на сервер.
+        if !(MAIN_START..OFFHAND).contains(&i) || is_equippable(&src) {
+            return;
+        }
+        let mut rest = src;
+        if i < HOTBAR_START {
+            self.move_stack_to(&mut rest, HOTBAR_START, OFFHAND, false);
+        } else {
+            self.move_stack_to(&mut rest, MAIN_START, HOTBAR_START, false);
+        }
+        self.slots[i] = (rest.count > 0).then_some(rest);
     }
 
     fn predict_pickup(&mut self, i: usize, button: i8) {
@@ -501,5 +656,48 @@ mod tests {
         );
         assert!(inv.held().is_none());
         assert_eq!(menu_slot_for_inventory_index(39), Some(5));
+    }
+
+    fn st(item: u32, count: i32) -> Slot {
+        Some(ItemStack {
+            item,
+            count,
+            patch: Default::default(),
+        })
+    }
+
+    fn player_inv() -> Inventory {
+        Inventory::default()
+    }
+
+    #[test]
+    fn swap_hotbar_and_throw() {
+        let mut inv = player_inv();
+        inv.slots[10] = st(1, 5);
+        inv.slots[HOTBAR_START + 2] = st(2, 3);
+        inv.predict_click(10, 2, 2);
+        assert_eq!(inv.slots[10], st(2, 3));
+        assert_eq!(inv.slots[HOTBAR_START + 2], st(1, 5));
+        inv.predict_click(10, 0, 4);
+        assert_eq!(inv.slots[10], st(2, 2));
+        inv.predict_click(10, 1, 4);
+        assert!(inv.slots[10].is_none());
+    }
+
+    #[test]
+    fn quick_move_main_to_hotbar_merges() {
+        let mut inv = player_inv();
+        inv.slots[12] = st(1, 40);
+        inv.slots[HOTBAR_START] = st(1, 40);
+        inv.predict_click(12, 0, 1);
+        let max = stack_max(inv.slots[HOTBAR_START].as_ref().unwrap());
+        let total = inv.slots[12].as_ref().map_or(0, |s| s.count)
+            + inv.slots[HOTBAR_START..OFFHAND]
+                .iter()
+                .flatten()
+                .map(|s| s.count)
+                .sum::<i32>();
+        assert_eq!(total, 80);
+        assert_eq!(inv.slots[HOTBAR_START].as_ref().unwrap().count, max.min(80));
     }
 }

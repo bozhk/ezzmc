@@ -1,7 +1,6 @@
 //! Экран инвентаря/контейнера: раскладка слотов, отрисовка, клики.
 //! VANILLA: InventoryScreen / ContainerScreen (generic_9xN) / AbstractContainerScreen#mouseClicked.
-//! Предсказания нет: клик уходит серверу, он присылает полное состояние (TODO-232: слияние стеков
-//! требует реестра предметов 229, хэши компонентов — HashedPatchMap).
+//! Клики идут через `WorldView::click_slot`: предсказание (`Inventory::predict_click`) + заявка слотов.
 use crate::hud;
 use crate::inventory::Inventory;
 use crate::netthread::NetCmd;

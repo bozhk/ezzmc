@@ -210,6 +210,7 @@ pub fn draw(p: &mut ezzmc_render::gui::GuiPainter, icons: &[Icon]) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
