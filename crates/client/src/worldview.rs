@@ -2080,6 +2080,24 @@ impl WorldView {
         if n == 5 {
             self.tick_acc = 0.0;
         }
+        // Каждый кадр, а не только в тик: нос чужой лодки по partialTick (клэмп камеры без ступенек 20 Гц).
+        if self.riding && self.ride_boat_yaw.is_some() {
+            let smooth = self.net.level.lock().ok().and_then(|g| {
+                let l = g.as_ref()?;
+                let v = l
+                    .riders
+                    .vehicle_of
+                    .get(&l.own_id)
+                    .and_then(|v| l.entities.map.get(v))
+                    .filter(|v| !v.local_ctrl)?;
+                let d = (v.yaw - v.prev_yaw + 180.0).rem_euclid(360.0) - 180.0;
+                Some(v.prev_yaw + d * l.partial_tick())
+            });
+            if let Some(by) = smooth {
+                self.ride_boat_yaw = Some(by);
+                self.yaw = crate::boat::clamp_passenger_yaw(self.yaw, by);
+            }
+        }
         self.cam = self.player.eye_lerp(self.tick_acc / 0.05);
         // VANILLA: Camera → getViewYRot(partialTick): поворот лодки за тик размазываем по кадрам.
         self.render_yaw_off = if self.riding && self.ride_boat_yaw.is_some() {
