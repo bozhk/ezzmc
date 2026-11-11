@@ -33,6 +33,8 @@ pub struct Entity {
     pub swell_dir: i32,
     pub bool17: bool,
     pub byte18: u8,
+    /// Entity#DATA_NO_GRAVITY (метаданные #5, boolean).
+    pub no_gravity: bool,
     /// VarInt-метаданные мобов (индекс ≥16): INT и реестровые холдеры (вариант кота/лягушки…).
     pub ints: Vec<(u8, i32)>,
     /// Метаданные #16 типа BYTE (Bat#DATA_ID_FLAGS: бит 1 = висит).
@@ -128,6 +130,7 @@ impl Entity {
             swell_dir: 0,
             bool17: false,
             byte18: 0,
+            no_gravity: false,
             ints: Vec::new(),
             byte16: 0,
             item: None,

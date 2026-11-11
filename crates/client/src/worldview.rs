@@ -1806,11 +1806,12 @@ impl WorldView {
             return;
         }
         self.last_input = input;
-        self.tick_acc += dt.min(0.25);
+        // VANILLA: Minecraft#runTick, не более 10 тиков за кадр (0.5 с) — иначе при хитче теряются тики езды.
+        self.tick_acc += dt.min(0.5);
         let (mut yaw, pitch) = (self.yaw, self.pitch);
         self.player.pitch = pitch;
         let mut n = 0;
-        while self.tick_acc >= 0.05 && n < 5 {
+        while self.tick_acc >= 0.05 && n < 10 {
             self.tick_acc -= 0.05;
             n += 1;
             let p = &mut self.player;
@@ -1872,6 +1873,7 @@ impl WorldView {
                                 vel: e.vel,
                                 yaw: e.yaw,
                                 on_ground: e.on_ground,
+                                no_gravity: e.no_gravity,
                                 width: w,
                                 height: h,
                             }

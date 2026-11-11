@@ -695,6 +695,7 @@ impl Level {
                 for _ in 0..n.clamp(0, 256) {
                     list.push(r.var_int()?);
                 }
+                tracing::debug!(target: "dbg", "set_passengers vehicle={vehicle} list={list:?} own={}", self.own_id);
                 self.riders.set(vehicle, list);
                 LevelEvent::None
             }
@@ -806,6 +807,11 @@ impl Level {
                                     } else {
                                         e.bool17 = v != 0;
                                     }
+                                }
+                            }
+                            if idx == 5 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    e.no_gravity = v != 0;
                                 }
                             }
                             // AbstractArrow#IN_GROUND (#10).

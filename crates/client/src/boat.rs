@@ -53,6 +53,8 @@ pub struct BoatBody {
     pub vel: [f64; 3],
     pub yaw: f32,
     pub on_ground: bool,
+    /// Entity#isNoGravity.
+    pub no_gravity: bool,
     /// EntityDimensions (float).
     pub width: f32,
     pub height: f32,
@@ -248,7 +250,8 @@ impl BoatSim {
 
     fn float_boat(&mut self, b: &mut BoatBody, w: &dyn Collider) {
         let status = self.status.unwrap_or(Status::InAir);
-        let mut vspeed = -0.04;
+        // VANILLA: AbstractBoat#floatBoat — isNoGravity() ? 0 : -0.04.
+        let mut vspeed = if b.no_gravity { 0.0 } else { -0.04 };
         let mut buoyancy = 0.0f64;
         let inv_friction: f32;
         if self.old_status == Some(Status::InAir)
@@ -449,6 +452,7 @@ mod tests {
             vel: [0.0; 3],
             yaw: 0.0,
             on_ground: false,
+            no_gravity: false,
             width: 1.375,
             height: 0.5625,
         }
@@ -479,6 +483,22 @@ mod tests {
         // Плавает у поверхности воды (верх воды 0 - 1/9).
         assert!(b.pos[1] > -0.6 && b.pos[1] < 0.1, "y={}", b.pos[1]);
         assert_eq!(s.status, Some(Status::InWater));
+    }
+
+    #[test]
+    fn no_gravity_boat_hangs_in_air() {
+        let w = World {
+            floor: -3,
+            water_top: 0,
+            ice: false,
+        };
+        let mut b = body(3.0);
+        b.no_gravity = true;
+        let mut s = BoatSim::default();
+        for _ in 0..40 {
+            s.tick(&mut b, &w, &no_fluid());
+        }
+        assert!((b.pos[1] - 3.0).abs() < 1.0e-9, "y={}", b.pos[1]);
     }
 
     #[test]
@@ -553,6 +573,90 @@ mod tests {
             "{}",
             b.pos[0]
         );
+    }
+
+    #[test]
+    fn turning_changes_yaw_and_decays() {
+        let w = World {
+            floor: -3,
+            water_top: 0,
+            ice: false,
+        };
+        let mut b = body(-0.4);
+        let mut s = BoatSim::default();
+        s.input.right = true;
+        for _ in 0..5 {
+            s.tick(&mut b, &w, &no_fluid());
+        }
+        assert!(b.yaw > 0.0, "yaw={}", b.yaw);
+        s.input = BoatInput::default();
+        let (y0, d0) = (b.yaw, s.delta_rotation);
+        s.tick(&mut b, &w, &no_fluid());
+        // Без ввода deltaRotation гасится трением, yaw не стоит на месте.
+        assert!(s.delta_rotation.abs() < d0.abs());
+        assert!(b.yaw != y0 || d0 == 0.0);
+    }
+
+    #[test]
+    fn reverse_is_slower_than_forward() {
+        let w = World {
+            floor: -3,
+            water_top: 0,
+            ice: false,
+        };
+        let run = |fwd: bool| {
+            let mut b = body(-0.4);
+            let mut s = BoatSim::default();
+            s.input.up = fwd;
+            s.input.down = !fwd;
+            for _ in 0..30 {
+                s.tick(&mut b, &w, &no_fluid());
+            }
+            b.pos[2] - 0.5
+        };
+        let (f, r) = (run(true), run(false));
+        assert!(f > 0.0 && r < 0.0 && f.abs() > r.abs() * 3.0, "{f} {r}");
+    }
+
+    #[test]
+    fn paddle_state_follows_input() {
+        let w = World {
+            floor: -3,
+            water_top: 0,
+            ice: false,
+        };
+        let mut b = body(-0.4);
+        let mut s = BoatSim::default();
+        s.input.right = true;
+        assert_eq!(s.tick(&mut b, &w, &no_fluid()), (true, false));
+        s.input = BoatInput {
+            up: true,
+            ..Default::default()
+        };
+        assert_eq!(s.tick(&mut b, &w, &no_fluid()), (true, true));
+        s.input = BoatInput {
+            left: true,
+            right: true,
+            ..Default::default()
+        };
+        assert_eq!(s.tick(&mut b, &w, &no_fluid()), (false, false));
+    }
+
+    #[test]
+    fn submerged_boat_sinks_to_floor() {
+        // VANILLA: UNDER_WATER — гравитация сильнее плавучести (сервер через 60 тиков высадит пассажира).
+        let w = World {
+            floor: -3,
+            water_top: 3,
+            ice: false,
+        };
+        let mut b = body(-1.0);
+        let mut s = BoatSim::default();
+        for _ in 0..300 {
+            s.tick(&mut b, &w, &no_fluid());
+        }
+        assert!((b.pos[1] + 3.0).abs() < 1.0e-3, "y={}", b.pos[1]);
+        assert_eq!(s.status, Some(Status::UnderWater));
     }
 
     #[test]

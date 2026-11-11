@@ -497,7 +497,13 @@ fn run(
                         h.player.yaw = yaw;
                         h.player.pitch = pitch;
                         // VANILLA: LocalPlayer#sendChanges — пассажир шлёт Rot каждый тик, не Pos.
-                        let riding = flags & FLAG_RIDING != 0;
+                        // Тик мог быть посчитан до разбора set_passengers, а понг уже ушёл: сверяем с уровнем,
+                        // иначе Grim видит Pos от пассажира (Simulation).
+                        let riding = flags & FLAG_RIDING != 0
+                            || shared.lock().is_ok_and(|g| {
+                                g.as_ref()
+                                    .is_some_and(|l| l.riders.vehicle_of.contains_key(&h.player_id))
+                            });
                         let kind = if riding {
                             Some(ezzmc_net::play::MoveKind::Rot)
                         } else {
@@ -522,7 +528,8 @@ fn run(
                             }
                             tracing::debug!(
                                 target: "dbg",
-                                "send_move pos={:.3?} ground={} horiz_col={}",
+                                "send_move kind={:?} pos={:.3?} ground={} horiz_col={}",
+                                kind,
                                 p3,
                                 ground,
                                 hcol
@@ -539,6 +546,7 @@ fn run(
                         }
                         if let Some((_, vp, vy, vg)) = veh {
                             // VANILLA: LocalPlayer#sendChanges — после Rot игрока: move_vehicle.
+                            tracing::debug!(target: "dbg", "move_vehicle tick pos={vp:.3?} yaw={vy:.1} g={vg}");
                             h.send_move_vehicle(&mut c, vp, vy, 0.0, vg)
                                 .map_err(|x| e(&x))?;
                         }
@@ -642,6 +650,7 @@ fn run(
                 }
             }
             if let Some((vp, vy, vx, vg)) = resync {
+                tracing::debug!(target: "dbg", "move_vehicle resync pos={vp:.3?} yaw={vy:.1} g={vg}");
                 h.send_move_vehicle(&mut c, vp, vy, vx, vg)
                     .map_err(|x| e(&x))?;
             }
