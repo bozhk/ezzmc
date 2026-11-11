@@ -4221,3 +4221,207 @@ pub fn tadpole_mesh() -> Model {
 pub fn tadpole_anim(m: &mut Model, age: f32) {
     set_y(m, "tail", -0.25 * (0.3 * age).sin());
 }
+
+/// VANILLA: BoatModel#createBoatModel / createChestBoatModel, RaftModel#createRaftModel /
+/// createChestRaftModel (128×64, с сундуком 128×128). Модель в пространстве рендерера лодки.
+pub fn boat_mesh(raft: bool, chest: bool) -> Model {
+    let mut m = Model::new([128.0, if chest { 128.0 } else { 64.0 }]);
+    let paddle = |tex: [f32; 2], blade_x: f32| {
+        [
+            BoxDef::new(tex, [-1.0, 0.0, -5.0], [2.0, 2.0, 18.0]),
+            BoxDef::new(tex, [blade_x, -3.0, 8.0], [1.0, 6.0, 7.0]),
+        ]
+    };
+    let paddle_y = if raft { -4.0 } else { -5.0 };
+    if raft {
+        m.add(
+            "bottom",
+            None,
+            Pose {
+                x_rot: 1.5708,
+                ..Pose::offset(0.0, -2.1, 1.0)
+            },
+            &[
+                BoxDef::new([0.0, 0.0], [-14.0, -11.0, -4.0], [28.0, 20.0, 4.0]),
+                BoxDef::new([0.0, 0.0], [-14.0, -9.0, -8.0], [28.0, 16.0, 4.0]),
+            ],
+        );
+    } else {
+        let sides = |name, tex, org: [f32; 3], dim: [f32; 3], pose: Pose, m: &mut Model| {
+            m.add(name, None, pose, &[BoxDef::new(tex, org, dim)]);
+        };
+        sides(
+            "bottom",
+            [0.0, 0.0],
+            [-14.0, -9.0, -3.0],
+            [28.0, 16.0, 3.0],
+            Pose {
+                x_rot: HALF_PI,
+                ..Pose::offset(0.0, 3.0, 1.0)
+            },
+            &mut m,
+        );
+        sides(
+            "back",
+            [0.0, 19.0],
+            [-13.0, -7.0, -1.0],
+            [18.0, 6.0, 2.0],
+            Pose {
+                y_rot: PI * 3.0 / 2.0,
+                ..Pose::offset(-15.0, 4.0, 4.0)
+            },
+            &mut m,
+        );
+        sides(
+            "front",
+            [0.0, 27.0],
+            [-8.0, -7.0, -1.0],
+            [16.0, 6.0, 2.0],
+            Pose {
+                y_rot: HALF_PI,
+                ..Pose::offset(15.0, 4.0, 0.0)
+            },
+            &mut m,
+        );
+        sides(
+            "right",
+            [0.0, 35.0],
+            [-14.0, -7.0, -1.0],
+            [28.0, 6.0, 2.0],
+            Pose {
+                y_rot: PI,
+                ..Pose::offset(0.0, 4.0, -9.0)
+            },
+            &mut m,
+        );
+        sides(
+            "left",
+            [0.0, 43.0],
+            [-14.0, -7.0, -1.0],
+            [28.0, 6.0, 2.0],
+            Pose::offset(0.0, 4.0, 9.0),
+            &mut m,
+        );
+    }
+    let (lt, rt) = if raft {
+        ([0.0, 24.0], [40.0, 24.0])
+    } else {
+        ([62.0, 0.0], [62.0, 20.0])
+    };
+    m.add(
+        "left_paddle",
+        None,
+        Pose {
+            z_rot: PI / 16.0,
+            ..Pose::offset(3.0, paddle_y, 9.0)
+        },
+        &paddle(lt, -1.001),
+    );
+    m.add(
+        "right_paddle",
+        None,
+        Pose {
+            y_rot: PI,
+            z_rot: PI / 16.0,
+            ..Pose::offset(3.0, paddle_y, -9.0)
+        },
+        &paddle(rt, 0.001),
+    );
+    if chest {
+        let dy = if raft { -5.1 } else { 0.0 };
+        let c = |name, tex: [f32; 2], dim: [f32; 3], org: [f32; 3], m: &mut Model| {
+            m.add(
+                name,
+                None,
+                Pose {
+                    y_rot: -HALF_PI,
+                    ..Pose::offset(org[0], org[1] + dy, org[2])
+                },
+                &[BoxDef::new(tex, [0.0; 3], dim)],
+            );
+        };
+        c(
+            "chest_bottom",
+            [0.0, 76.0],
+            [12.0, 8.0, 12.0],
+            [-2.0, -5.0, -6.0],
+            &mut m,
+        );
+        c(
+            "chest_lid",
+            [0.0, 59.0],
+            [12.0, 4.0, 12.0],
+            [-2.0, -9.0, -6.0],
+            &mut m,
+        );
+        c(
+            "chest_lock",
+            [0.0, 59.0],
+            [2.0, 4.0, 1.0],
+            [-1.0, -6.0, -1.0],
+            &mut m,
+        );
+    }
+    m
+}
+
+/// VANILLA: AbstractBoatModel#setupAnim/animatePaddle (время гребли левым/правым веслом).
+pub fn boat_anim(m: &mut Model, left: f32, right: f32) {
+    let clamped_lerp = |t: f32, a: f32, b: f32| a + (b - a) * t.clamp(0.0, 1.0);
+    for (side, time) in [(0usize, left), (1, right)] {
+        let name = if side == 0 {
+            "left_paddle"
+        } else {
+            "right_paddle"
+        };
+        let Some(i) = m.index(name) else { continue };
+        let x = clamped_lerp((-time).sin() * 0.5 + 0.5, -PI / 3.0, -PI / 12.0);
+        let mut y = clamped_lerp((-time + 1.0).sin() * 0.5 + 0.5, -PI / 4.0, PI / 4.0);
+        if side == 1 {
+            y = PI - y;
+        }
+        m.parts[i].pose.x_rot = x;
+        m.parts[i].pose.y_rot = y;
+    }
+}
+
+/// VANILLA: BoatModel#createWaterPatch — только глубина (RenderTypes#waterMask), текстура не нужна.
+pub fn boat_water_patch() -> Model {
+    let mut m = Model::new([64.0, 32.0]);
+    m.add(
+        "water_patch",
+        None,
+        Pose {
+            x_rot: HALF_PI,
+            ..Pose::offset(0.0, -3.0, 1.0)
+        },
+        &[BoxDef::new(
+            [0.0, 0.0],
+            [-14.0, -9.0, -3.0],
+            [28.0, 16.0, 3.0],
+        )],
+    );
+    m
+}
+
+#[cfg(test)]
+mod boat_tests {
+    use super::*;
+
+    #[test]
+    fn boat_parts_and_paddle_anim() {
+        assert_eq!(boat_mesh(false, false).parts.len(), 7);
+        assert_eq!(boat_mesh(true, false).parts.len(), 3);
+        assert_eq!(boat_mesh(false, true).parts.len(), 10);
+        let mut m = boat_mesh(false, false);
+        boat_anim(&mut m, 0.0, 0.0);
+        let (l, r) = (
+            m.index("left_paddle").unwrap_or(0),
+            m.index("right_paddle").unwrap_or(0),
+        );
+        // time=0: x = lerp(0.5, −π/3, −π/12), y_left = lerp(sin(1)/2+0.5, −π/4, π/4).
+        let x = -PI / 3.0 + (PI / 3.0 - PI / 12.0) * 0.5;
+        assert!((m.parts[l].pose.x_rot - x).abs() < 1e-5);
+        assert!((m.parts[l].pose.y_rot + m.parts[r].pose.y_rot - PI).abs() < 1e-5);
+    }
+}

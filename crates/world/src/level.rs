@@ -814,6 +814,12 @@ impl Level {
                                     e.no_gravity = v != 0;
                                 }
                             }
+                            // VANILLA: AbstractBoat#DATA_ID_PADDLE_LEFT/RIGHT (Entity 0-7, VehicleEntity 8-10).
+                            if idx == 11 || idx == 12 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    e.paddle[usize::from(idx - 11)] = v != 0;
+                                }
+                            }
                             // AbstractArrow#IN_GROUND (#10).
                             if idx == 10 {
                                 if let Some(e) =

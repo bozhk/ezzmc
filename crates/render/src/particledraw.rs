@@ -124,7 +124,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, particles, false,
-            false, false, None,
+            false, false, None, false,
         )
     }
 
@@ -144,7 +144,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, true, false,
-            false, None,
+            false, None, false,
         )
     }
 
@@ -163,7 +163,26 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, true,
-            false, None,
+            false, None, false,
+        )
+    }
+
+    /// Модели без записи цвета, только глубина. VANILLA: RenderTypes#waterMask (водяная заплатка лодки).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_mask(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color: wgpu::TextureFormat,
+        depth: wgpu::TextureFormat,
+        projection: &wgpu::Buffer,
+        fog: &wgpu::Buffer,
+        lightmap: &wgpu::TextureView,
+        blocks: &wgpu::TextureView,
+        texture: Option<(&[u8], u32, u32)>,
+    ) -> Self {
+        Self::new_ex(
+            device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, false,
+            false, None, true,
         )
     }
 
@@ -183,7 +202,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, false,
-            true, None,
+            true, None, false,
         )
     }
 
@@ -219,6 +238,7 @@ impl ParticleDraw {
             false,
             true,
             Some(g),
+            false,
         )
     }
 
@@ -241,6 +261,7 @@ impl ParticleDraw {
         cull: bool,
         glint: bool,
         item_glint: Option<(&[u8], u32, u32)>,
+        mask: bool,
     ) -> Self {
         let vf = wgpu::ShaderStages::VERTEX_FRAGMENT;
         let uni = |binding| wgpu::BindGroupLayoutEntry {
@@ -439,7 +460,11 @@ impl ParticleDraw {
                     } else {
                         wgpu::BlendState::ALPHA_BLENDING
                     }),
-                    write_mask: wgpu::ColorWrites::ALL,
+                    write_mask: if mask {
+                        wgpu::ColorWrites::empty()
+                    } else {
+                        wgpu::ColorWrites::ALL
+                    },
                 })],
             }),
             primitive: wgpu::PrimitiveState {

@@ -35,6 +35,8 @@ pub struct Entity {
     pub byte18: u8,
     /// Entity#DATA_NO_GRAVITY (метаданные #5, boolean).
     pub no_gravity: bool,
+    /// AbstractBoat#DATA_ID_PADDLE_LEFT/RIGHT (#11/#12).
+    pub paddle: [bool; 2],
     /// VarInt-метаданные мобов (индекс ≥16): INT и реестровые холдеры (вариант кота/лягушки…).
     pub ints: Vec<(u8, i32)>,
     /// Метаданные #16 типа BYTE (Bat#DATA_ID_FLAGS: бит 1 = висит).
@@ -131,6 +133,7 @@ impl Entity {
             bool17: false,
             byte18: 0,
             no_gravity: false,
+            paddle: [false; 2],
             ints: Vec::new(),
             byte16: 0,
             item: None,

@@ -159,6 +159,10 @@ enum Kind {
     Bat,
     Frog,
     Tadpole,
+    Boat,
+    ChestBoat,
+    Raft,
+    ChestRaft,
 }
 
 #[derive(Clone, Copy)]
@@ -272,7 +276,10 @@ fn spec(name: &str) -> Option<Spec> {
         "piglin" => ("piglin/piglin", Kind::Piglin, 1.0, 0.5),
         "piglin_brute" => ("piglin/piglin_brute", Kind::Piglin, 1.0, 0.5),
         "zombified_piglin" => ("piglin/zombified_piglin", Kind::ZPiglin, 1.0, 0.5),
-        _ => return None,
+        _ => {
+            let (tex, kind) = boat_info(name)?;
+            (tex, kind, 1.0, 0.8)
+        }
     };
     let mscale = match name {
         "ghast" => 4.5,
@@ -294,8 +301,32 @@ fn spec(name: &str) -> Option<Spec> {
     })
 }
 
+/// Тип лодки → (текстура, модель). VANILLA: EntityRenderers (BoatRenderer/RaftRenderer),
+/// ModelLayers.*_BOAT/*_CHEST_BOAT/BAMBOO_RAFT; текстуры `entity/boat|chest_boat/<дерево>`.
+fn boat_info(name: &str) -> Option<(&'static str, Kind)> {
+    macro_rules! t {
+        ($($w:literal),*) => {
+            match name {
+                $(concat!($w, "_boat") => (concat!("boat/", $w), Kind::Boat),
+                  concat!($w, "_chest_boat") => (concat!("chest_boat/", $w), Kind::ChestBoat),)*
+                "bamboo_raft" => ("boat/bamboo", Kind::Raft),
+                "bamboo_chest_raft" => ("chest_boat/bamboo", Kind::ChestRaft),
+                _ => return None,
+            }
+        };
+    }
+    Some(t!(
+        "oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "cherry", "pale_oak", "mangrove",
+        "poplar"
+    ))
+}
+
+/// Ключ буфера водяной заплатки (только глубина); рисуется после всех моделей.
+pub const MASK_TEX: &str = "\0water_mask";
+
 #[derive(Default)]
 pub struct Mobs {
+    patch: Option<Model>,
     models: HashMap<Kind, Rig>,
     anims: HashMap<i32, MobAnim>,
     draws: HashMap<&'static str, Option<ParticleDraw>>,
@@ -349,6 +380,8 @@ struct MobAnim {
     sq_z_o: f32,
     sq_y: f32,
     sq_y_o: f32,
+    /// AbstractBoat#paddlePositions (левое/правое весло).
+    paddle: [f32; 2],
 }
 
 impl MobAnim {
@@ -518,6 +551,13 @@ fn death_flip(kind: Kind, death_at: Option<std::time::Instant>) -> Mat4 {
     Mat4::from_rotation_z((f * flip).to_radians())
 }
 
+fn is_boat(k: Kind) -> bool {
+    matches!(
+        k,
+        Kind::Boat | Kind::ChestBoat | Kind::Raft | Kind::ChestRaft
+    )
+}
+
 fn phantom_pre(kind: Kind, size: i32) -> Mat4 {
     if kind != Kind::Phantom {
         return Mat4::IDENTITY;
@@ -610,6 +650,10 @@ fn build(kind: Kind) -> Rig {
         Kind::Wolf => Rig::Plain(animals::wolf_mesh()),
         Kind::Feline => Rig::Plain(animals::feline_mesh()),
         Kind::Sheep => Rig::Sheep(animals::sheep_mesh(), animals::sheep_fur_mesh()),
+        Kind::Boat => Rig::Plain(animals::boat_mesh(false, false)),
+        Kind::ChestBoat => Rig::Plain(animals::boat_mesh(false, true)),
+        Kind::Raft => Rig::Plain(animals::boat_mesh(true, false)),
+        Kind::ChestRaft => Rig::Plain(animals::boat_mesh(true, true)),
     }
 }
 
@@ -653,6 +697,17 @@ impl Mobs {
             let anim = self.anims.entry(e.id).or_default();
             for _ in 0..ticks {
                 anim.av.tick(e.pos, e.prev_pos, e.head_yaw, e.pitch);
+                if is_boat(sp.kind) {
+                    // VANILLA: AbstractBoat#tick — гребут, только пока есть управляющий пассажир.
+                    let driven = level.riders.vehicle_of.values().any(|v| *v == e.id);
+                    for i in 0..2 {
+                        anim.paddle[i] = if e.paddle[i] && driven {
+                            anim.paddle[i] + std::f32::consts::PI / 8.0
+                        } else {
+                            0.0
+                        };
+                    }
+                }
                 if sp.kind == Kind::Guardian {
                     // #16 BOOLEAN = DATA_ID_MOVING (в поле baby).
                     anim.tick_guardian(in_water, e.baby);
@@ -704,6 +759,60 @@ impl Mobs {
             );
             if sp.lit {
                 light.0 = 15;
+            }
+            if is_boat(sp.kind) {
+                // VANILLA: AbstractBoatRenderer#submit (+ AbstractBoatModel#setupAnim).
+                let yaw = e.prev_yaw + (e.yaw - e.prev_yaw) * pt;
+                let root = Mat4::from_translation(Vec3::new(
+                    (pos[0] - cam[0]) as f32,
+                    (pos[1] - cam[1]) as f32,
+                    (pos[2] - cam[2]) as f32,
+                )) * Mat4::from_translation(Vec3::new(0.0, 0.375, 0.0))
+                    * Mat4::from_rotation_y((180.0 - yaw).to_radians())
+                    * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0))
+                    * Mat4::from_rotation_y(90.0_f32.to_radians());
+                let driven = level.riders.vehicle_of.values().any(|v| *v == e.id);
+                // VANILLA: AbstractBoat#getRowingTime.
+                let row = |i: usize| {
+                    if e.paddle[i] && driven {
+                        let p = anim.paddle[i];
+                        let a = p - std::f32::consts::PI / 8.0;
+                        a + (p - a) * pt.clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                };
+                let boat_light = crate::particles::light_at(level, pos[0], pos[1] + 0.45, pos[2]);
+                let rig = self.models.entry(sp.kind).or_insert_with(|| build(sp.kind));
+                if let Rig::Plain(model) = rig {
+                    model.reset_pose();
+                    animals::boat_anim(model, row(0), row(1));
+                    model.bake(
+                        root,
+                        [255; 4],
+                        boat_light,
+                        self.data.entry(sp.tex).or_default(),
+                    );
+                }
+                // VANILLA: BoatRenderer#submitTypeAdditions — заплатка, если лодка не под водой.
+                let h = 0.5;
+                let under = ezzmc_mesh::blockinfo::fluid(level.chunks.block(
+                    pos[0].floor() as i32,
+                    (pos[1] + h).floor() as i32,
+                    pos[2].floor() as i32,
+                ))
+                .is_some_and(|f| !f.lava);
+                if !under && matches!(sp.kind, Kind::Boat | Kind::ChestBoat) {
+                    let patch = self.patch.get_or_insert_with(animals::boat_water_patch);
+                    patch.bake(
+                        root,
+                        [255; 4],
+                        boat_light,
+                        self.data.entry(MASK_TEX).or_default(),
+                    );
+                }
+                crate::entityshadow::bake(level, pos, cam, shadow_r, 1.0, sky_darken, shadow);
+                continue;
             }
             let state = anim.av.humanoid_state(pt, false);
             // Guardian#getTailAnimation/getSpikesAnimation = lerp(pt, old, new).
@@ -989,7 +1098,13 @@ impl Mobs {
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        for d in self.draws.values().flatten() {
+        for (k, d) in &self.draws {
+            if *k != MASK_TEX {
+                d.iter().for_each(|d| d.draw(pass));
+            }
+        }
+        // Заплатка — после моделей: иначе она закрыла бы дно лодки по глубине.
+        if let Some(Some(d)) = self.draws.get(MASK_TEX) {
             d.draw(pass);
         }
     }

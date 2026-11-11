@@ -2358,11 +2358,18 @@ impl WorldView {
                 &self.atlas_view,
             );
             let mut make = |tex: &str| {
+                let mask = tex == crate::mobs::MASK_TEX;
+                let path = if mask { "boat/oak" } else { tex };
                 let img = rm
-                    .read(&format!("assets/minecraft/textures/entity/{tex}.png"))
+                    .read(&format!("assets/minecraft/textures/entity/{path}.png"))
                     .and_then(|d| Image::decode_png(&d).ok())?;
                 let rgba = img.to_rgba8();
-                Some(ezzmc_render::particledraw::ParticleDraw::new(
+                let ctor = if mask {
+                    ezzmc_render::particledraw::ParticleDraw::new_mask
+                } else {
+                    ezzmc_render::particledraw::ParticleDraw::new
+                };
+                Some(ctor(
                     &gpu.device,
                     &gpu.queue,
                     color,
