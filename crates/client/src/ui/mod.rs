@@ -2,6 +2,7 @@
 //! Режим «немедленного рисования»: каждый кадр экран объявляет виджеты, клик обрабатывается на месте.
 pub mod lang;
 pub mod options;
+pub mod ping;
 pub mod servers;
 
 use ezzmc_render::gui::GuiPainter;
@@ -34,6 +35,24 @@ pub const TEXTURES: &[(&str, &str)] = &[
     ("iw_list_bg", "inworld_menu_list_background"),
     ("iw_header_sep", "inworld_header_separator"),
     ("iw_footer_sep", "inworld_footer_separator"),
+    ("srv_join", "sprites/server_list/join"),
+    ("srv_join_hl", "sprites/server_list/join_highlighted"),
+    ("srv_up", "sprites/server_list/move_up"),
+    ("srv_up_hl", "sprites/server_list/move_up_highlighted"),
+    ("srv_down", "sprites/server_list/move_down"),
+    ("srv_down_hl", "sprites/server_list/move_down_highlighted"),
+    ("srv_incompatible", "sprites/server_list/incompatible"),
+    ("srv_unreachable", "sprites/server_list/unreachable"),
+    ("srv_ping_1", "sprites/server_list/ping_1"),
+    ("srv_ping_2", "sprites/server_list/ping_2"),
+    ("srv_ping_3", "sprites/server_list/ping_3"),
+    ("srv_ping_4", "sprites/server_list/ping_4"),
+    ("srv_ping_5", "sprites/server_list/ping_5"),
+    ("srv_pinging_1", "sprites/server_list/pinging_1"),
+    ("srv_pinging_2", "sprites/server_list/pinging_2"),
+    ("srv_pinging_3", "sprites/server_list/pinging_3"),
+    ("srv_pinging_4", "sprites/server_list/pinging_4"),
+    ("srv_pinging_5", "sprites/server_list/pinging_5"),
     ("icon_language", "sprites/icon/language"),
     ("icon_access", "sprites/icon/accessibility"),
     ("panorama_0", "title/background/panorama_0"),
@@ -132,6 +151,7 @@ struct State {
     last_click: (Option<usize>, u64),
     confirm_delete: bool,
     servers_path: PathBuf,
+    pinger: ping::Pinger,
     splash: String,
     /// Список доступных ресурспаков (скан `resourcepacks/` при входе на экран).
     packs_avail: Option<Vec<crate::packrepo::PackInfo>>,
@@ -240,6 +260,7 @@ impl Gui {
                 last_click: (None, 0),
                 confirm_delete: false,
                 servers_path,
+                pinger: ping::Pinger::default(),
                 splash,
                 packs_avail: None,
                 pack_search: String::new(),
@@ -393,6 +414,7 @@ impl Gui {
             st.pack_typed = typed.clone();
             st.pack_bs = keys.iter().any(|k| matches!(k, UiKey::Backspace));
         }
+        self.st.pinger.poll(&self.lang, dev, queue, p);
         let wheel = std::mem::take(&mut self.wheel);
         let click = std::mem::take(&mut self.click);
         let mut esc = false;
@@ -859,7 +881,6 @@ fn multiplayer(
     let rows = st.servers.len() as f32;
     let max_scroll = (rows * 36.0 - (bottom - top) + 4.0).max(0.0);
     st.scroll = (st.scroll - wheel * 18.0).clamp(0.0, max_scroll);
-    let x0 = w / 2.0 - 125.0;
     if st.confirm_delete {
         // Подтверждение удаления (VANILLA: ConfirmScreen).
         f.t.fill(0.0, 0.0, w, h, 0xA0000000);
@@ -895,26 +916,162 @@ fn multiplayer(
         return;
     }
     let mut join = None;
-    for (i, s) in st.servers.iter().enumerate() {
+    let mut swap: Option<(usize, usize)> = None;
+    let mut tip: Option<Vec<(String, u32)>> = None;
+    let n = st.servers.len();
+    let (cx, cw) = (w / 2.0 - 150.0, 300.0);
+    for i in 0..n {
         let y = top + 4.0 - st.scroll + i as f32 * 36.0;
         if y + 36.0 < top || y > bottom {
             continue;
         }
+        let (name, ip) = (st.servers[i].name.clone(), st.servers[i].ip.clone());
+        // VANILLA: пинг стартует при первой отрисовке строки (State.INITIAL → PINGING).
+        st.pinger.ensure(&ip, f.lang);
         let in_view = f.my >= top && f.my < bottom;
         if st.sel == Some(i) {
-            f.t.fill(x0 - 2.0, y - 2.0, x0 + 252.0, y + 34.0, 0xFF808080);
-            f.t.fill(x0 - 1.0, y - 1.0, x0 + 251.0, y + 33.0, 0xFF000000);
+            f.t.fill(cx - 2.0, y - 2.0, cx + cw + 2.0, y + 34.0, 0xFF808080);
+            f.t.fill(cx - 1.0, y - 1.0, cx + cw + 1.0, y + 33.0, 0xFF000000);
         }
-        if f.hover(x0, y, 250.0, 32.0) && in_view && f.click {
+        let hovered = f.hover(cx, y, cw, 32.0) && in_view;
+        let (rx, ry) = (f.mx - cx, f.my - y);
+        let over_icon = hovered && rx < 32.0;
+        let (right, top_left, bot_left) = (
+            over_icon && rx > 16.0,
+            over_icon && rx < 16.0 && ry < 16.0,
+            over_icon && rx < 16.0 && ry > 16.0,
+        );
+        if hovered && f.click {
             f.click = false;
-            if st.last_click.0 == Some(i) && now_ms.saturating_sub(st.last_click.1) < 250 {
+            if right {
+                join = Some(i);
+            } else if top_left && i > 0 {
+                swap = Some((i, i - 1));
+            } else if bot_left && i + 1 < n {
+                swap = Some((i, i + 1));
+            } else if st.last_click.0 == Some(i) && now_ms.saturating_sub(st.last_click.1) < 250 {
                 join = Some(i);
             }
             st.sel = Some(i);
             st.last_click = (Some(i), now_ms);
         }
-        f.t.draw(&s.name, x0 + 35.0, y + 1.0, WHITE, true);
-        f.t.draw(&s.ip, x0 + 35.0, y + 12.0, GRAY, true);
+        let info = st.pinger.map.get(&ip);
+        f.t.draw(&name, cx + 35.0, y + 1.0, WHITE, true);
+        if let Some(info) = info {
+            for (l, line) in wrap(f.t, &info.motd, cw - 34.0).iter().take(2).enumerate() {
+                f.t.draw(line, cx + 35.0, y + 12.0 + 9.0 * l as f32, 0x808080, true);
+            }
+        }
+        let icon = ping::icon_name(&ip);
+        let icon = if f.p.has(&icon) {
+            icon
+        } else {
+            "unknown_server".to_owned()
+        };
+        f.p.blit(&icon, cx, y, 32.0, 32.0, [0.0, 0.0, 1.0, 1.0], 0xFFFFFFFF);
+        // Иконка связи и текст «online/max» (VANILLA: statusIcon / statusIconTooltip).
+        let sx = cx + cw - 15.0;
+        if let Some(info) = info {
+            use ping::PingState::*;
+            let sprite = match info.state {
+                Pinging => {
+                    let mut k = (now_ms / 100 + i as u64 * 2) & 7;
+                    if k > 4 {
+                        k = 8 - k;
+                    }
+                    format!("srv_pinging_{}", k + 1)
+                }
+                Incompatible => "srv_incompatible".to_owned(),
+                Unreachable => "srv_unreachable".to_owned(),
+                Successful => format!(
+                    "srv_ping_{}",
+                    match info.ping {
+                        0..=149 => 5,
+                        150..=299 => 4,
+                        300..=599 => 3,
+                        600..=999 => 2,
+                        _ => 1,
+                    }
+                ),
+            };
+            f.p.blit(&sprite, sx, y, 10.0, 8.0, [0.0, 0.0, 1.0, 1.0], 0xFFFFFFFF);
+            let status = if info.state == Incompatible {
+                format!("§c{}", info.version)
+            } else {
+                info.status.clone()
+            };
+            let sw = f.t.text_width(&status);
+            let stx = sx - sw - 5.0;
+            f.t.draw(&status, stx, y + 1.0, 0x808080, true);
+            if in_view && f.mx >= sx && f.mx <= sx + 10.0 && f.my >= y && f.my <= y + 8.0 {
+                let key = match info.state {
+                    Pinging => Some("multiplayer.status.pinging"),
+                    Incompatible => Some("multiplayer.status.incompatible"),
+                    Unreachable => Some("multiplayer.status.no_connection"),
+                    Successful => None,
+                };
+                let text = match key {
+                    Some(k) => f.lang.tr(k),
+                    None => f
+                        .lang
+                        .tr("multiplayer.status.ping")
+                        .replace("%s", &info.ping.to_string()),
+                };
+                tip = Some(vec![(text, WHITE)]);
+            } else if in_view
+                && !info.players.is_empty()
+                && f.mx >= stx
+                && f.mx <= stx + sw
+                && f.my >= y
+                && f.my <= y + 8.0
+            {
+                tip = Some(info.players.iter().map(|p| (p.clone(), WHITE)).collect());
+            }
+        }
+        if hovered {
+            f.t.fill(cx, y, cx + 32.0, y + 32.0, 0xA0909090);
+            let hl = |on: bool, a: &'static str, b: &'static str| if on { b } else { a };
+            f.p.blit(
+                hl(right, "srv_join", "srv_join_hl"),
+                cx,
+                y,
+                32.0,
+                32.0,
+                [0.0, 0.0, 1.0, 1.0],
+                0xFFFFFFFF,
+            );
+            if i > 0 {
+                f.p.blit(
+                    hl(top_left, "srv_up", "srv_up_hl"),
+                    cx,
+                    y,
+                    32.0,
+                    32.0,
+                    [0.0, 0.0, 1.0, 1.0],
+                    0xFFFFFFFF,
+                );
+            }
+            if i + 1 < n {
+                f.p.blit(
+                    hl(bot_left, "srv_down", "srv_down_hl"),
+                    cx,
+                    y,
+                    32.0,
+                    32.0,
+                    [0.0, 0.0, 1.0, 1.0],
+                    0xFFFFFFFF,
+                );
+            }
+        }
+    }
+    if let Some((a, b)) = swap {
+        // VANILLA: JoinMultiplayerScreen#onSelectedChange / swap серверов в списке + сохранение.
+        st.servers.swap(a, b);
+        st.sel = Some(b);
+        servers::save(&st.servers_path, &st.servers);
+    }
+    if let Some(lines) = tip {
+        crate::tooltip::draw_colored(f.t, &lines, f.mx, f.my, w, h);
     }
     if st.servers.is_empty() {
         f.center_raw("-", top + 12.0, GRAY);
@@ -980,7 +1137,7 @@ fn multiplayer(
         &f.lang.tr("selectServer.refresh"),
         true,
     ) {
-        // Пинг серверов — позже (TODO).
+        st.pinger.refresh();
     }
     if f.button(
         w / 2.0 + 4.0 + 76.0,
@@ -998,6 +1155,62 @@ fn multiplayer(
     if let Some(i) = join {
         *action = Action::Join(st.servers[i].ip.clone());
     }
+}
+
+/// Перенос строки по ширине с переносом активных `§`-кодов на следующую строку.
+fn wrap(t: &TextRenderer, s: &str, max: f32) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut active = String::new();
+    for para in s.split('\n') {
+        let mut line = active.clone();
+        let mut last_space: Option<usize> = None;
+        let chars: Vec<char> = para.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            if c == '§' && i + 1 < chars.len() {
+                let code = chars[i + 1].to_ascii_lowercase();
+                line.push('§');
+                line.push(code);
+                if code == 'r' {
+                    active.clear();
+                } else {
+                    active.push('§');
+                    active.push(code);
+                }
+                i += 2;
+                continue;
+            }
+            i += 1;
+            line.push(c);
+            if c == ' ' {
+                last_space = Some(line.len());
+            }
+            if t.text_width(&line) > max {
+                let (first, rest) = match last_space {
+                    Some(p) if p < line.len() => {
+                        (line[..p].trim_end().to_owned(), line[p..].to_owned())
+                    }
+                    Some(_) => (line.trim_end().to_owned(), String::new()),
+                    None => {
+                        let cut = line.len() - c.len_utf8();
+                        (line[..cut].to_owned(), format!("{active}{c}"))
+                    }
+                };
+                out.push(first);
+                line = format!("{active}{rest}");
+                last_space = None;
+                if out.len() >= 2 {
+                    return out;
+                }
+            }
+        }
+        out.push(line);
+        if out.len() >= 2 {
+            return out;
+        }
+    }
+    out
 }
 
 /// Общая форма: «Прямое подключение» (`direct`) и «Правка сервера».

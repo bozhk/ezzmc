@@ -215,9 +215,64 @@ pub fn parse_features(body: &[u8]) -> ProtocolResult<Vec<String>> {
 /// Offline-вход: Login Start → (compression) → Login Finished → Login Acknowledged.
 /// Состояние соединения после вызова — Configuration.
 pub fn login_offline(conn: &mut Connection, ids: &PacketIds, name: &str) -> NetResult<GameProfile> {
+    login(conn, ids, name, offline_uuid(name), None)
+}
+
+/// Онлайн-вход (DEC-016): настоящий UUID, на Encryption Request — session/join и AES/CFB8.
+pub fn login_online(
+    conn: &mut Connection,
+    ids: &PacketIds,
+    session: &ezzmc_auth::GameSession,
+) -> NetResult<GameProfile> {
+    let uuid = u128::from_str_radix(&session.uuid, 16)
+        .map_err(|_| NetError::Disconnected("некорректный UUID сессии".into()))?;
+    login(conn, ids, &session.name, uuid, Some(session))
+}
+
+// VANILLA: ClientHandshakePacketListenerImpl#handleHello
+fn answer_hello(
+    conn: &mut Connection,
+    ids: &PacketIds,
+    body: &[u8],
+    session: &ezzmc_auth::GameSession,
+) -> NetResult<()> {
+    let fail = |m: String| NetError::Disconnected(m);
+    let mut r = Reader::new(body);
+    let server_id = r.string(20)?;
+    let n = r.length("public key", 4096)?;
+    let key = r.bytes(n)?.to_vec();
+    let n = r.length("challenge", 4096)?;
+    let challenge = r.bytes(n)?.to_vec();
+    let should_auth = r.bool().unwrap_or(true);
+    let secret = crate::crypt::random_secret();
+    if should_auth {
+        let hash = ezzmc_auth::session::server_hash(&server_id, &secret, &key);
+        ezzmc_auth::session::join_server(&session.access_token, &session.uuid, &hash)
+            .map_err(|e| fail(format!("вход в сессию Mojang: {e}")))?;
+    }
+    let enc_secret = crate::crypt::rsa_encrypt(&key, &secret).map_err(fail)?;
+    let enc_chal = crate::crypt::rsa_encrypt(&key, &challenge).map_err(fail)?;
+    let mut w = Writer::new();
+    w.var_int(enc_secret.len() as i32).bytes(&enc_secret);
+    w.var_int(enc_chal.len() as i32).bytes(&enc_chal);
+    conn.send(
+        ids.get(State::Login, Direction::Serverbound, "key")?,
+        &w.buf,
+    )?;
+    conn.enable_encryption(&secret);
+    Ok(())
+}
+
+fn login(
+    conn: &mut Connection,
+    ids: &PacketIds,
+    name: &str,
+    uuid: u128,
+    online: Option<&ezzmc_auth::GameSession>,
+) -> NetResult<GameProfile> {
     use Direction::{Clientbound as C, Serverbound as S};
     let mut w = Writer::new();
-    w.string(name).uuid(offline_uuid(name));
+    w.string(name).uuid(uuid);
     conn.send(ids.get(State::Login, S, "hello")?, &w.buf)?;
     loop {
         let p = conn.recv()?;
@@ -238,10 +293,14 @@ pub fn login_offline(conn: &mut Connection, ids: &PacketIds, name: &str) -> NetR
                     .unwrap_or(s);
                 return Err(NetError::Disconnected(text));
             }
-            "hello" => return Err(NetError::Disconnected(
-                "сервер в online-mode (шифрование): клиент поддерживает только online-mode=false"
-                    .into(),
-            )),
+            "hello" => match online {
+                Some(sess) => answer_hello(conn, ids, &p.body, sess)?,
+                None => {
+                    return Err(NetError::Disconnected(
+                        "сервер в online-mode: нужен вход через лаунчер (Microsoft)".into(),
+                    ))
+                }
+            },
             "login_compression" => conn.set_compression(Reader::new(&p.body).var_int()?),
             "login_finished" => {
                 let profile = GameProfile::read(&mut Reader::new(&p.body))?;

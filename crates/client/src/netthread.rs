@@ -1,8 +1,17 @@
 //! Сетевой поток клиента (M1): логин offline → Configuration → Play, пакеты мира кладутся в общий `Level`,
 //! главному потоку уходят события через crossbeam-канал. Сетевых паник нет: любая ошибка → `Disconnected`.
 use crossbeam_channel::{unbounded, Receiver, Sender};
+
+static SESSION: std::sync::OnceLock<Option<ezzmc_auth::GameSession>> = std::sync::OnceLock::new();
+
+/// Сессия от лаунчера (окружение читается один раз; токен в окружении стирается).
+pub fn session() -> Option<&'static ezzmc_auth::GameSession> {
+    SESSION
+        .get_or_init(ezzmc_auth::GameSession::from_env)
+        .as_ref()
+}
 use ezzmc_net::play::{MoveTracker, PlayEvent, PlayHandler};
-use ezzmc_net::session::{configure, login_offline, ConfigOutcome, PacketIds};
+use ezzmc_net::session::{configure, login_offline, login_online, ConfigOutcome, PacketIds};
 use ezzmc_net::{Connection, Intent};
 use ezzmc_protocol::{Direction, State};
 use ezzmc_world::biome_color::BiomeColors;
@@ -13,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Протокол 26.3.
-const PROTOCOL: i32 = 777;
+pub const PROTOCOL: i32 = 777;
 
 /// Команды главного потока сетевому.
 pub enum NetCmd {
@@ -289,7 +298,12 @@ fn run(
     let mut c = Connection::connect(addr).map_err(|x| e(&x))?;
     c.handshake(PROTOCOL, &host, port, Intent::Login)
         .map_err(|x| e(&x))?;
-    login_offline(&mut c, &ids, name).map_err(|x| e(&x))?;
+    // DEC-016: сессия лаунчера (Microsoft) → онлайн-вход, иначе offline.
+    match session() {
+        Some(sess) => login_online(&mut c, &ids, sess),
+        None => login_offline(&mut c, &ids, name),
+    }
+    .map_err(|x| e(&x))?;
     let ConfigOutcome::Play(cfg) = configure(
         &mut c,
         &ids,

@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 ezzmc-net.workspace = true
+ezzmc-auth.workspace = true
 ezzmc-world.workspace = true
 ezzmc-mesh.workspace = true
 ezzmc-render.workspace = true

@@ -8,6 +8,8 @@ members = [
     "crates/render",
     "crates/assets",
     "crates/client",
+    "crates/auth",
+    "crates/launcher",
     "xtask",
     "benches",
     "tests-integration",
@@ -44,6 +46,7 @@ ezzmc-world = { path = "crates/world" }
 ezzmc-mesh = { path = "crates/mesh" }
 ezzmc-render = { path = "crates/render" }
 ezzmc-assets = { path = "crates/assets" }
+ezzmc-auth = { path = "crates/auth" }
 
 [profile.release]
 opt-level = 3

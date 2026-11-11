@@ -59,6 +59,7 @@ pub struct Connection {
     state: State,
     out: Vec<u8>,
     scratch: Box<[u8; 16 * 1024]>,
+    cipher: Option<crate::crypt::CipherPair>,
 }
 
 impl Connection {
@@ -87,6 +88,7 @@ impl Connection {
             state: State::Handshake,
             out: Vec::new(),
             scratch: Box::new([0; 16 * 1024]),
+            cipher: None,
         })
     }
 
@@ -122,9 +124,17 @@ impl Connection {
         self.set_state(intent.next_state())
     }
 
+    /// Включить AES/CFB8 (после Encryption Response): все следующие байты в обе стороны.
+    pub fn enable_encryption(&mut self, secret: &[u8; 16]) {
+        self.cipher = Some(crate::crypt::CipherPair::new(secret));
+    }
+
     pub fn send(&mut self, id: i32, body: &[u8]) -> NetResult<()> {
         self.out.clear();
         self.codec.encode(id, body, &mut self.out)?;
+        if let Some(c) = &mut self.cipher {
+            c.enc.encrypt(&mut self.out);
+        }
         self.stream.write_all(&self.out)?;
         Ok(())
     }
@@ -143,7 +153,12 @@ impl Connection {
             self.stream.set_read_timeout(Some(left))?;
             match self.stream.read(&mut self.scratch[..]) {
                 Ok(0) => return Err(NetError::Closed),
-                Ok(n) => self.codec.feed(&self.scratch[..n]),
+                Ok(n) => {
+                    if let Some(c) = &mut self.cipher {
+                        c.dec.decrypt(&mut self.scratch[..n]);
+                    }
+                    self.codec.feed(&self.scratch[..n])
+                }
                 Err(e)
                     if matches!(
                         e.kind(),
@@ -172,7 +187,12 @@ impl Connection {
             self.stream.set_read_timeout(Some(left))?;
             match self.stream.read(&mut self.scratch[..]) {
                 Ok(0) => return Err(NetError::Closed),
-                Ok(n) => self.codec.feed(&self.scratch[..n]),
+                Ok(n) => {
+                    if let Some(c) = &mut self.cipher {
+                        c.dec.decrypt(&mut self.scratch[..n]);
+                    }
+                    self.codec.feed(&self.scratch[..n])
+                }
                 Err(e)
                     if matches!(
                         e.kind(),

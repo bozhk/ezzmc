@@ -1131,6 +1131,10 @@ impl App {
                 "assets/minecraft/textures/misc/unknown_pack.png",
             ),
             ("pack_vanilla", "pack.png"),
+            (
+                "unknown_server",
+                "assets/minecraft/textures/misc/unknown_server.png",
+            ),
         ] {
             let data = rm.read(path);
             if let Some(i) = data.and_then(|d| ezzmc_assets::texture::Image::decode_png(&d).ok()) {
@@ -2608,7 +2612,10 @@ fn main() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.0),
         connect: arg_value("--connect"),
-        player_name: arg_value("--name").unwrap_or_else(|| "EzzBot".into()),
+        player_name: netthread::session()
+            .map(|s| s.name.clone())
+            .or_else(|| arg_value("--name"))
+            .unwrap_or_else(|| "EzzBot".into()),
         view: None,
         last_ms: 0,
         autoshot_at: None,
