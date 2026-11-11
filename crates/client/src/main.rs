@@ -1961,7 +1961,7 @@ impl ApplicationHandler for App {
                     self.mouse.zoom_scale = f64::from(v.zoom_factor);
                     v.update(g);
                     // Вид — владелец поворота после тика (клэмп в лодке, телепорт, взгляд по носу при посадке).
-                    self.yaw = v.yaw;
+                    self.yaw = v.yaw + std::mem::take(&mut v.render_yaw_off);
                     self.pitch = v.pitch;
                     // Отладка: EZZMC_AUTOSHOT=<сек> — скриншот и выход через N секунд после появления мира.
                     if let Some(sec) = autoshot_secs() {

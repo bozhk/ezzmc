@@ -245,6 +245,10 @@ pub struct WorldView {
     riding: bool,
     /// Нос лодки, на которой едет игрок (для клэмпа взгляда по мыши: Entity#turn → onPassengerTurned).
     pub ride_boat_yaw: Option<f32>,
+    /// Поворот вида за последний тик в лодке (VANILLA: lerp(yRotO, yRot, partialTick) для камеры).
+    ride_dr: f32,
+    /// Сколько градусов вычли из `yaw` в этом кадре ради лерпа (main.rs возвращает при чтении).
+    pub render_yaw_off: f32,
     /// Лодка, которой управляет игрок: id сущности и клиентская симуляция (TODO-206).
     boat: Option<(i32, crate::boat::BoatSim)>,
     /// Результат тика лодки для сетевого потока: вёсла, позиция, yaw, on_ground.
@@ -968,6 +972,8 @@ impl WorldView {
             tick_acc: 0.0,
             riding: false,
             ride_boat_yaw: None,
+            ride_dr: 0.0,
+            render_yaw_off: 0.0,
             boat: None,
             boat_out: None,
             fov_mod: (1.0, 1.0),
@@ -1995,10 +2001,15 @@ impl WorldView {
             self.riding = riding_now;
             if let Some((dr, byaw)) = yaw_fix {
                 // VANILLA: AbstractBoat#positionRider — yaw += deltaRotation, затем clampRotation.
+                let before = self.yaw;
                 self.yaw = crate::boat::clamp_passenger_yaw(self.yaw + dr, byaw);
+                self.ride_dr = self.yaw - before;
                 yaw = self.yaw;
             }
             self.ride_boat_yaw = boat_yaw_now;
+            if boat_yaw_now.is_none() {
+                self.ride_dr = 0.0;
+            }
             if riding_now {
                 // VANILLA: LocalPlayer#rideTick → Entity#tick: поворот головы/тела и взмах руки идут и в седле.
                 if let Some(by) = boat_yaw_now {
@@ -2061,6 +2072,13 @@ impl WorldView {
             self.tick_acc = 0.0;
         }
         self.cam = self.player.eye_lerp(self.tick_acc / 0.05);
+        // VANILLA: Camera → getViewYRot(partialTick): поворот лодки за тик размазываем по кадрам.
+        self.render_yaw_off = if self.riding && self.ride_boat_yaw.is_some() {
+            self.ride_dr * (1.0 - (self.tick_acc / 0.05).clamp(0.0, 1.0) as f32)
+        } else {
+            0.0
+        };
+        self.yaw -= self.render_yaw_off;
         if let Ok(mut g) = self.net.level.lock() {
             if let Some(l) = g.as_mut() {
                 l.local_ctrl_pt = (self.tick_acc / 0.05).clamp(0.0, 1.0) as f32;
