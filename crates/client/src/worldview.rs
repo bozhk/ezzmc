@@ -3190,6 +3190,20 @@ impl WorldView {
                 anim.swing();
             }
             // VANILLA: Entity#isInvisible → LivingEntityRenderer не рисует модель (без брони/предметов).
+            // VANILLA: AbstractBoat#clampRotation — тело пассажира лодки = yRot лодки, крутится только голова.
+            anim.riding_body = level
+                .riders
+                .vehicle_of
+                .get(&e.id)
+                .and_then(|v| level.entities.map.get(v))
+                .filter(|v| {
+                    let n = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+                        .get(v.ty)
+                        .copied()
+                        .unwrap_or("");
+                    n.ends_with("_boat") || n.ends_with("_raft")
+                })
+                .map(|v| v.yaw);
             // Анимацию тикаем, чтобы при появлении не было скачка.
             for _ in 0..ticks {
                 anim.tick(e.pos, e.prev_pos, e.head_yaw, e.pitch);
