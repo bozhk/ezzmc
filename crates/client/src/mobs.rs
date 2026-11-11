@@ -668,7 +668,7 @@ impl Mobs {
             Some(prev) if now >= prev => (now - prev).min(5),
             _ => 0,
         };
-        let pt = level.partial_tick();
+        let net_pt = level.partial_tick();
         self.anims
             .retain(|id, _| level.entities.map.contains_key(id));
         for e in level.entities.iter() {
@@ -693,6 +693,12 @@ impl Mobs {
                     e.pos[2].floor() as i32,
                 ))
                 .is_some_and(|f| !f.lava)
+            };
+            // Управляемая нами лодка тикает на сетке главного потока — рисуем в той же фазе, что камера.
+            let pt = if e.local_ctrl {
+                level.local_ctrl_pt
+            } else {
+                net_pt
             };
             let anim = self.anims.entry(e.id).or_default();
             for _ in 0..ticks {
@@ -777,7 +783,7 @@ impl Mobs {
                     if e.paddle[i] && driven {
                         let p = anim.paddle[i];
                         let a = p - std::f32::consts::PI / 8.0;
-                        a + (p - a) * pt.clamp(0.0, 1.0)
+                        a + (p - a) * net_pt.clamp(0.0, 1.0)
                     } else {
                         0.0
                     }

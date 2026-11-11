@@ -47,6 +47,8 @@ pub struct AvatarAnim {
     /// Поза плавания (Pose.SWIMMING) и «в воде» — выставляются владельцем перед `tick`.
     pub swimming: bool,
     pub in_water: bool,
+    /// Пассажир лодки: тело ставится по носу транспорта (AbstractBoat#clampRotation), шаг не копится.
+    pub riding_body: Option<f32>,
     swim_amount: f32,
     swim_amount_o: f32,
 }
@@ -136,8 +138,22 @@ impl AvatarAnim {
             self.body_rot_o += 360.0;
         }
 
+        if let Some(b) = self.riding_body {
+            // VANILLA: AbstractBoat#clampRotation — passenger.setYBodyRot(boat yRot).
+            self.body_rot = b;
+            while self.body_rot - self.body_rot_o < -180.0 {
+                self.body_rot_o -= 360.0;
+            }
+            while self.body_rot - self.body_rot_o >= 180.0 {
+                self.body_rot_o += 360.0;
+            }
+        }
         // calculateEntityAnimation(false) + WalkAnimationState#update(target, 0.4, 1).
-        let dist = ((xd * xd + zd * zd).sqrt()) as f32;
+        let dist = if self.riding_body.is_some() {
+            0.0
+        } else {
+            ((xd * xd + zd * zd).sqrt()) as f32
+        };
         let target_speed = (dist * 4.0).min(1.0);
         self.walk_speed_o = self.walk_speed;
         self.walk_speed += (target_speed - self.walk_speed) * 0.4;

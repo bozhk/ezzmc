@@ -399,6 +399,17 @@ pub fn clamp_passenger_yaw(passenger_yaw: f32, boat_yaw: f32) -> f32 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn clamp_passenger_yaw_limits_105() {
+        assert_eq!(clamp_passenger_yaw(150.0, 0.0), 105.0);
+        assert_eq!(clamp_passenger_yaw(-150.0, 0.0), -105.0);
+        assert_eq!(clamp_passenger_yaw(60.0, 0.0), 60.0);
+        // через ±180: нос 170°, взгляд -170° = +20° от носа → без изменений
+        assert!((clamp_passenger_yaw(-170.0, 170.0) - -170.0).abs() < 1e-4);
+        // нос 0, взгляд 380° (=20°) не трогаем, 480° (=120°) → 465°
+        assert!((clamp_passenger_yaw(480.0, 0.0) - 465.0).abs() < 1e-3);
+    }
+
     const FULL: [[f64; 6]; 1] = [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
     /// Дно из камня при y < `floor`; вода — слои `floor..water_top` (источники).
     struct World {

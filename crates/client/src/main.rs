@@ -1813,7 +1813,11 @@ impl ApplicationHandler for App {
                 } else {
                     turn
                 };
-                let (y, p) = input::apply_turn(self.yaw, self.pitch, turn);
+                let (mut y, p) = input::apply_turn(self.yaw, self.pitch, turn);
+                // VANILLA: Entity#turn → vehicle.onPassengerTurned → AbstractBoat#clampRotation (±105° от носа).
+                if let Some(by) = self.view.as_ref().and_then(|v| v.ride_boat_yaw) {
+                    y = boat::clamp_passenger_yaw(y, by);
+                }
                 self.yaw = y;
                 self.pitch = p;
                 let _partial = self.timer.partial_tick(false);
@@ -1956,6 +1960,9 @@ impl ApplicationHandler for App {
                     v.tick_zoom(dt);
                     self.mouse.zoom_scale = f64::from(v.zoom_factor);
                     v.update(g);
+                    // Вид — владелец поворота после тика (клэмп в лодке, телепорт, взгляд по носу при посадке).
+                    self.yaw = v.yaw;
+                    self.pitch = v.pitch;
                     // Отладка: EZZMC_AUTOSHOT=<сек> — скриншот и выход через N секунд после появления мира.
                     if let Some(sec) = autoshot_secs() {
                         let n = v.resident_sections();

@@ -321,6 +321,29 @@ impl Entity {
         self.steps = if direct { 0 } else { LERP_STEPS };
     }
 
+    /// VANILLA: Entity#moveOrInterpolateTo для управляемой лодки (3 шага).
+    pub fn interpolate_to(&mut self, p: [f64; 3], yaw: f32, pitch: f32) {
+        self.target = p;
+        self.target_rot[0] = yaw;
+        self.target_rot[1] = pitch;
+        self.steps = LERP_STEPS;
+    }
+
+    /// VANILLA: LinearInterpolationHandler#interpolate для управляемой нами лодки: шаг к цели
+    /// teleport_entity в начале тика (до её собственного движения); prev_* ставит симуляция.
+    pub fn interpolate_step(&mut self) {
+        if self.steps > 0 {
+            let k = 1.0 / f64::from(self.steps);
+            for i in 0..3 {
+                self.pos[i] += (self.target[i] - self.pos[i]) * k;
+            }
+            let kf = k as f32;
+            self.yaw += wrap(self.target_rot[0] - self.yaw) * kf;
+            self.pitch += (self.target_rot[1] - self.pitch) * kf;
+            self.steps -= 1;
+        }
+    }
+
     /// Пассажир: позицию ведёт транспорт (Entity#positionRider), интерполяции нет.
     pub fn snap_target(&mut self, p: [f64; 3]) {
         self.target = p;

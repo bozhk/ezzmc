@@ -146,6 +146,8 @@ pub struct Level {
     /// day_time предыдущего тика — для интерполяции неба по partial_tick.
     pub prev_day_time: i64,
     last_tick_at: std::time::Instant,
+    /// Доля тика сетки главного потока (камера/физика игрока): по ней рисуются сущности под нашим управлением (лодка).
+    pub local_ctrl_pt: f32,
     pub tick_day_time: bool,
     /// VANILLA: ClientClockManager — часы по id в реестре `world_clock`.
     pub clocks: std::collections::HashMap<i32, ClientClock>,
@@ -213,6 +215,7 @@ impl Level {
             day_time: 0,
             prev_day_time: 0,
             last_tick_at: std::time::Instant::now(),
+            local_ctrl_pt: 1.0,
             tick_day_time: true,
             clocks: std::collections::HashMap::new(),
             overworld_clock: None,
@@ -900,6 +903,7 @@ impl Level {
                 let (y_rot, x_rot) = (r.f32()?, r.f32()?);
                 let rel = r.i32()?;
                 let on_ground = r.bool()?;
+                let interpolated;
                 if let Some(e) = self.entities.map.get_mut(&id).filter(|e| e.local_ctrl) {
                     // VANILLA: handleTeleportEntity — управляемый транспорт без относительных XYZ не
                     // интерполируется (absSnapTo + новая скорость, затем ServerboundMoveVehicle);
@@ -911,16 +915,26 @@ impl Level {
                             pos[i]
                         }
                     });
-                    e.pos = p;
-                    e.prev_pos = p;
-                    e.yaw = if rel & 8 != 0 { e.yaw + y_rot } else { y_rot };
-                    e.prev_yaw = e.yaw;
-                    e.pitch = if rel & 16 != 0 {
+                    let yaw = if rel & 8 != 0 { e.yaw + y_rot } else { y_rot };
+                    let pitch = if rel & 16 != 0 {
                         e.pitch + x_rot
                     } else {
                         x_rot
                     };
-                    e.prev_pitch = e.pitch;
+                    // VANILLA: setValuesFromPositionPacket — интерполяция (3 тика), если сдвиг ≤ 64 блоков.
+                    let far = (0..3).map(|i| (p[i] - e.pos[i]).powi(2)).sum::<f64>() > 4096.0;
+                    interpolated = !far;
+                    if far {
+                        e.pos = p;
+                        e.prev_pos = p;
+                        e.yaw = yaw;
+                        e.prev_yaw = yaw;
+                        e.pitch = pitch;
+                        e.prev_pitch = pitch;
+                        e.snap_target(p);
+                    } else {
+                        e.interpolate_to(p, yaw, pitch);
+                    }
                     e.on_ground = on_ground;
                     for (i, (vel, d)) in e.vel.iter_mut().zip(delta).enumerate() {
                         *vel = if rel & (1 << (5 + i)) != 0 {
@@ -929,7 +943,8 @@ impl Level {
                             d
                         };
                     }
-                    if rel & 7 == 0 {
+                    // VANILLA: ответный MoveVehicle только если не интерполировали.
+                    if rel & 7 == 0 && !interpolated {
                         self.vehicle_resync = true;
                     }
                 } else if let Some(e) = self.entities.map.get_mut(&id) {

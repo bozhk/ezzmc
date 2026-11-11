@@ -243,6 +243,8 @@ pub struct WorldView {
     tick_acc: f64,
     /// Игрок сидит на транспорте (set_passengers): ходьба не тикает, шлём только поворот.
     riding: bool,
+    /// Нос лодки, на которой едет игрок (для клэмпа взгляда по мыши: Entity#turn → onPassengerTurned).
+    pub ride_boat_yaw: Option<f32>,
     /// Лодка, которой управляет игрок: id сущности и клиентская симуляция (TODO-206).
     boat: Option<(i32, crate::boat::BoatSim)>,
     /// Результат тика лодки для сетевого потока: вёсла, позиция, yaw, on_ground.
@@ -965,6 +967,7 @@ impl WorldView {
             walking: std::env::var("EZZMC_FREECAM").map_or(true, |v| v != "1"),
             tick_acc: 0.0,
             riding: false,
+            ride_boat_yaw: None,
             boat: None,
             boat_out: None,
             fov_mod: (1.0, 1.0),
@@ -1818,6 +1821,7 @@ impl WorldView {
             let mut self_fov = None;
             let mut riding_now = false;
             let mut mount_yaw: Option<f32> = None;
+            let mut boat_yaw_now: Option<f32> = None;
             let was_riding = self.riding;
             let mut yaw_fix: Option<(f32, f32)> = None;
             let ran = self.net.level.lock().ok().and_then(|mut g| {
@@ -1861,6 +1865,10 @@ impl WorldView {
                             self.boat = Some((v, crate::boat::BoatSim::default()));
                         }
                         let sim = &mut self.boat.as_mut().expect("boat").1;
+                        // VANILLA: commonTick → interpolate() до движения лодки.
+                        if let Some(e) = l.entities.map.get_mut(&v) {
+                            e.interpolate_step();
+                        }
                         let body = l.entities.map.get(&v).map(|e| {
                             let n = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
                                 .get(e.ty)
@@ -1910,6 +1918,19 @@ impl WorldView {
                         .and_then(|t| l.ride_position(l.own_id, t));
                     if let Some(pos) = ride {
                         riding_now = true;
+                        boat_yaw_now = l
+                            .riders
+                            .vehicle_of
+                            .get(&l.own_id)
+                            .and_then(|v| l.entities.map.get(v))
+                            .filter(|v| {
+                                let n = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+                                    .get(v.ty)
+                                    .copied()
+                                    .unwrap_or("");
+                                n.ends_with("_boat") || n.ends_with("_raft")
+                            })
+                            .map(|v| v.yaw);
                         if !was_riding {
                             // VANILLA: handleSetEntityPassengersPacket — на лодке взгляд по носу.
                             let vid = l.riders.vehicle_of.get(&l.own_id).copied().unwrap_or(-1);
@@ -1943,6 +1964,7 @@ impl WorldView {
                             slow_falling: self.effects.has("slow_falling"),
                         };
                         let was_ground = p.on_ground;
+                        p.anim.riding_body = None;
                         self.psound.before_tick(p);
                         p.tick(l, input, yaw);
                         p.post_tick(yaw, pitch);
@@ -1975,6 +1997,16 @@ impl WorldView {
                 // VANILLA: AbstractBoat#positionRider — yaw += deltaRotation, затем clampRotation.
                 self.yaw = crate::boat::clamp_passenger_yaw(self.yaw + dr, byaw);
                 yaw = self.yaw;
+            }
+            self.ride_boat_yaw = boat_yaw_now;
+            if riding_now {
+                // VANILLA: LocalPlayer#rideTick → Entity#tick: поворот головы/тела и взмах руки идут и в седле.
+                if let Some(by) = boat_yaw_now {
+                    self.yaw = crate::boat::clamp_passenger_yaw(self.yaw, by);
+                    yaw = self.yaw;
+                }
+                self.player.anim.riding_body = boat_yaw_now;
+                self.player.post_tick(yaw, pitch);
             }
             if riding_now && !was_riding {
                 // VANILLA: handleSetEntityPassengersPacket — подсказка «Нажмите %s, чтобы слезть».
@@ -2029,6 +2061,11 @@ impl WorldView {
             self.tick_acc = 0.0;
         }
         self.cam = self.player.eye_lerp(self.tick_acc / 0.05);
+        if let Ok(mut g) = self.net.level.lock() {
+            if let Some(l) = g.as_mut() {
+                l.local_ctrl_pt = (self.tick_acc / 0.05).clamp(0.0, 1.0) as f32;
+            }
+        }
     }
 
     /// VANILLA: Minecraft#tick → pick(1.0F) после тика: цель клика от глаз конца тика.
@@ -2653,6 +2690,12 @@ impl WorldView {
         let p = &self.player;
         let crouching = p.crouching;
         let mut state = p.anim.humanoid_state(pt, crouching);
+        if self.riding {
+            // VANILLA: LivingEntityRenderer#extractRenderState — пассажир: поза сидя, walkAnimation = 0.
+            state.passenger = true;
+            state.walk_pos = 0.0;
+            state.walk_speed = 0.0;
+        }
         let swim = SwimPose {
             amount: state.swim_amount,
             in_water: p.in_water,
@@ -4294,6 +4337,9 @@ impl WorldView {
                         secondary: self.player.crouching,
                     });
                     if vehicle {
+                        // VANILLA: AbstractBoat#interact → InteractionResult.SUCCESS → player.swing(hand).
+                        self.player.swing();
+                        let _ = self.net.cmd.send(crate::netthread::NetCmd::Swing);
                         return;
                     }
                 }
