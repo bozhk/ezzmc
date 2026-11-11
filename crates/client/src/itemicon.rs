@@ -559,7 +559,8 @@ fn raster(
         t.0[1].to_radians(),
         t.0[2].to_radians(),
     );
-    let (sc, tr) = (Vec3::from(t.2), Vec3::from(t.1) / 16.0);
+    // VANILLA: ItemTransform.translation уже в блоках (Deserializer: mul 0.0625).
+    let (sc, tr) = (Vec3::from(t.2), Vec3::from(t.1));
     let xf = |v: Vec3| rot * ((v - Vec3::splat(0.5)) * sc) + tr;
     let s = RENDER as f32;
     let mut color = vec![0u32; RENDER * RENDER];
