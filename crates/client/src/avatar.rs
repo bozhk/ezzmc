@@ -174,6 +174,7 @@ impl AvatarAnim {
             swim_amount: self.swim_amount_o + (self.swim_amount - self.swim_amount_o) * pt,
             item_right: false,
             item_left: false,
+            passenger: false,
         }
     }
 }

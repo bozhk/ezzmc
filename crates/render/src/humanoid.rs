@@ -32,6 +32,8 @@ pub struct HumanoidState {
     pub item_right: bool,
     /// Предмет в левой руке.
     pub item_left: bool,
+    /// Сидит в транспорте (HumanoidRenderState#isPassenger).
+    pub passenger: bool,
 }
 
 /// Индексы основных частей гуманоида.
@@ -321,6 +323,10 @@ pub fn setup_anim(m: &mut Model, p: &HumanoidParts, s: &HumanoidState) {
     // speedValue = 1 для игрока.
     m.parts[p.right_arm].pose.x_rot = (pos * 0.6662 + PI).cos() * 2.0 * spd * 0.5;
     m.parts[p.left_arm].pose.x_rot = (pos * 0.6662).cos() * 2.0 * spd * 0.5;
+    if s.passenger {
+        m.parts[p.right_arm].pose.x_rot += -PI / 5.0;
+        m.parts[p.left_arm].pose.x_rot += -PI / 5.0;
+    }
     // VANILLA: HumanoidModel#poseRightArm (ITEM): xRot = xRot·0.5 − π/10.
     if s.item_left {
         m.parts[p.left_arm].pose.x_rot = m.parts[p.left_arm].pose.x_rot * 0.5 - PI / 10.0;
@@ -334,6 +340,15 @@ pub fn setup_anim(m: &mut Model, p: &HumanoidParts, s: &HumanoidState) {
     m.parts[p.left_leg].pose.y_rot = -0.005;
     m.parts[p.right_leg].pose.z_rot = 0.005;
     m.parts[p.left_leg].pose.z_rot = -0.005;
+    // VANILLA: HumanoidModel#setupAnim — isPassenger: поза «сидя».
+    if s.passenger {
+        m.parts[p.right_leg].pose.x_rot = -1.413_716_7;
+        m.parts[p.right_leg].pose.y_rot = PI / 10.0;
+        m.parts[p.right_leg].pose.z_rot = 0.078_539_82;
+        m.parts[p.left_leg].pose.x_rot = -1.413_716_7;
+        m.parts[p.left_leg].pose.y_rot = -PI / 10.0;
+        m.parts[p.left_leg].pose.z_rot = -0.078_539_82;
+    }
     // poseRightArm/poseLeftArm EMPTY: yRot = 0 (уже).
 
     // setupAttackAnimation (WHACK).

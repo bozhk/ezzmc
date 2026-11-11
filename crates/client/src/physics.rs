@@ -41,6 +41,10 @@ pub trait Collider {
     fn extra_boxes(&self, _x: i32, _y: i32, _z: i32) -> Vec<[f64; 6]> {
         Vec::new()
     }
+    /// Боксы сущностей, с которыми можно столкнуться (лодки), пересекающие `region` (мировые координаты).
+    fn entity_boxes(&self, _region: [f64; 6]) -> Vec<[f64; 6]> {
+        Vec::new()
+    }
     /// Загружен ли чанк (для `travelInAir`).
     fn has_chunk(&self, x: i32, z: i32) -> bool;
     /// Высота воды в блоке (0 — воды нет; 1 — полный блок или вода сверху).
@@ -89,6 +93,40 @@ impl Collider for Level {
     }
     fn name(&self, x: i32, y: i32, z: i32) -> &'static str {
         self.chunks.block(x, y, z).name()
+    }
+    /// VANILLA: Level#getEntityCollisions — Entity#canCollideWith: лодки (AbstractBoat#canBeCollidedWith),
+    /// кроме той, на которой сидит игрок (isPassengerOfSameVehicle).
+    fn entity_boxes(&self, region: [f64; 6]) -> Vec<[f64; 6]> {
+        let own_vehicle = self.riders.vehicle_of.get(&self.own_id).copied();
+        let mut out = Vec::new();
+        for e in self.entities.map.values() {
+            if Some(e.id) == own_vehicle
+                || (e.pos[0] - region[0]).abs() > 64.0
+                || (e.pos[2] - region[2]).abs() > 64.0
+            {
+                continue;
+            }
+            let Some(name) = ezzmc_protocol::generated::r26_3::ENTITY_TYPE.get(e.ty) else {
+                continue;
+            };
+            if !(name.ends_with("_boat") || name.ends_with("_raft")) {
+                continue;
+            }
+            let (w, h) = ezzmc_world::entity_size::size(name).unwrap_or((1.375, 0.5625));
+            let r = f64::from(w) / 2.0;
+            let bb = [
+                e.pos[0] - r,
+                e.pos[1],
+                e.pos[2] - r,
+                e.pos[0] + r,
+                e.pos[1] + f64::from(h),
+                e.pos[2] + r,
+            ];
+            if overlaps(&region, &bb) {
+                out.push(bb);
+            }
+        }
+        out
     }
     fn has_chunk(&self, x: i32, z: i32) -> bool {
         self.chunks.get(x >> 4, z >> 4).is_some()
@@ -1360,7 +1398,8 @@ impl Player {
             region[4],
             region[5],
         ];
-        let colliders = gather(w, region);
+        let mut colliders = gather(w, region);
+        colliders.extend(w.entity_boxes(region));
         tracing::debug!(target: "dbg", "collide bb={:.3?} m={:.6?} boxes={:.3?}", bb, m, colliders);
         let step = if len_sq(m) == 0.0 {
             m
@@ -2280,7 +2319,7 @@ mod tests {
 
 #[cfg(test)]
 mod minor_collision_tests {
-    use super::is_horizontal_collision_minor;
+    use super::*;
 
     /// Ввод вперёд (yaw 0 → движение по +Z). Скольжение почти параллельно стене — minor.
     #[test]
@@ -2294,5 +2333,73 @@ mod minor_collision_tests {
     #[test]
     fn full_stop_is_not_minor() {
         assert!(!is_horizontal_collision_minor((0.0, 1.0, 0.0), [0.0, 0.0]));
+    }
+
+    /// Игрок падает на бокс сущности (лодка) и стоит на нём без проваливания (сетбэк-баг).
+    #[test]
+    fn stands_on_entity_box() {
+        struct BoatWorld;
+        impl Collider for BoatWorld {
+            fn boxes(&self, _: i32, _: i32, _: i32) -> &'static [[f64; 6]] {
+                &[]
+            }
+            fn name(&self, _: i32, _: i32, _: i32) -> &'static str {
+                "air"
+            }
+            fn has_chunk(&self, _: i32, _: i32) -> bool {
+                true
+            }
+            fn entity_boxes(&self, region: [f64; 6]) -> Vec<[f64; 6]> {
+                let bb = [-0.6875, 0.0, -0.6875, 0.6875, 0.5625, 0.6875];
+                if overlaps(&region, &bb) {
+                    vec![bb]
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+        let w = BoatWorld;
+        let mut p = Player::new([0.0, 2.0, 0.0]);
+        for _ in 0..60 {
+            p.tick(&w, Input::default(), 0.0);
+        }
+        assert!(p.on_ground, "не стоит: y={}", p.pos[1]);
+        assert!((p.pos[1] - 0.5625).abs() < 1e-6, "y={}", p.pos[1]);
+    }
+
+    /// `Level::entity_boxes`: чужая лодка даёт бокс, своя (под игроком) и не-лодки — нет.
+    #[test]
+    fn level_entity_boxes_boats_only() {
+        let mut l = Level::new(
+            ezzmc_world::chunk::ChunkFormat {
+                min_y: 0,
+                height: 256,
+                block_global_bits: 15,
+                biome_global_bits: 6,
+            },
+            2,
+        );
+        let boat = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+            .iter()
+            .position(|n| *n == "oak_boat")
+            .unwrap_or(0);
+        let cow = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+            .iter()
+            .position(|n| *n == "cow")
+            .unwrap_or(0);
+        let mk = |id, ty, pos| {
+            ezzmc_world::entities::Entity::new(id, id as u128, ty, pos, 0.0, 0.0, 0.0)
+        };
+        l.entities.add(mk(10, boat, [5.0, 64.0, 5.0]));
+        l.entities.add(mk(11, boat, [8.0, 64.0, 5.0]));
+        l.entities.add(mk(12, cow, [5.0, 64.0, 5.0]));
+        let region = [3.0, 63.0, 3.0, 7.0, 66.0, 7.0];
+        let b = Collider::entity_boxes(&l, region);
+        assert_eq!(b.len(), 1, "{b:?}");
+        assert!((b[0][3] - b[0][0] - 1.375).abs() < 1e-9 && (b[0][4] - 64.0 - 0.5625).abs() < 1e-6);
+        // своя лодка исключается
+        l.own_id = 1;
+        l.riders.vehicle_of.insert(1, 10);
+        assert!(Collider::entity_boxes(&l, region).is_empty());
     }
 }

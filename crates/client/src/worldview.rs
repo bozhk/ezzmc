@@ -2258,6 +2258,12 @@ impl WorldView {
                 lerp(p.prev_pos[2], p.pos[2]),
             ];
             let mut state = p.anim.humanoid_state(pt, p.crouching);
+            if self.riding {
+                // VANILLA: LivingEntityRenderer#extractRenderState — пассажир: walkAnimation = 0.
+                state.passenger = true;
+                state.walk_pos = 0.0;
+                state.walk_speed = 0.0;
+            }
             state.item_right = self.inv.held().is_some();
             state.item_left = left_mesh.is_some();
             let body = p.anim.body_rot(pt);
@@ -2359,11 +2365,16 @@ impl WorldView {
             );
             let mut make = |tex: &str| {
                 let mask = tex == crate::mobs::MASK_TEX;
-                let path = if mask { "boat/oak" } else { tex };
-                let img = rm
-                    .read(&format!("assets/minecraft/textures/entity/{path}.png"))
-                    .and_then(|d| Image::decode_png(&d).ok())?;
-                let rgba = img.to_rgba8();
+                // VANILLA: RenderTypes#waterMask — без текстуры; берём сплошную белую (в boat/oak есть
+                // прозрачные пиксели, и depth-only проход отбрасывал бы их — вода просвечивала).
+                let (rgba, tw, th) = if mask {
+                    (vec![255u8; 4 * 16 * 16], 16, 16)
+                } else {
+                    let img = rm
+                        .read(&format!("assets/minecraft/textures/entity/{tex}.png"))
+                        .and_then(|d| Image::decode_png(&d).ok())?;
+                    (img.to_rgba8(), img.width, img.height)
+                };
                 let ctor = if mask {
                     ezzmc_render::particledraw::ParticleDraw::new_mask
                 } else {
@@ -2378,7 +2389,7 @@ impl WorldView {
                     fog,
                     lightmap,
                     atlas,
-                    Some((rgba.as_slice(), img.width, img.height)),
+                    Some((rgba.as_slice(), tw, th)),
                 ))
             };
             self.mobs.prepare(&gpu.device, &gpu.queue, mv, &mut make);
@@ -3143,6 +3154,11 @@ impl WorldView {
             }
             let crouching = e.crouching() && !swimming;
             let mut state = anim.humanoid_state(pt, crouching);
+            if level.riders.vehicle_of.contains_key(&e.id) {
+                state.passenger = true;
+                state.walk_pos = 0.0;
+                state.walk_speed = 0.0;
+            }
             let mut mesh_of = |st: &Option<ezzmc_protocol::item::ItemStack>| {
                 let (name, cx) = crate::handitem::stack_ctx(st.as_ref()?)?;
                 let rm = self.hand_rm.as_ref()?;
@@ -4252,6 +4268,37 @@ impl WorldView {
                 .copied()
         });
         let mut consumed = false;
+        // VANILLA: Minecraft#startUseItem → MultiPlayerGameMode#interact — ПКМ по сущности
+        // (ServerboundInteractPacket с точкой попадания относительно сущности).
+        if let Some(id) = self.entity_target {
+            if self.entity_dist <= self.entity_reach() {
+                let d = look_dir(self.yaw, self.pitch);
+                let hit = [
+                    self.cam[0] + f64::from(d[0]) * self.entity_dist,
+                    self.cam[1] + f64::from(d[1]) * self.entity_dist,
+                    self.cam[2] + f64::from(d[2]) * self.entity_dist,
+                ];
+                let info = self.with_level(|l| {
+                    l.entities.map.get(&id).map(|e| {
+                        let n = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+                            .get(e.ty)
+                            .copied()
+                            .unwrap_or("");
+                        (e.pos, n.ends_with("_boat") || n.ends_with("_raft"))
+                    })
+                });
+                if let Some(Some((epos, vehicle))) = info {
+                    self.send(crate::netthread::NetCmd::Interact {
+                        entity_id: id,
+                        loc: [hit[0] - epos[0], hit[1] - epos[1], hit[2] - epos[2]],
+                        secondary: self.player.crouching,
+                    });
+                    if vehicle {
+                        return;
+                    }
+                }
+            }
+        }
         if let Some(t) = self.place_target {
             let seq = self.next_seq();
             let rel = [

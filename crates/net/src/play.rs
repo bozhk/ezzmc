@@ -231,6 +231,35 @@ pub fn read_lp_vec3(r: &mut Reader) -> ProtocolResult<[f64; 3]> {
     ])
 }
 
+/// VANILLA: LpVec3#write (ServerboundInteractPacket#location в 26.3).
+pub fn write_lp_vec3(w: &mut Writer, v: [f64; 3]) {
+    let san = |x: f64| {
+        if x.is_nan() {
+            0.0
+        } else {
+            x.clamp(-1.7179869183E10, 1.7179869183E10)
+        }
+    };
+    let (x, y, z) = (san(v[0]), san(v[1]), san(v[2]));
+    let len = x.abs().max(y.abs()).max(z.abs());
+    if len < 3.051_944_088_384_301E-5 {
+        w.u8(0);
+        return;
+    }
+    let scale = len.ceil() as i64;
+    let partial = (scale & 3) != scale;
+    let markers = if partial { scale & 3 | 4 } else { scale };
+    let pack = |t: f64| ((t * 0.5 + 0.5) * 32766.0).round() as i64;
+    let sc = scale as f64;
+    let buffer = markers | pack(x / sc) << 3 | pack(y / sc) << 18 | pack(z / sc) << 33;
+    w.u8(buffer as u8);
+    w.u8((buffer >> 8) as u8);
+    w.i32((buffer >> 16) as i32);
+    if partial {
+        w.var_int((scale >> 2) as i32);
+    }
+}
+
 /// VANILLA: Input (ServerboundPlayerInputPacket) — биты флагов.
 pub mod input_bits {
     pub const FORWARD: u8 = 1;
@@ -573,6 +602,21 @@ impl PlayHandler {
         conn.send(self.sid("use_item")?, &w.buf)
     }
 
+    /// VANILLA: ServerboundInteractPacket(entityId, hand, location (LpVec3), usingSecondaryAction).
+    pub fn send_interact(
+        &self,
+        conn: &mut Connection,
+        entity_id: i32,
+        loc: [f64; 3],
+        secondary: bool,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.var_int(entity_id).var_int(0);
+        write_lp_vec3(&mut w, loc);
+        w.bool(secondary);
+        conn.send(self.sid("interact")?, &w.buf)
+    }
+
     /// VANILLA: ServerboundAttackPacket(entityId).
     pub fn send_attack(&self, conn: &mut Connection, entity_id: i32) -> NetResult<()> {
         let mut w = Writer::new();
@@ -855,5 +899,32 @@ mod tests {
         );
         assert_eq!(s.sea_level, 63);
         assert!(SpawnInfo::read(&mut Reader::new(&w.buf[..10])).is_err());
+    }
+
+    /// VANILLA: LpVec3#write — нулевой вектор = один байт 0; roundtrip с `read_lp_vec3`.
+    #[test]
+    fn lp_vec3_roundtrip() {
+        let mut w = Writer::new();
+        write_lp_vec3(&mut w, [0.0, 0.0, 0.0]);
+        assert_eq!(w.buf, vec![0]);
+        for v in [
+            [0.3, -0.5, 0.9],
+            [-1.0, 0.25, 0.0],
+            [2.5, -7.0, 3.1],
+            [20.0, 0.1, -9.0],
+        ] {
+            let mut w = Writer::new();
+            write_lp_vec3(&mut w, v);
+            let mut r = Reader::new(&w.buf);
+            let got = read_lp_vec3(&mut r).unwrap();
+            let sc = v.iter().fold(0.0f64, |a, x| a.max(x.abs())).ceil();
+            for k in 0..3 {
+                assert!(
+                    (got[k] - v[k]).abs() <= sc / 32766.0 + 1e-9,
+                    "{v:?} -> {got:?}"
+                );
+            }
+            assert_eq!(r.remaining(), 0);
+        }
     }
 }

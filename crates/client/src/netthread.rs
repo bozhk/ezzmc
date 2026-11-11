@@ -77,6 +77,12 @@ pub enum NetCmd {
     Attack {
         entity_id: i32,
     },
+    /// ServerboundInteractPacket (ПКМ по сущности).
+    Interact {
+        entity_id: i32,
+        loc: [f64; 3],
+        secondary: bool,
+    },
     UseItem {
         seq: i32,
         yaw: f32,
@@ -236,6 +242,13 @@ fn send_tick_action(h: &mut PlayHandler, c: &mut Connection, cmd: NetCmd) -> Res
             .send_player_action(c, action, bp, face, seq)
             .map_err(|x| e(&x)),
         NetCmd::Attack { entity_id } => h.send_attack(c, entity_id).map_err(|x| e(&x)),
+        NetCmd::Interact {
+            entity_id,
+            loc,
+            secondary,
+        } => h
+            .send_interact(c, entity_id, loc, secondary)
+            .map_err(|x| e(&x)),
         NetCmd::SetCarried(s) => h.send_set_carried_item(c, s).map_err(|x| e(&x)),
         NetCmd::Swing => h.send_swing(c).map_err(|x| e(&x)),
         NetCmd::UseItem { seq, yaw, pitch } => {
@@ -559,7 +572,7 @@ fn run(
                     // Версии до 1.21.5 пакета не знают — молча игнорируем.
                     let _ = h.send_pick_item_from_block(&mut c, bp, data);
                 }
-                NetCmd::Attack { .. } => deferred.push(cmd),
+                NetCmd::Attack { .. } | NetCmd::Interact { .. } => deferred.push(cmd),
                 NetCmd::ContainerClick {
                     container,
                     state_id,
