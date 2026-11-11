@@ -268,7 +268,8 @@ impl Gui {
     }
 
     pub fn wants_binds(&self) -> bool {
-        cur(&self.st) == Screen::Page(Page::Controls)
+        // Строки нужны и на странице Controls, и на экране самих привязок (иначе они не обновляются).
+        matches!(cur(&self.st), Screen::Page(Page::Controls | Page::KeyBinds))
     }
 
     /// VANILLA: Minecraft#pauseGame — меню паузы поверх мира.

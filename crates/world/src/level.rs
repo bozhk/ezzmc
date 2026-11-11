@@ -163,6 +163,8 @@ pub struct Level {
     pub thunder_level: f32,
     /// Молнии (`lightning_bolt`) — единственные сущности, которые клиент пока заводит.
     pub bolts: crate::lightning::Bolts,
+    /// FLOAT-метаданные #17 по id сущности (у игрока — поглощение, Player#DATA_PLAYER_ABSORPTION_ID).
+    pub float15: std::collections::HashMap<i32, f32>,
     /// Позиции ударов молнии, ждущие звука (клиент забирает `take`).
     pub thunder: Vec<[f64; 3]>,
     pub entities: crate::entities::Entities,
@@ -216,6 +218,7 @@ impl Level {
             rain_level: 0.0,
             thunder_level: 0.0,
             bolts: Default::default(),
+            float15: Default::default(),
             thunder: Vec::new(),
             entities: Default::default(),
             pickups: Vec::new(),
@@ -528,6 +531,9 @@ impl Level {
                         e.vel = vel;
                         // VANILLA: AbstractArrow#recreateFromPacket — data = id владельца.
                         e.owner = data;
+                        e.data = data;
+                        // VANILLA: FallingBlockEntity#recreateFromPacket — data = Block.getId(state);
+                        // клиент ведёт физику сам, а пакеты позиции сглаживаются интерполяцией.
                         e.snap = ITEM_TYPE.is_some_and(|t| t == ty);
                         // VANILLA: PrimedTnt#DATA_FUSE_ID по умолчанию 80.
                         if TNT_TYPE.is_some_and(|t| t == ty) {
@@ -552,6 +558,7 @@ impl Level {
                             e.hurt_dur = 1.0;
                             e.death_at.get_or_insert_with(std::time::Instant::now);
                         }
+                        19 => e.squid_reset = e.squid_reset.wrapping_add(1),
                         60 => {
                             // VANILLA: LivingEntity#handleEntityEvent 60 → makePoofParticles.
                             let (w, h) = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
@@ -721,7 +728,11 @@ impl Level {
                             r.var_long()?;
                         }
                         3 => {
-                            r.f32()?;
+                            let v = r.f32()?;
+                            // VANILLA: Player#DATA_PLAYER_ABSORPTION_ID = #17 (Entity 0-7, LivingEntity 8-14, Avatar 15-16; 26.3).
+                            if idx == 17 {
+                                self.float15.insert(id, v);
+                            }
                         }
                         4 => {
                             r.string(32767)?;

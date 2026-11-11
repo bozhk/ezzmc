@@ -80,7 +80,20 @@ impl ClientChunk {
     }
 
     pub fn sky_light(&self, x: usize, y: i32, z: usize) -> Option<u8> {
-        ChunkLight::lookup(&self.light.sky, self.chunk.min_y() >> 4, x, y, z)
+        let min_section = self.chunk.min_y() >> 4;
+        ChunkLight::lookup(&self.light.sky, min_section, x, y, z).or_else(|| {
+            // VANILLA: LayerLightSectionStorage#getLightValue (sky) — у секции нет слоя: берём нижний слой секции
+            // выше; выше самой верхней секции со слоем небо = 15 (сервер не шлёт свет для пустого неба).
+            let i = usize::try_from((y >> 4) - min_section + 1)
+                .ok()
+                .filter(|&i| i < self.light.sky.len())?;
+            Some(
+                self.light.sky[i + 1..]
+                    .iter()
+                    .find_map(|l| l.as_ref())
+                    .map_or(15, |l| l.get(x & 15, 0, z & 15)),
+            )
+        })
     }
     pub fn block_light(&self, x: usize, y: i32, z: usize) -> Option<u8> {
         ChunkLight::lookup(&self.light.block, self.chunk.min_y() >> 4, x, y, z)
@@ -121,6 +134,11 @@ impl ChunkCache {
 
     pub fn format(&self) -> &ChunkFormat {
         &self.format
+    }
+
+    /// Все загруженные колонки.
+    pub fn iter(&self) -> impl Iterator<Item = &Arc<ClientChunk>> {
+        self.chunks.iter().flatten()
     }
 
     pub fn loaded_count(&self) -> usize {
@@ -380,7 +398,8 @@ mod tests {
         let ch = c.get(0, 0).unwrap();
         // индекс света 1 = секция min_section (y -64..-49)
         assert_eq!(ch.sky_light(0, -64, 0), Some(15));
-        assert_eq!(ch.sky_light(0, -48, 0), None);
+        // выше самой верхней секции со слоем — небо 15 (VANILLA: topSections)
+        assert_eq!(ch.sky_light(0, -48, 0), Some(15));
         assert_eq!(ch.block_light(0, -48, 0), Some(0));
         let mut u = LightUpdate::default();
         u.block.push((2, DataLayer::filled(7)));

@@ -1692,6 +1692,78 @@ impl ParticleEngine {
         self.add(p);
     }
 
+    /// VANILLA: Entity#spawnSprintParticle — частица блока под ногами при беге (не в воде).
+    pub fn sprint(
+        &mut self,
+        pos: [f64; 3],
+        vel: [f64; 3],
+        width: f64,
+        state: BlockState,
+        block: BlockPos,
+        look: &mut dyn FnMut(BlockState, BlockPos) -> Option<TerrainLook>,
+    ) {
+        if !spawns_terrain_particles(state) {
+            return;
+        }
+        let Some(look) = look(state, block) else {
+            return;
+        };
+        let x = pos[0] + (self.rng.next_double() - 0.5) * width;
+        let z = pos[2] + (self.rng.next_double() - 0.5) * width;
+        if self.allow() {
+            self.add_terrain(x, pos[1] + 0.1, z, vel[0] * -4.0, 1.5, vel[2] * -4.0, look);
+        }
+    }
+
+    /// VANILLA: ParticleEngine#crack — частица на грани блока, пока его ломают (каждый тик).
+    /// `face`: 0 down, 1 up, 2 north, 3 south, 4 west, 5 east.
+    pub fn crack(
+        &mut self,
+        pos: BlockPos,
+        state: BlockState,
+        face: u8,
+        look: &mut dyn FnMut(BlockState, BlockPos) -> Option<TerrainLook>,
+    ) {
+        if !spawns_terrain_particles(state) {
+            return;
+        }
+        let Some(look) = look(state, pos) else {
+            return;
+        };
+        let boxes = blockinfo::outline_boxes(state);
+        let mut b = [1.0_f64, 1.0, 1.0, 0.0, 0.0, 0.0];
+        for o in boxes.iter() {
+            for i in 0..3 {
+                b[i] = b[i].min(o[i]);
+                b[i + 3] = b[i + 3].max(o[i + 3]);
+            }
+        }
+        if boxes.is_empty() {
+            b = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        }
+        let (x, y, z) = (f64::from(pos.x), f64::from(pos.y), f64::from(pos.z));
+        let r = |e: &mut Self, lo: f64, hi: f64| e.rng.next_double() * (hi - lo - 0.2) + 0.1 + lo;
+        let mut xp = x + r(self, b[0], b[3]);
+        let mut yp = y + r(self, b[1], b[4]);
+        let mut zp = z + r(self, b[2], b[5]);
+        match face {
+            0 => yp = y + b[1] - 0.1,
+            1 => yp = y + b[4] + 0.1,
+            2 => zp = z + b[2] - 0.1,
+            3 => zp = z + b[5] + 0.1,
+            4 => xp = x + b[0] - 0.1,
+            _ => xp = x + b[3] + 0.1,
+        }
+        self.add_terrain(xp, yp, zp, 0.0, 0.0, 0.0, look);
+        // setPower(0.2F).scale(0.6F) — над только что добавленной частицей.
+        if let Some(p) = self.list.back_mut() {
+            p.xd *= 0.2;
+            p.yd = (p.yd - 0.1) * 0.2 + 0.1;
+            p.zd *= 0.2;
+            p.quad_size *= 0.6;
+        }
+    }
+
     /// VANILLA: ClientLevel#addDestroyBlockEffect.
     pub fn destroy_block(
         &mut self,

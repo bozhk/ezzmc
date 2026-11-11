@@ -106,6 +106,63 @@ pub fn tick(level: &mut Level) {
     }
 }
 
+/// VANILLA: FallingBlockEntity#tick (клиентская часть): applyGravity, move(SELF), drag 0.98.
+/// Посадка блока — только сервер (setBlockAndUpdate), клиент ждёт block_update.
+pub fn tick_falling(level: &mut Level) {
+    let Some(ty) = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+        .iter()
+        .position(|n| *n == "falling_block")
+    else {
+        return;
+    };
+    let ids: Vec<i32> = level
+        .entities
+        .iter()
+        .filter(|e| e.ty == ty)
+        .map(|e| e.id)
+        .collect();
+    for id in ids {
+        let Some(e) = level.entities.map.get(&id) else {
+            continue;
+        };
+        let (mut pos, mut vel) = (e.pos, e.vel);
+        if !level.has_chunk(pos[0].floor() as i32, pos[2].floor() as i32) {
+            continue;
+        }
+        const W: f64 = 0.98;
+        vel[1] -= GRAVITY;
+        let bb = [
+            pos[0] - W / 2.0,
+            pos[1],
+            pos[2] - W / 2.0,
+            pos[0] + W / 2.0,
+            pos[1] + W,
+            pos[2] + W / 2.0,
+        ];
+        let colliders = gather(level, expand_towards(bb, vel));
+        let m = collide(vel, bb, &colliders);
+        for i in 0..3 {
+            pos[i] += m[i];
+        }
+        let ground = m[1] != vel[1] && vel[1] < 0.0;
+        if m[0] != vel[0] {
+            vel[0] = 0.0;
+        }
+        if m[2] != vel[2] {
+            vel[2] = 0.0;
+        }
+        if m[1] != vel[1] {
+            vel[1] = 0.0;
+        }
+        vel = [vel[0] * 0.98, vel[1] * 0.98, vel[2] * 0.98];
+        if let Some(e) = level.entities.map.get_mut(&id) {
+            e.pos = pos;
+            e.vel = vel;
+            e.on_ground = ground;
+        }
+    }
+}
+
 fn collide(m: [f64; 3], bb: [f64; 6], shapes: &[[f64; 6]]) -> [f64; 3] {
     // Тот же порядок осей, что у Shapes#collide (Y, затем бо́льшая из X/Z).
     crate::physics::collide_with(m, bb, shapes)

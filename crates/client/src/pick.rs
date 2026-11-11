@@ -114,9 +114,9 @@ pub fn raycast_t(
         if !st.is_air() {
             let boxes: &[[f64; 6]] = if fluid && bi::fluid(st).is_some() {
                 &FULL
-            } else if bi::fluid(st).is_some() && !fluid {
-                &[]
             } else {
+                // VANILLA: ClipContext#getBlockShape — форма самого блока; жидкость на неё не влияет
+                // (у воды/лавы форма пустая, у келпа/морской травы/блоков с waterlogged — своя).
                 bi::outline_boxes(st)
             };
             // VANILLA: контур (getShape) сдвигается на getOffset только у части блоков — см. outline_offset.

@@ -4,6 +4,7 @@
 //! Нет: сетка и полоска бандла (визуальный компонент), имя сущности спаунера, категория креатива, tooltip_display,
 //! компоненты (F3+H), OverrideText-стили.
 //! VANILLA: GuiGraphics#renderTooltip / TooltipRenderUtil (фон 0xF0100010, рамка 0x505000FF→0x5028007F).
+use crate::chat;
 use crate::ui::lang::Lang;
 use ezzmc_protocol::generated::r26_3::{DATA_COMPONENT_TYPE, ITEM, MOB_EFFECT, POTION};
 use ezzmc_protocol::item::{ComponentPatch, ItemStack};
@@ -373,6 +374,33 @@ fn attribute_lines(lang: &Lang, mods: &[AttrMod], out: &mut Vec<(String, u32)>) 
     }
 }
 
+/// VANILLA: Item#isBarVisible/getBarWidth/getBarColor — полоска прочности: (ширина 0..=13, цвет RGB).
+/// Видна только у повреждённых предметов (damage > 0 и max_damage > 0).
+pub fn durability_bar(name: &str, patch: &ComponentPatch) -> Option<(u32, u32)> {
+    let damage = comp(patch, "damage")
+        .and_then(|b| Reader::new(b).var_int().ok())
+        .unwrap_or(0);
+    let max = comp(patch, "max_damage")
+        .and_then(|b| Reader::new(b).var_int().ok())
+        .or_else(|| defaults().max_damage.get(name).copied())
+        .unwrap_or(0);
+    if damage <= 0 || max <= 0 {
+        return None;
+    }
+    let (d, m) = (damage as f32, max as f32);
+    let width = (13.0 - d * 13.0 / m).round().clamp(0.0, 13.0) as u32;
+    // Mth#hsvToRgb(max(0, (max - damage) / max) / 3, 1, 1)
+    let h = ((m - d) / m).max(0.0) / 3.0 * 6.0;
+    let f = h - h.floor();
+    let (r, g, b) = match h.floor() as i32 % 6 {
+        0 => (1.0, f, 0.0),
+        1 => (1.0 - f, 1.0, 0.0),
+        _ => (0.0, 1.0, f),
+    };
+    let c = |v: f32| (v * 255.0 + 0.5) as u32;
+    Some((width, (c(r) << 16) | (c(g) << 8) | c(b)))
+}
+
 fn comp<'a>(patch: &'a ComponentPatch, name: &str) -> Option<&'a [u8]> {
     let id = DATA_COMPONENT_TYPE.iter().position(|x| *x == name)? as u32;
     patch
@@ -389,6 +417,28 @@ fn plain(lang: &Lang, tag: &Tag) -> Option<String> {
         let s = lang.tr(k);
         (s != k).then_some(s)
     }))
+}
+
+/// Строка без кодов форматирования `§` (для MCP/тестов).
+pub fn strip_codes(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c == '§' {
+            it.next();
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Компонент-текст со стилем родителя (цвет, курсив) в строку с кодами `§`.
+fn styled_text(lang: &Lang, b: &[u8], color: u32, italic: bool) -> Option<String> {
+    let tag = nbt::read_network(&mut Reader::new(b)).ok()??;
+    let c = Component::from_nbt(&tag).ok()?;
+    let sp = chat::flatten_styled(&c, lang, color, italic);
+    Some(chat::spans_to_legacy(&sp, color))
 }
 
 fn text_of(lang: &Lang, b: &[u8]) -> Option<String> {
@@ -612,6 +662,18 @@ fn ench_list(patch: &ComponentPatch, key: &str) -> Vec<(i32, i32)> {
         .unwrap_or_default()
 }
 
+/// Уровень зачарования по короткому имени (`efficiency`) в `enchantments` стека; 0 — нет.
+pub fn enchant_level(patch: &ComponentPatch, name: &str) -> i32 {
+    let reg = ENCHANTS.lock().map(|g| g.clone()).unwrap_or_default();
+    ench_list(patch, "enchantments")
+        .into_iter()
+        .find(|&(h, _)| {
+            reg.get(h as usize)
+                .is_some_and(|(n, _)| n.strip_prefix("minecraft:").unwrap_or(n) == name)
+        })
+        .map_or(0, |(_, l)| l)
+}
+
 /// Строки зачарований. VANILLA: ItemEnchantments#addToTooltip — проклятия красным, остальное серым.
 fn enchant_lines(lang: &Lang, ench: &[(i32, i32)], out: &mut Vec<(String, u32)>) {
     let reg = ENCHANTS.lock().map(|g| g.clone()).unwrap_or_default();
@@ -722,8 +784,9 @@ pub fn stack_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack) -> Vec<(String,
     }
     let rc = [0xFFFFFF, 0xFFFF55, 0x55FFFF, 0xFF55FF][rarity.clamp(0, 3) as usize];
     let potion = comp(&s.patch, "potion_contents").and_then(decode_potion);
+    // VANILLA: ItemStack#getStyledHoverName — custom_name курсивом (цвет редкости — родитель).
     let title = comp(&s.patch, "custom_name")
-        .and_then(|b| text_of(lang, b))
+        .and_then(|b| styled_text(lang, b, rc, true))
         .or_else(|| comp(&s.patch, "item_name").and_then(|b| text_of(lang, b)))
         .or_else(|| {
             potion_prefix(name).map(|p| {
@@ -797,13 +860,9 @@ pub fn stack_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack) -> Vec<(String,
                 break;
             };
             if let Ok(c) = Component::from_nbt(&tag) {
-                out.push((
-                    c.to_plain(&|k| {
-                        let s = lang.tr(k);
-                        (s != k).then_some(s)
-                    }),
-                    0xAA00AA,
-                ));
+                // VANILLA: ItemStack#LORE_STYLE — тёмно-фиолетовый курсив.
+                let sp = chat::flatten_styled(&c, lang, 0xAA00AA, true);
+                out.push((chat::spans_to_legacy(&sp, 0xAA00AA), 0xAA00AA));
             }
         }
     }
@@ -933,5 +992,38 @@ pub fn draw_colored(
             l.1,
             true,
         );
+    }
+}
+
+#[cfg(test)]
+mod durability_tests {
+    use super::*;
+
+    fn patch(damage: u8, max: u8) -> ComponentPatch {
+        use ezzmc_protocol::generated::r26_3::DATA_COMPONENT_TYPE;
+        let id = |n: &str| DATA_COMPONENT_TYPE.iter().position(|x| *x == n).unwrap() as u32;
+        ComponentPatch {
+            added: vec![
+                (id("damage"), vec![damage].into()),
+                (id("max_damage"), vec![max].into()),
+            ],
+            removed: vec![],
+        }
+    }
+
+    #[test]
+    fn bar_hidden_when_undamaged() {
+        assert!(durability_bar("iron_pickaxe", &patch(0, 100)).is_none());
+    }
+
+    #[test]
+    fn bar_width_and_color() {
+        // 50/100: ширина round(13 − 6.5) = 7 (round half up в Java → 7), цвет — жёлтый (h = 1/6).
+        let (w, rgb) = durability_bar("iron_pickaxe", &patch(50, 100)).unwrap();
+        assert_eq!(w, 7);
+        assert_eq!(rgb, 0xFFFF00);
+        // почти сломан: красный
+        let (w, rgb) = durability_bar("iron_pickaxe", &patch(100, 100)).unwrap();
+        assert_eq!((w, rgb), (0, 0xFF0000));
     }
 }

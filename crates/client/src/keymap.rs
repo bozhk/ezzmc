@@ -127,6 +127,8 @@ fn defaults() -> Vec<(&'static str, Input, Category)> {
         ("key.togglePerspective", k(F5), Misc),
         ("key.smoothCamera", Input::Unbound, Misc),
         ("key.fullscreen", k(F11), Misc),
+        // Не ванильная: зум по удержанию (в духе OptiFine), по умолчанию C.
+        ("key.zoom", k(KeyC), Misc),
         ("key.advancements", k(KeyL), Misc),
         ("key.quickActions", k(KeyG), Misc),
         ("key.toggleGui", k(F1), Misc),
@@ -212,6 +214,14 @@ impl KeyBindings {
         self.list
             .iter()
             .filter(|o| o.name != name && o.key == b.key)
+            // Зум (C) и сохранение набора в креативе (C + цифра) — разные контексты, не конфликт.
+            .filter(|o| {
+                !matches!(
+                    (name, o.name),
+                    ("key.zoom", "key.saveToolbarActivator")
+                        | ("key.saveToolbarActivator", "key.zoom")
+                )
+            })
             .map(|o| o.name)
             .collect()
     }

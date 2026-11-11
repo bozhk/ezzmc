@@ -33,6 +33,10 @@ pub trait Collider {
     fn boxes(&self, x: i32, y: i32, z: i32) -> &'static [[f64; 6]];
     /// Имя блока без пространства имён (`"air"` для пустоты).
     fn name(&self, x: i32, y: i32, z: i32) -> &'static str;
+    /// Сдвиг боксов блока (`getOffset` у бамбука/сталагмита; форма в данных уже содержит смещение (0,0)).
+    fn box_offset(&self, _x: i32, _y: i32, _z: i32) -> [f64; 3] {
+        [0.0; 3]
+    }
     /// Динамические боксы (движущийся поршень) в координатах блока.
     fn extra_boxes(&self, _x: i32, _y: i32, _z: i32) -> Vec<[f64; 6]> {
         Vec::new()
@@ -62,6 +66,14 @@ impl Collider for Level {
         let s = self.chunks.block(x, y, z);
         s.props()
             .map_or(&[], |p| bi::collision_boxes_of(p.collision_shape))
+    }
+    fn box_offset(&self, x: i32, y: i32, z: i32) -> [f64; 3] {
+        let s = self.chunks.block(x, y, z);
+        if s.is_air() {
+            return [0.0; 3];
+        }
+        let o = bi::collision_offset(s, x, z);
+        [f64::from(o[0]), f64::from(o[1]), f64::from(o[2])]
     }
     fn extra_boxes(&self, x: i32, y: i32, z: i32) -> Vec<[f64; 6]> {
         match self.pistons.get(&(x, y, z)) {
@@ -207,14 +219,16 @@ pub struct Player {
     pub using_item: bool,
     /// VANILLA: Pose.SWIMMING вне воды — ползание под 1.5-блочным потолком (isVisuallyCrawling).
     pub crawling: bool,
+    /// VANILLA: Entity#hasPose(SWIMMING) на конце прошлого тика (Player#updatePlayerPose идёт после aiStep).
+    pose_swimming: bool,
     pub sprinting: bool,
     pub flying: bool,
+    /// Уровни эффектов (amplifier+1, 0 = нет); выставляются клиентом перед тиком.
+    pub fx: EffectLevels,
     /// VANILLA: Entity#isInWater / isUnderWater (глаза в воде) / isSwimming (поза плавания).
     pub in_water: bool,
     pub in_lava: bool,
     pub under_water: bool,
-    /// EXPERIMENT(hyp1): глаза были в воде на прошлом тике (wasEyeInWater).
-    pub eye_in_water: bool,
     pub swimming: bool,
     /// Наклон камеры (градусы) — для плавания «по взгляду».
     pub pitch: f32,
@@ -278,12 +292,13 @@ impl Player {
             crouching: false,
             using_item: false,
             crawling: false,
+            pose_swimming: false,
             sprinting: false,
             flying: false,
+            fx: EffectLevels::default(),
             in_water: false,
             in_lava: false,
             under_water: false,
-            eye_in_water: false,
             swimming: false,
             pitch: 0.0,
             x_bob: 0.0,
@@ -481,11 +496,14 @@ impl Player {
             self.sprint_trigger_time = 0;
         }
         let moving_slowly = self.crouching || self.crawling;
+        // VANILLA: LocalPlayer#isMovingSlowly = isCrouching || Entity#isVisuallyCrawling (поза SWIMMING вне воды).
+        // Поза обновляется в конце тика, поэтому на первом тике после выхода из воды вход ещё замедлен (×0.3).
+        let slow_input = moving_slowly || (self.pose_swimming && !self.in_water);
         let shallow = self.in_water && !self.under_water;
         if !self.sprinting
             && fwd > 1.0e-5 // VANILLA: ClientInput#hasForwardImpulse
             && (!shallow || self.flying)
-            && (!moving_slowly || self.under_water)
+            && (!slow_input || self.under_water)
             && !self.using_item
         // VANILLA: canStartSprinting → !isSlowDueToUsingItem
         {
@@ -506,8 +524,7 @@ impl Player {
             let stop = if self.swimming {
                 !self.in_water || (fwd <= 1.0e-5 && !self.on_ground && !input.sneak)
             } else {
-                moving_slowly
-                    || (shallow && !self.flying)
+                (shallow && !self.flying)
                     || fwd <= 1.0e-5
                     // VANILLA: LocalPlayer#shouldStopRunSprinting — horizontalCollision && !minorHorizontalCollision
                     || (self.horizontal_collision && !self.minor_horizontal_collision)
@@ -548,14 +565,15 @@ impl Player {
         }
 
         // applyInput
-        let (xxa, zza) = modify_input((left, fwd), moving_slowly, self.using_item);
+        let (xxa, zza) = modify_input((left, fwd), slow_input, self.using_item);
 
         // LocalPlayer#aiStep: sneak в воде → goDownInWater.
-        if self.in_water && input.sneak {
+        // VANILLA: Player#isAffectedByFluids = !abilities.flying (в полёте вода не тормозит и не топит).
+        if self.in_water && input.sneak && !self.flying {
             self.vel[1] -= f64::from(0.04f32);
         }
         // прыжок. VANILLA: LivingEntity#aiStep (jumpInLiquid / порог getFluidJumpThreshold = 0.4).
-        if input.jump {
+        if input.jump && !self.flying {
             let fh = if self.in_lava {
                 self.lava_h
             } else {
@@ -595,9 +613,10 @@ impl Player {
         }
         let oy = self.vel[1];
         self.move_input = (xxa, zza, yaw);
-        if self.in_water {
+        // VANILLA: LivingEntity#shouldTravelInFluid = isInLiquid && isAffectedByFluids && !canStandOnFluid.
+        if self.in_water && !self.flying {
             self.travel_in_water(w, (xxa, zza), yaw);
-        } else if self.in_lava {
+        } else if self.in_lava && !self.flying {
             self.travel_in_lava(w, (xxa, zza), yaw);
         } else {
             self.travel(w, (xxa, zza), yaw);
@@ -607,6 +626,10 @@ impl Player {
         }
         if self.on_ground && self.flying {
             self.flying = false;
+        }
+        // VANILLA: Player#tick → updatePlayerPose после aiStep: поза SWIMMING, если влезаем хотя бы в неё.
+        if self.fits(w, f64::from(HEIGHT_SWIMMING)) {
+            self.pose_swimming = self.swimming || self.crawling;
         }
     }
 
@@ -704,10 +727,7 @@ impl Player {
             self.pos[2].floor() as i32,
         );
         let eh = w.water_height(ex, ey, ez);
-        let eye_in = eh > 0.0 && eye_y <= f64::from(ey) + f64::from(eh);
-        // EXPERIMENT(hyp1): ванилья isUnderWater = wasEyeInWater && isInWater (Entity.java:1660).
-        self.under_water = self.eye_in_water && self.in_water;
-        self.eye_in_water = eye_in;
+        self.under_water = eh > 0.0 && eye_y <= f64::from(ey) + f64::from(eh);
         // Entity#updateSwimming.
         let here = block_pos(self.pos);
         // VANILLA: Player#isSwimming = !flying && !spectator && super.isSwimming.
@@ -740,7 +760,7 @@ impl Player {
             m[2] * f64::from(slow),
         ];
         if !self.sprinting {
-            v[1] = fluid_falling_y(v[1], is_falling);
+            v[1] = fluid_falling_y(v[1], is_falling, self.effective_gravity());
         }
         self.vel = v;
         self.jump_out_of_fluid(w, old_y);
@@ -758,7 +778,7 @@ impl Player {
             let m = self.vel;
             self.vel = [m[0] * 0.5, m[1] * f64::from(0.8f32), m[2] * 0.5];
             if !self.sprinting {
-                self.vel[1] = fluid_falling_y(self.vel[1], is_falling);
+                self.vel[1] = fluid_falling_y(self.vel[1], is_falling, self.effective_gravity());
             }
         } else {
             self.vel = self.vel.map(|c| c * 0.5);
@@ -811,7 +831,13 @@ impl Player {
 
     /// VANILLA: LivingEntity#getJumpPower + jumpFromGround.
     fn jump_from_ground(&mut self, w: &dyn Collider, sprinting: bool, yaw: f32) {
-        let power = JUMP_STRENGTH * block_jump_factor(w, self.pos);
+        // VANILLA: LivingEntity#getJumpPower + getJumpBoostPower.
+        let boost = if self.fx.jump_boost > 0 {
+            0.1f32 * self.fx.jump_boost as f32
+        } else {
+            0.0
+        };
+        let power = JUMP_STRENGTH * block_jump_factor(w, self.pos) + boost;
         if power <= 1.0e-5 {
             return;
         }
@@ -860,8 +886,11 @@ impl Player {
         if (self.horizontal_collision || self.was_jump) && self.on_climbable(w) {
             my = 0.2;
         }
-        if w.has_chunk(below[0], below[2]) {
-            my -= GRAVITY;
+        if self.fx.levitation > 0 {
+            // VANILLA: LivingEntity#travelInAir — levitation вместо гравитации.
+            my += (0.05 * f64::from(self.fx.levitation) - self.vel[1]) * 0.2;
+        } else if w.has_chunk(below[0], below[2]) {
+            my -= self.effective_gravity();
         } else if self.pos[1] > -64.0 {
             my = -0.1;
         } else {
@@ -886,11 +915,27 @@ impl Player {
     }
 
     fn speed(&self) -> f32 {
-        // Attributes.MOVEMENT_SPEED + модификатор спринта ADD_MULTIPLIED_TOTAL 0.3
+        // Attributes.MOVEMENT_SPEED: каждый ADD_MULTIPLIED_TOTAL множит отдельно
+        // (спринт +0.3, Speed +0.2·lvl, Slowness −0.15·lvl).
+        let mut v = f64::from(MOVEMENT_SPEED);
         if self.sprinting {
-            (f64::from(MOVEMENT_SPEED) * 1.3) as f32
+            v *= 1.0 + f64::from(0.3f32);
+        }
+        if self.fx.speed > 0 {
+            v *= 1.0 + f64::from(0.2f32) * f64::from(self.fx.speed);
+        }
+        if self.fx.slowness > 0 {
+            v *= 1.0 + f64::from(-0.15f32) * f64::from(self.fx.slowness);
+        }
+        v.clamp(0.0, 1024.0) as f32
+    }
+
+    /// VANILLA: LivingEntity#getEffectiveGravity (Slow Falling при vel.y <= 0).
+    fn effective_gravity(&self) -> f64 {
+        if self.vel[1] <= 0.0 && self.fx.slow_falling {
+            GRAVITY.min(0.01)
         } else {
-            MOVEMENT_SPEED
+            GRAVITY
         }
     }
 
@@ -1369,12 +1414,22 @@ fn modify_input(i: (f32, f32), slow: bool, using: bool) -> (f32, f32) {
 }
 
 /// VANILLA: LivingEntity#getFluidFallingAdjustedMovement (baseGravity = 0.08), только Y.
-fn fluid_falling_y(y: f64, is_falling: bool) -> f64 {
-    if is_falling && (y - 0.005).abs() >= 0.003 && (y - GRAVITY / 16.0).abs() < 0.003 {
+fn fluid_falling_y(y: f64, is_falling: bool, gravity: f64) -> f64 {
+    if is_falling && (y - 0.005).abs() >= 0.003 && (y - gravity / 16.0).abs() < 0.003 {
         -0.003
     } else {
-        y - GRAVITY / 16.0
+        y - gravity / 16.0
     }
+}
+
+/// Уровни клиентских эффектов, влияющих на физику (amplifier+1, 0 = нет).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EffectLevels {
+    pub speed: i32,
+    pub slowness: i32,
+    pub jump_boost: i32,
+    pub levitation: i32,
+    pub slow_falling: bool,
 }
 
 #[derive(Default)]
@@ -1454,14 +1509,15 @@ pub(crate) fn gather(w: &dyn Collider, region: [f64; 6]) -> Vec<[f64; 6]> {
         for y in lo(region[1])..=hi(region[4]) {
             for z in lo(region[2])..=hi(region[5]) {
                 let extra = w.extra_boxes(x, y, z);
+                let off = w.box_offset(x, y, z);
                 for b in w.boxes(x, y, z).iter().chain(extra.iter()) {
                     let wb = [
-                        b[0] + f64::from(x),
-                        b[1] + f64::from(y),
-                        b[2] + f64::from(z),
-                        b[3] + f64::from(x),
-                        b[4] + f64::from(y),
-                        b[5] + f64::from(z),
+                        b[0] + f64::from(x) + off[0],
+                        b[1] + f64::from(y) + off[1],
+                        b[2] + f64::from(z) + off[2],
+                        b[3] + f64::from(x) + off[0],
+                        b[4] + f64::from(y) + off[1],
+                        b[5] + f64::from(z) + off[2],
                     ];
                     if overlaps(&region, &wb) {
                         out.push(wb);
@@ -1746,6 +1802,30 @@ mod tests {
     }
 
     #[test]
+    fn visually_crawling_slows_input_on_first_tick_after_water() {
+        // VANILLA: LocalPlayer#isMovingSlowly → Entity#isVisuallyCrawling (поза SWIMMING вне воды).
+        let w = Flat { extra: vec![] };
+        let fwd = Input {
+            forward: true,
+            sprint: true,
+            ..Input::default()
+        };
+        let air = |pose_swimming: bool| {
+            let mut p = Player::new([0.5, 10.0, 0.5]);
+            p.sprinting = true;
+            p.pose_swimming = pose_swimming;
+            p.tick(&w, fwd, 0.0);
+            p.vel[2]
+        };
+        let normal = air(false);
+        let slowed = air(true);
+        assert!(
+            slowed > 0.0 && slowed < normal * 0.5,
+            "{slowed} vs {normal}"
+        );
+    }
+
+    #[test]
     fn falls_and_lands() {
         let w = Flat { extra: vec![] };
         let mut p = Player::new([0.5, 5.0, 0.5]);
@@ -1775,6 +1855,46 @@ mod tests {
         }
         // ваниль: пик прыжка ≈ 1.2522
         assert!((peak - 1.2522).abs() < 0.01, "peak={peak}");
+    }
+
+    #[test]
+    fn effects_change_speed_jump_and_gravity() {
+        let w = Flat { extra: vec![] };
+        let mut p = Player::new([0.5, 0.0, 0.5]);
+        p.fx.speed = 2;
+        p.fx.slowness = 1;
+        // 0.1 · (1+0.4) · (1−0.15)
+        assert!((p.speed() - 0.119).abs() < 1e-6, "{}", p.speed());
+        // Jump Boost II: +0.2 к силе прыжка
+        let mut p = Player::new([0.5, 0.0, 0.5]);
+        p.tick(&w, Input::default(), 0.0);
+        p.fx.jump_boost = 2;
+        let mut vy = 0.0;
+        for _ in 0..4 {
+            p.tick(
+                &w,
+                Input {
+                    jump: true,
+                    ..Input::default()
+                },
+                0.0,
+            );
+            vy = p.vel[1];
+            if vy > 0.0 {
+                break;
+            }
+        }
+        assert!((vy - (0.62 - 0.08) * 0.98).abs() < 1e-5, "{vy}");
+        // Slow Falling: падение с гравитацией 0.01
+        let mut p = Player::new([0.5, 10.0, 0.5]);
+        p.fx.slow_falling = true;
+        p.tick(&w, Input::default(), 0.0);
+        assert!((p.vel[1] - (-0.01 * 0.98)).abs() < 1e-6, "{}", p.vel[1]);
+        // Levitation I: (0.05 − 0)·0.2 = 0.01 вверх за тик
+        let mut p = Player::new([0.5, 10.0, 0.5]);
+        p.fx.levitation = 1;
+        p.tick(&w, Input::default(), 0.0);
+        assert!((p.vel[1] - 0.01 * 0.98).abs() < 1e-6, "{}", p.vel[1]);
     }
 
     #[test]

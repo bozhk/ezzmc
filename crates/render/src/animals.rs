@@ -2078,10 +2078,7 @@ pub fn rabbit_anim(m: &mut Model, y_rot: f32, x_rot: f32) {
     set_head(m, y_rot, x_rot);
 }
 
-/// Сдвиг модели кальмара по Y: SquidRenderer#setupRotations (translate 0.5 до и −1.2 после поворота) = 0.7 блока вниз.
-const SQUID_DY: f32 = 11.2;
-
-/// VANILLA: SquidModel#createBodyLayer (64×32), с учётом сдвига setupRotations (см. SQUID_DY).
+/// VANILLA: SquidModel#createBodyLayer (64×32). Сдвиг/наклоны — SquidRenderer#setupRotations (в клиенте, mobs.rs).
 pub const SQUID_TENTACLES: [&str; 8] = [
     "tentacle0",
     "tentacle1",
@@ -2098,7 +2095,7 @@ pub fn squid_mesh() -> Model {
     m.add(
         "body",
         None,
-        Pose::offset(0.0, 8.0 + SQUID_DY, 0.0),
+        Pose::offset(0.0, 8.0, 0.0),
         &[BoxDef::new([0.0, 0.0], [-6.0, -8.0, -6.0], [12.0, 16.0, 12.0]).grow(0.02)],
     );
     for (i, name) in SQUID_TENTACLES.iter().enumerate() {
@@ -2109,7 +2106,7 @@ pub fn squid_mesh() -> Model {
             None,
             Pose {
                 y_rot: yr,
-                ..Pose::offset(a.cos() * 5.0, 15.0 + SQUID_DY, a.sin() * 5.0)
+                ..Pose::offset(a.cos() * 5.0, 15.0, a.sin() * 5.0)
             },
             &[BoxDef::new(
                 [48.0, 0.0],
@@ -2121,18 +2118,10 @@ pub fn squid_mesh() -> Model {
     m
 }
 
-/// VANILLA: SquidModel#setupAnim (tentacle.xRot = tentacleAngle).
-// VANILLA-UNSURE: tentacleAngle берётся упрощённо по возрасту (Squid#aiStep не портирован), без наклона по движению.
-pub fn squid_anim(m: &mut Model, age: f32) {
-    let t = age * 0.15;
-    let ang = if t.rem_euclid(PI * 2.0) < PI {
-        let f = t.rem_euclid(PI * 2.0) / PI;
-        (f * f).sin() * PI * 0.25
-    } else {
-        PI * 0.25
-    };
+/// VANILLA: SquidModel#setupAnim (tentacle.xRot = state.tentacleAngle, угол считает Squid#aiStep).
+pub fn squid_anim(m: &mut Model, tentacle_angle: f32) {
     for n in SQUID_TENTACLES {
-        set_x(m, n, ang);
+        set_x(m, n, tentacle_angle);
     }
 }
 

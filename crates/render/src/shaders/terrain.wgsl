@@ -16,7 +16,7 @@ override alpha_cutout: f32 = 0.0;
 struct VsIn {
     @builtin(instance_index) slot: u32,
     @location(0) pos: vec4<u32>,     // Uint16x4: (coord+8)*2048 ×3, слово света block | sky<<8
-    @location(1) uv0: vec2<f32>,     // Unorm16x2
+    @location(1) uv0: vec2<u32>,     // Uint16x2, ÷65536
     @location(2) color: vec4<f32>,   // Unorm8x4
 }
 
@@ -44,7 +44,7 @@ fn vs_main(v: VsIn) -> VsOut {
     o.spherical = fog_spherical_distance(pos);
     o.cylindrical = fog_cylindrical_distance(pos);
     o.color = v.color * sample_lightmap(vec2<i32>(i32(v.pos.w & 255u), i32(v.pos.w >> 8u)));
-    o.uv = v.uv0;
+    o.uv = vec2<f32>(v.uv0) / 65536.0;
     return o;
 }
 

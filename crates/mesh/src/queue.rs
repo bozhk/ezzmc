@@ -11,6 +11,10 @@ pub struct RebuildQueue {
     /// Лучшие кандидаты из `dirty`, отсортированы по убыванию приоритета (лучший — в конце).
     batch: Vec<SectionPos>,
     calls: u32,
+    /// Растёт при любой пометке секции/блока: дешёвый признак «мир менялся» для потребителей снаружи.
+    pub version: u64,
+    /// Растёт только при правке блока (не при загрузке чанков): мгновенная реакция блок-сущностей.
+    pub block_version: u64,
 }
 
 /// Размер пачки кандидатов и период её пересборки (в вызовах `take`): на больших дальностях
@@ -22,11 +26,14 @@ const BEHIND_PENALTY: f32 = 4.0;
 
 impl RebuildQueue {
     pub fn mark(&mut self, pos: SectionPos) {
+        self.version += 1;
         self.dirty.insert(pos);
     }
 
     /// Блок изменился: грязна своя секция и соседние, если блок на границе (меш зависит от соседей).
     pub fn mark_block(&mut self, x: i32, y: i32, z: i32) {
+        self.version += 1;
+        self.block_version += 1;
         let (sx, sy, sz) = (x >> 4, y >> 4, z >> 4);
         for dx in -1..=1 {
             for dy in -1..=1 {

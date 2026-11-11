@@ -38,7 +38,7 @@ impl RectTable {
             return i;
         }
         let i = self.rects.len() as u32;
-        self.rects.push(key.map(|v| f32::from(v) / 65535.0));
+        self.rects.push(key.map(|v| f32::from(v) / 65536.0));
         self.map.insert(key, i);
         self.dirty = true;
         i

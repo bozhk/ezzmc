@@ -35,6 +35,27 @@ struct Loaded {
     id: Identifier,
     frame: Image,
     strip: Option<(Image, AnimatedTexture)>,
+    strategy: MipmapStrategy,
+    cutoff_bias: f32,
+}
+
+/// VANILLA: TextureMetadataSection (`texture.mipmap_strategy`, `texture.alpha_cutoff_bias`).
+fn texture_meta(mcmeta: Option<&[u8]>) -> (MipmapStrategy, f32) {
+    let Some(v) = mcmeta.and_then(|d| serde_json::from_slice::<serde_json::Value>(d).ok()) else {
+        return (MipmapStrategy::Auto, 0.0);
+    };
+    let t = &v["texture"];
+    let strategy = match t["mipmap_strategy"].as_str() {
+        Some("mean") => MipmapStrategy::Mean,
+        Some("cutout") => MipmapStrategy::Cutout,
+        Some("strict_cutout") => MipmapStrategy::StrictCutout,
+        Some("dark_cutout") => MipmapStrategy::DarkCutout,
+        _ => MipmapStrategy::Auto,
+    };
+    (
+        strategy,
+        t["alpha_cutoff_bias"].as_f64().unwrap_or(0.0) as f32,
+    )
 }
 
 impl Entry for Loaded {
@@ -68,12 +89,12 @@ impl BlockAtlas {
         let mut loaded = Vec::with_capacity(map.len());
         for (id, load) in &map {
             let Some(img) = load.load(rm) else { continue };
-            let meta = rm
-                .read(&format!(
-                    "assets/{}/textures/{}.png.mcmeta",
-                    id.namespace, id.path
-                ))
-                .and_then(|d| AnimationMeta::parse(&d));
+            let raw_meta = rm.read(&format!(
+                "assets/{}/textures/{}.png.mcmeta",
+                id.namespace, id.path
+            ));
+            let (strategy, cutoff_bias) = texture_meta(raw_meta.as_deref());
+            let meta = raw_meta.as_deref().and_then(AnimationMeta::parse);
             let (frame, strip) = match meta {
                 Some(m) => {
                     let (fw, fh) = m.frame_size(img.width, img.height);
@@ -95,6 +116,8 @@ impl BlockAtlas {
                 id: id.clone(),
                 frame,
                 strip,
+                strategy,
+                cutoff_bias,
             });
         }
         let st =
@@ -111,8 +134,8 @@ impl BlockAtlas {
                 &s.id.path,
                 s.frame.clone(),
                 mip_levels,
-                MipmapStrategy::Auto,
-                0.0,
+                s.strategy,
+                s.cutoff_bias,
             );
             for (l, img) in chain.iter().enumerate() {
                 blit_padded(&mut mips[l], img, x >> l, y >> l, st.padding >> l);

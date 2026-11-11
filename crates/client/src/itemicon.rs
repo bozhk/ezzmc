@@ -147,7 +147,8 @@ pub fn ctx_of(patch: &ezzmc_protocol::item::ComponentPatch) -> Ctx {
     cx
 }
 
-pub(crate) type Layer = (String, Vec<u32>);
+/// Слой иконки: модель, тинты, сдвиг в блоках (`transformation.translation` у `composite`).
+pub(crate) type Layer = (String, Vec<u32>, [f32; 3]);
 
 /// VANILLA: ItemModel-дерево (net.minecraft.client.renderer.item.*) для display_context=gui.
 /// Свойства, которых нет у иконки (рука, ручка, использование), считаются «ложными»/нулевыми.
@@ -164,7 +165,24 @@ pub(crate) fn eval(v: &Value, cx: &Ctx, dc: &str, out: &mut Vec<Layer>) {
                 .into_iter()
                 .flatten()
             {
+                let start = out.len();
                 eval(m, cx, dc, out);
+                // VANILLA: CompositeModel + `transformation` (Transformation#translation в блоках), напр. кровать.
+                let tr = m
+                    .get("transformation")
+                    .and_then(|t| t.get("translation"))
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        let f = |i: usize| a.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32;
+                        [f(0), f(1), f(2)]
+                    });
+                if let Some(tr) = tr {
+                    for l in &mut out[start..] {
+                        for (v, t) in l.2.iter_mut().zip(tr) {
+                            *v += t;
+                        }
+                    }
+                }
             }
         }
         "select" => {
@@ -225,6 +243,11 @@ pub(crate) fn eval(v: &Value, cx: &Ctx, dc: &str, out: &mut Vec<Layer>) {
                 eval(f, cx, dc, out);
             }
         }
+        // VANILLA: SpecialModelWrapper + ChestSpecialRenderer — модель сундука из ChestModel.
+        "special" if chest_texture(obj).is_some() => {
+            let tex = chest_texture(obj).unwrap_or_default();
+            out.push((format!("{CHEST_MARK}{tex}"), Vec::new(), [0.0; 3]));
+        }
         _ => {
             if let Some(m) = obj
                 .get("model")
@@ -236,10 +259,24 @@ pub(crate) fn eval(v: &Value, cx: &Ctx, dc: &str, out: &mut Vec<Layer>) {
                     .and_then(Value::as_array)
                     .map(|a| a.iter().map(|t| tint_color(t, cx)).collect())
                     .unwrap_or_default();
-                out.push((m.to_owned(), tints));
+                out.push((m.to_owned(), tints, [0.0; 3]));
             }
         }
     }
+}
+
+/// Метка слоя «модель сундука» вместо id модели (`Layer.0`).
+pub(crate) const CHEST_MARK: &str = "\u{1}chest:";
+
+/// `special`-модель типа `chest` → имя текстуры под `entity/chest/` (`normal`, `ender`, ...).
+fn chest_texture(obj: &serde_json::Map<String, Value>) -> Option<String> {
+    let m = obj.get("model")?.as_object()?;
+    let ty = m.get("type")?.as_str()?;
+    if ty.trim_start_matches("minecraft:") != "chest" {
+        return None;
+    }
+    let t = m.get("texture")?.as_str()?;
+    Some(t.trim_start_matches("minecraft:").to_owned())
 }
 
 // VANILLA-UNSURE: биомные tints (трава/листва) — цвета равнин по умолчанию.
@@ -298,11 +335,30 @@ pub fn bake(rm: &ResourceManager, name: &str, cx: &Ctx) -> Option<Icon> {
         serde_json::from_slice(&rm.read(&format!("assets/minecraft/items/{name}.json"))?).ok()?;
     let mut layers = Vec::new();
     eval(json.get("model")?, cx, "gui", &mut layers);
+    // Модели с элементами рисуем одним проходом с общим буфером глубины (composite: кровать = голова + ножной конец).
+    let mut group: Vec<Q> = Vec::new();
+    type GroupCfg = (([f32; 3], [f32; 3], [f32; 3]), bool, Vec<u32>);
+    let mut group_cfg: Option<GroupCfg> = None;
     let mut out: Option<Icon> = None;
-    for (model, tints) in layers {
+    for (model, tints, off) in layers {
+        if !model.starts_with(CHEST_MARK) {
+            if let Some((qs, t, lit)) = element_quads(rm, name, &model, off) {
+                group.extend(qs);
+                group_cfg.get_or_insert((t, lit, tints));
+                continue;
+            }
+        }
         let Some(ic) = bake_one(rm, name, &model, &tints) else {
             continue;
         };
+        out = Some(match out {
+            None => ic,
+            Some(base) => overlay(base, ic),
+        });
+    }
+    if let Some((t, lit, tints)) = group_cfg {
+        let mut tex = HashMap::new();
+        let ic = raster(rm, &mut tex, &group, t, lit, &tints);
         out = Some(match out {
             None => ic,
             Some(base) => overlay(base, ic),
@@ -345,7 +401,45 @@ fn overlay(base: Icon, top: Icon) -> Icon {
     Icon { rgba: b, w, h }
 }
 
+/// Квады модели с `elements` (со сдвигом `off` в блоках) и её gui-трансформ; `None` — нет модели или это generated.
+#[allow(clippy::type_complexity)]
+fn element_quads(
+    rm: &ResourceManager,
+    name: &str,
+    model: &str,
+    off: [f32; 3],
+) -> Option<(Vec<Q>, ([f32; 3], [f32; 3], [f32; 3]), bool)> {
+    let mut loader = ModelLoader::new(rm);
+    let (resolved, _) = loader.resolve(&Identifier::parse(model))?;
+    let slots = resolved.texture_slots();
+    let elements = resolved.elements();
+    if elements.is_empty() {
+        return None;
+    }
+    let quads = bake_elements(elements, &slots, &AnySprite, &ModelState::default(), name);
+    let t = resolved.transform(DisplayContext::Gui);
+    let qs = quads
+        .unculled
+        .iter()
+        .chain(quads.culled.iter().flatten())
+        .map(|q| Q {
+            pos: q.pos.map(|p| [p[0] + off[0], p[1] + off[1], p[2] + off[2]]),
+            uv: q.uv,
+            tint_index: q.tint_index,
+            sprite: q.sprite.clone(),
+        })
+        .collect();
+    Some((
+        qs,
+        (t.rotation, t.translation, t.scale),
+        resolved.gui_light() == GuiLight::Side,
+    ))
+}
+
 fn bake_one(rm: &ResourceManager, name: &str, model: &str, tints: &[u32]) -> Option<Icon> {
+    if let Some(tex) = model.strip_prefix(CHEST_MARK) {
+        return chest_icon(rm, tex);
+    }
     let mid = Identifier::parse(model);
     let mut loader = ModelLoader::new(rm);
     let (resolved, builtin) = loader.resolve(&mid)?;
@@ -389,27 +483,95 @@ fn bake_one(rm: &ResourceManager, name: &str, model: &str, tints: &[u32]) -> Opt
     }
     let quads = bake_elements(elements, &slots, &AnySprite, &ModelState::default(), name);
     let t = resolved.transform(DisplayContext::Gui);
+    let qs: Vec<Q> = quads
+        .unculled
+        .iter()
+        .chain(quads.culled.iter().flatten())
+        .map(|q| Q {
+            pos: q.pos,
+            uv: q.uv,
+            tint_index: q.tint_index,
+            sprite: q.sprite.clone(),
+        })
+        .collect();
+    let lit = resolved.gui_light() == GuiLight::Side;
+    Some(raster(
+        rm,
+        &mut tex,
+        &qs,
+        (t.rotation, t.translation, t.scale),
+        lit,
+        tints,
+    ))
+}
+
+/// Четырёхугольник модели в пространстве блока 0..1 (Y вверх).
+struct Q {
+    pos: [[f32; 3]; 4],
+    uv: [[f32; 2]; 4],
+    tint_index: i32,
+    sprite: Identifier,
+}
+
+/// Иконка сундука. VANILLA: ChestSpecialRenderer (openness 0, одиночный) + gui-трансформ
+/// `item/template_chest`.
+fn chest_icon(rm: &ResourceManager, tex_name: &str) -> Option<Icon> {
+    let mut loader = ModelLoader::new(rm);
+    let (resolved, _) = loader.resolve(&Identifier::parse("minecraft:item/chest"))?;
+    let t = resolved.transform(DisplayContext::Gui);
+    let model = crate::chest::model_single();
+    let qs: Vec<Q> = model
+        .quads(glam::Mat4::IDENTITY)
+        .into_iter()
+        .map(|q| Q {
+            pos: q.pos.map(|v| v.to_array()),
+            uv: q.uv,
+            tint_index: -1,
+            sprite: Identifier {
+                namespace: "minecraft".into(),
+                path: format!("entity/chest/{tex_name}"),
+            },
+        })
+        .collect();
+    let mut tex = HashMap::new();
+    Some(raster(
+        rm,
+        &mut tex,
+        &qs,
+        (t.rotation, t.translation, t.scale),
+        true,
+        &[],
+    ))
+}
+
+/// Программная растеризация квадов с gui-трансформом (`rot`, `translation`, `scale`).
+fn raster(
+    rm: &ResourceManager,
+    tex: &mut HashMap<Identifier, Option<Image>>,
+    quads: &[Q],
+    t: ([f32; 3], [f32; 3], [f32; 3]),
+    lit: bool,
+    tints: &[u32],
+) -> Icon {
     let rot = Mat3::from_euler(
         EulerRot::XYZ,
-        t.rotation[0].to_radians(),
-        t.rotation[1].to_radians(),
-        t.rotation[2].to_radians(),
+        t.0[0].to_radians(),
+        t.0[1].to_radians(),
+        t.0[2].to_radians(),
     );
-    let (sc, tr) = (Vec3::from(t.scale), Vec3::from(t.translation) / 16.0);
+    let (sc, tr) = (Vec3::from(t.2), Vec3::from(t.1) / 16.0);
     let xf = |v: Vec3| rot * ((v - Vec3::splat(0.5)) * sc) + tr;
-    let lit = resolved.gui_light() == GuiLight::Side;
     let s = RENDER as f32;
     let mut color = vec![0u32; RENDER * RENDER];
     let mut depth = vec![f32::MIN; RENDER * RENDER];
-    let all = quads.unculled.iter().chain(quads.culled.iter().flatten());
-    for q in all {
+    for q in quads {
         let p: Vec<Vec3> = q.pos.iter().map(|&a| xf(Vec3::from(a))).collect();
         let n = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero();
         // нормаль в экранных (y вверх) координатах: порядок вершин FaceInfo против часовой
         if n.z <= 0.0 {
             continue;
         }
-        load_tex(rm, &q.sprite, &mut tex);
+        load_tex(rm, &q.sprite, tex);
         let Some(Some(img)) = tex.get(&q.sprite) else {
             continue;
         };
@@ -509,9 +671,9 @@ fn bake_one(rm: &ResourceManager, name: &str, model: &str, tints: &[u32]) -> Opt
             }
         }
     }
-    Some(Icon {
+    Icon {
         rgba,
         w: OUT as u32,
         h: OUT as u32,
-    })
+    }
 }

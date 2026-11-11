@@ -502,3 +502,118 @@ pub fn bake_tnt(
         }
     }
 }
+
+/// VANILLA: FallingBlockRenderer#submit — блок целиком (без отсечения граней), сдвиг (-0.5,0,-0.5)
+/// от низа сущности; не рисуется, пока блок в её клетке уже совпадает с состоянием (приземлился).
+pub fn bake_falling(
+    level: &Level,
+    models: &BlockModels,
+    cam: [f64; 3],
+    partial: f32,
+    out: &mut Vec<u8>,
+    sky_darken: i32,
+    shadow: &mut Vec<u8>,
+) {
+    let Some(ty) = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+        .iter()
+        .position(|n| *n == "falling_block")
+    else {
+        return;
+    };
+    let cardinal = models.cardinal();
+    for e in level.entities.iter().filter(|e| e.ty == ty) {
+        let Some(state) = u32::try_from(e.data).ok().and_then(BlockState::from_id) else {
+            continue;
+        };
+        if state == BlockState::AIR {
+            continue;
+        }
+        let lerp = |a: f64, b: f64| a + (b - a) * f64::from(partial);
+        let pos = [
+            lerp(e.prev_pos[0], e.pos[0]),
+            lerp(e.prev_pos[1], e.pos[1]),
+            lerp(e.prev_pos[2], e.pos[2]),
+        ];
+        // shouldRender: getBlockState() != level.getBlockState(blockPosition()).
+        if level.chunks.block(
+            e.pos[0].floor() as i32,
+            e.pos[1].floor() as i32,
+            e.pos[2].floor() as i32,
+        ) == state
+        {
+            continue;
+        }
+        // MovingBlockRenderState.blockPos = (x, boundingBox.maxY, z): по ней берётся свет/AO/тинт.
+        let lpos = BlockPos {
+            x: e.pos[0].floor() as i32,
+            y: (e.pos[1] + 0.98).floor() as i32,
+            z: e.pos[2].floor() as i32,
+        };
+        let mut ps = Vec::new();
+        models.parts(state, lpos.x, lpos.y, lpos.z, &mut ps);
+        // VANILLA: FallingBlockRenderer — shadowRadius 0.5.
+        crate::entityshadow::bake(level, pos, cam, 0.5, 1.0, sky_darken, shadow);
+        let (cx, cz) = (lpos.x >> 4, lpos.z >> 4);
+        let hd = hood(level, cx, cz);
+        let base = SectionPos {
+            x: cx,
+            y: lpos.y >> 4,
+            z: cz,
+        };
+        let mut pad = Padded::fill(&hd, base);
+        let lp = [lpos.x - cx * 16, lpos.y - base.y * 16, lpos.z - cz * 16];
+        pad.isolate(lp, state);
+        let emission = state.props().map_or(0, |s| s.light_emission);
+        let smooth = models.smooth_lighting();
+        for part in ps {
+            let use_ao = smooth && emission == 0 && part.ao;
+            let qc = part.quads;
+            let all = qc.unculled.iter().map(|q| (q, None)).chain(
+                qc.culled
+                    .iter()
+                    .zip(ezzmc_assets::model::Direction::ALL)
+                    .flat_map(|(v, d)| v.iter().map(move |q| (q, Some(d)))),
+            );
+            for (q, cull) in all {
+                let info = calculate_shape(state, q);
+                // VANILLA: ModelBlockRenderer — AO / плоский свет как у террейна.
+                let ql: QuadLight = if use_ao {
+                    ao_light(
+                        &pad,
+                        state,
+                        lp,
+                        q.direction,
+                        q.shade_direction_override,
+                        &info,
+                        &cardinal,
+                    )
+                } else {
+                    flat_light(&pad, state, lp, cull, q, &info, &cardinal)
+                };
+                let t = if q.is_tinted() {
+                    models.tint(state, q.tint_index, &hd, base, lpos.x, lpos.y, lpos.z)
+                } else {
+                    [255; 3]
+                };
+                for i in 0..4 {
+                    let b = ql.brightness[i];
+                    let c = [
+                        (f32::from(t[0]) * b) as u8,
+                        (f32::from(t[1]) * b) as u8,
+                        (f32::from(t[2]) * b) as u8,
+                        255,
+                    ];
+                    let l = with_emission(ql.lightmap[i], q.light_emission);
+                    let light = ((l & 0xFFFF) as u16, ((l >> 16) & 0xFFFF) as u16);
+                    // model.parts дал координаты блока 0..1 (без мировой позиции): сдвиг (-0.5, 0, -0.5).
+                    let p = [
+                        (pos[0] + f64::from(q.pos[i][0]) - 0.5 - cam[0]) as f32,
+                        (pos[1] + f64::from(q.pos[i][1]) - cam[1]) as f32,
+                        (pos[2] + f64::from(q.pos[i][2]) - 0.5 - cam[2]) as f32,
+                    ];
+                    push_vertex_raw(out, p, q.uv[i], c, light);
+                }
+            }
+        }
+    }
+}

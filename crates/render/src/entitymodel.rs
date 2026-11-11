@@ -62,9 +62,27 @@ struct Polygon {
 #[derive(Clone, Debug)]
 pub struct Cube {
     polys: [Polygon; 6],
+    /// Маска видимых граней (биты: DOWN, UP, WEST, NORTH, EAST, SOUTH).
+    /// VANILLA: ModelPart.Cube#visibleFaces.
+    visible: u8,
 }
 
 impl Cube {
+    /// Оставить только грани из маски (VANILLA: CubeListBuilder#addBox(..., visibleFaces)).
+    fn visible_polys(&self) -> impl Iterator<Item = &Polygon> {
+        let m = self.visible;
+        self.polys
+            .iter()
+            .enumerate()
+            .filter(move |(i, _)| m & (1 << i) != 0)
+            .map(|(_, p)| p)
+    }
+
+    pub fn with_visible(mut self, mask: u8) -> Self {
+        self.visible = mask;
+        self
+    }
+
     /// VANILLA: ModelPart.Cube#<init>. `origin`/`dim` в пикселях, `grow` — раздутие по осям,
     /// `tex` — левый верхний угол развёртки в пикселях, `tex_size` — размер текстуры.
     pub fn new(
@@ -140,6 +158,7 @@ impl Cube {
             Polygon { v: vs, normal }
         };
         Cube {
+            visible: 0x3f,
             polys: [
                 // DOWN, UP, WEST, NORTH, EAST, SOUTH (порядок и вершины как в ModelPart.Cube 26.3)
                 mk([v101, v001, v000, v100], u1, v0, u2, v1, [0.0, -1.0, 0.0]),
@@ -189,6 +208,8 @@ pub struct BoxDef {
     pub dim: [f32; 3],
     pub grow: f32,
     pub mirror: bool,
+    /// Маска видимых граней (0x3f — все).
+    pub faces: u8,
 }
 
 impl BoxDef {
@@ -199,7 +220,12 @@ impl BoxDef {
             dim,
             grow: 0.0,
             mirror: false,
+            faces: 0x3f,
         }
+    }
+    pub const fn faces(mut self, mask: u8) -> Self {
+        self.faces = mask;
+        self
     }
     pub const fn grow(mut self, g: f32) -> Self {
         self.grow = g;
@@ -229,7 +255,10 @@ impl Model {
     ) -> usize {
         let cubes = boxes
             .iter()
-            .map(|b| Cube::new(b.origin, b.dim, [b.grow; 3], b.mirror, b.tex, self.tex_size))
+            .map(|b| {
+                Cube::new(b.origin, b.dim, [b.grow; 3], b.mirror, b.tex, self.tex_size)
+                    .with_visible(b.faces)
+            })
             .collect();
         self.parts.push(Part {
             name,
@@ -285,7 +314,7 @@ impl Model {
                 continue;
             }
             let m = mats[i];
-            for poly in part.cubes.iter().flat_map(|c| c.polys.iter()) {
+            for poly in part.cubes.iter().flat_map(|c| c.visible_polys()) {
                 out.push(RasterQuad {
                     pos: poly.v.map(|v| m.transform_point3(Vec3::from(v.pos) / 16.0)),
                     uv: poly.v.map(|v| v.uv),
@@ -324,7 +353,7 @@ impl Model {
             }
             let m = mats[i];
             for cube in &part.cubes {
-                for poly in &cube.polys {
+                for poly in cube.visible_polys() {
                     let n = m
                         .transform_vector3(Vec3::from(poly.normal))
                         .normalize_or_zero();

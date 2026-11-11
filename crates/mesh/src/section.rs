@@ -489,4 +489,17 @@ mod tests {
         // AO даёт значения ниже плоской тени 0.6·255 для боковых граней, но выше 0 (0.2-блоки усредняются)
         assert!(min < 127, "{min}");
     }
+
+    #[test]
+    fn adjacent_copper_grates_cull_shared_faces() {
+        let m = mesh_section(
+            SectionPos { x: 0, y: 0, z: 0 },
+            &hood(&[
+                ([5, 5, 5], st("copper_grate")),
+                ([6, 5, 5], st("copper_grate")),
+            ]),
+            &cube(),
+        );
+        assert_eq!(m.quad_count(), 10);
+    }
 }

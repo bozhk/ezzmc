@@ -42,6 +42,15 @@ def send(cmd):
         return {"ok": False, "error": f"connection lost: {e}"}
 
 
+def update_progress():
+    """Перегенерирует PROGRESS.md перед запуском игры. Сбой не мешает запуску."""
+    script = os.path.join(ROOT, "tools", "progress.py")
+    try:
+        subprocess.run([sys.executable, script], cwd=ROOT, timeout=30, capture_output=True)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"progress.py: {e}", file=sys.stderr)
+
+
 def launch(args):
     global proc
     if fh is not None and send({"cmd": "ping"}).get("ok"):
@@ -50,6 +59,7 @@ def launch(args):
         return send({"cmd": "ping"})
     if not os.path.exists(BIN):
         return {"ok": False, "error": f"{BIN} missing: cargo build --profile fast -p ezzmc-client"}
+    update_progress()
     cmd = [BIN, "--control", f"127.0.0.1:{PORT}", "--name", args.get("name") or os.environ.get("EZZMC_NAME", "EzzBot")]
     if args.get("addr"):
         cmd += ["--connect", args["addr"]]

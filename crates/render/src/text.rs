@@ -299,52 +299,95 @@ impl TextRenderer {
     }
 
     pub fn text_width(&self, s: &str) -> f32 {
-        s.chars()
-            .filter(|c| *c != '§')
-            .scan(false, |skip, c| {
-                let was = std::mem::replace(skip, false);
-                Some(if was { 0.0 } else { self.advance(c) })
-            })
-            .sum()
+        let mut w = 0.0;
+        let mut f = Fmt::default();
+        let mut hex_left = 0u32; // оставшиеся нибблы после §x
+        let mut it = s.chars();
+        while let Some(c) = it.next() {
+            if c == '§' {
+                let Some(code) = it.next() else { break };
+                if hex_left > 0 && code.is_ascii_hexdigit() {
+                    hex_left -= 1;
+                    if hex_left == 0 {
+                        f = Fmt::default();
+                    }
+                } else if code.eq_ignore_ascii_case(&'x') {
+                    hex_left = 6;
+                } else {
+                    hex_left = 0;
+                    apply_code(code, &mut f, &mut 0, 0);
+                }
+                continue;
+            }
+            w += self.advance(c) + if f.bold { 1.0 } else { 0.0 };
+        }
+        w
     }
 
     /// Рисует строку с левым верхним углом (x, y) в GUI-пикселях. `rgb` — 0xRRGGBB.
     /// `shadow` — ванильная тень.
     pub fn draw(&mut self, s: &str, x: f32, y: f32, rgb: u32, shadow: bool) {
-        // VANILLA: коды форматирования §a (зелёный) / §c (красный) / §r (сброс); подчёркивание не рисуем.
-        let mut cx = x;
-        let mut cur = rgb;
-        let mut rest = s;
-        while !rest.is_empty() {
-            let end = rest.find('§').unwrap_or(rest.len());
-            let (seg, tail) = rest.split_at(end);
+        // VANILLA: StringDecomposer#iterateFormatted — коды §0-f (цвет, сбрасывает форматирование),
+        // §k/l/m/n/o (стили), §r (сброс к базе), §x§R§R§G§G§B§B (RGB, как в Bukkit).
+        if !s.contains('§') {
             let c = |m: f32| {
                 [
-                    ((cur >> 16) & 255) as f32 / 255.0 * m,
-                    ((cur >> 8) & 255) as f32 / 255.0 * m,
-                    (cur & 255) as f32 / 255.0 * m,
+                    ((rgb >> 16) & 255) as f32 / 255.0 * m,
+                    ((rgb >> 8) & 255) as f32 / 255.0 * m,
+                    (rgb & 255) as f32 / 255.0 * m,
                     1.0,
                 ]
             };
-            if !seg.is_empty() {
-                if shadow {
-                    self.push(seg, cx + 1.0, y + 1.0, c(0.25));
-                }
-                self.push(seg, cx, y, c(1.0));
-                cx += seg.chars().map(|ch| self.advance(ch)).sum::<f32>();
+            if shadow {
+                self.push(s, x + 1.0, y + 1.0, c(0.25));
             }
-            let mut it = tail.chars();
-            if it.next().is_some() {
-                match it.next() {
-                    Some('a') => cur = 0x55FF55,
-                    Some('c') => cur = 0xFF5555,
-                    Some('e') => cur = 0xFFFF55,
-                    Some('f') => cur = 0xFFFFFF,
-                    Some('r') => cur = rgb,
-                    _ => {}
+            self.push(s, x, y, c(1.0));
+            return;
+        }
+        let mut cx = x;
+        let mut cur = rgb;
+        let mut f = Fmt::default();
+        let mut hex: Option<u32> = None; // накопленный RGB после §x (число нибблов в старших битах)
+        let mut hex_n = 0u32;
+        let mut buf = String::new();
+        let mut it = s.chars();
+        loop {
+            let c = it.next();
+            if c != Some('§') && c.is_some() {
+                buf.push(c.unwrap_or(' '));
+                continue;
+            }
+            if !buf.is_empty() {
+                cx = self.draw_fmt(&buf, cx, y, cur, 1.0, f, shadow);
+                buf.clear();
+            }
+            if c.is_none() {
+                break;
+            }
+            let Some(code) = it.next() else { break };
+            let code = code.to_ascii_lowercase();
+            if code == 'x' {
+                hex = Some(0);
+                hex_n = 0;
+            } else if let (Some(h), Some(d)) = (hex, code.to_digit(16)) {
+                let h = (h << 4) | d;
+                hex_n += 1;
+                if hex_n == 6 {
+                    cur = h;
+                    f = Fmt::default();
+                    hex = None;
+                } else {
+                    hex = Some(h);
+                }
+            } else {
+                hex = None;
+                if code == 'r' {
+                    cur = rgb;
+                    f = Fmt::default();
+                } else {
+                    apply_code(code, &mut f, &mut cur, rgb);
                 }
             }
-            rest = it.as_str();
         }
     }
 
@@ -613,9 +656,50 @@ fn build_atlas(sheets: &[FontSheet]) -> (Vec<u8>, u32, u32, rustc_hash::FxHashMa
     (img, aw, ah, glyphs)
 }
 
+/// Палитра ChatFormatting 0–f.
+const LEGACY_COLORS: [u32; 16] = [
+    0x000000, 0x0000AA, 0x00AA00, 0x00AAAA, 0xAA0000, 0xAA00AA, 0xFFAA00, 0xAAAAAA, 0x555555,
+    0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
+];
+
+/// Применяет один код `§c` (кроме x/RGB): цвет сбрасывает стили, k/l/m/n/o включают стиль, r — к базе.
+fn apply_code(code: char, f: &mut Fmt, cur: &mut u32, base: u32) {
+    let code = code.to_ascii_lowercase();
+    if let Some(i) = code.to_digit(16) {
+        *f = Fmt::default();
+        *cur = LEGACY_COLORS[i as usize];
+        return;
+    }
+    match code {
+        'k' => f.obfuscated = true,
+        'l' => f.bold = true,
+        'm' => f.strike = true,
+        'n' => f.underline = true,
+        'o' => f.italic = true,
+        'r' => {
+            *f = Fmt::default();
+            *cur = base;
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_codes_do_not_count_in_width() {
+        // Без шрифта проверяем только разбор: §x§1§2§3§4§5§6 не должен менять форму.
+        let mut f = Fmt::default();
+        let mut cur = 0;
+        apply_code('l', &mut f, &mut cur, 0xFFFFFF);
+        assert!(f.bold);
+        apply_code('c', &mut f, &mut cur, 0xFFFFFF);
+        assert!(!f.bold && cur == 0xFF5555);
+        apply_code('r', &mut f, &mut cur, 0x123456);
+        assert_eq!(cur, 0x123456);
+    }
 
     #[test]
     fn scale_matches_vanilla() {

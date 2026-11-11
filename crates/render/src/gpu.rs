@@ -93,8 +93,14 @@ impl Gpu {
                 "{backends:?}{}",
                 if force_fallback { "+fallback" } else { "" }
             );
+            // PERF: валидация indirect-вызовов в wgpu = CPU-проход по каждой команде при `finish` (~17% главного
+            // потока при rd=32). Команды террейна формирует сам клиент (в границах арены), ванильный GL их не проверяет.
+            // Отладка: WGPU_VALIDATION_INDIRECT_CALL=1.
+            let mut flags = wgpu::InstanceFlags::default();
+            flags.remove(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL);
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
                 backends,
+                flags: flags.with_env(),
                 ..Default::default()
             });
             let surface = match target {

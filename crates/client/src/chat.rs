@@ -214,6 +214,48 @@ pub fn flatten(c: &Component, lang: &Lang, colors: bool) -> Vec<Span> {
     out
 }
 
+/// Как `flatten`, но с базовым стилем родителя (цвет + курсив): подсказки предметов.
+/// VANILLA: ItemStack#getStyledHoverName / LORE_STYLE (`withStyle` родителя; свой стиль компонента сильнее).
+pub fn flatten_styled(c: &Component, lang: &Lang, color: u32, italic: bool) -> Vec<Span> {
+    let mut out = Vec::new();
+    let base = Span {
+        color,
+        italic,
+        ..Span::plain(String::new())
+    };
+    walk(c, lang, &base, &mut out);
+    out
+}
+
+/// Спаны → строка с кодами `§` для `TextRenderer::draw` (цвет через `§x§R§R§G§G§B§B`).
+pub fn spans_to_legacy(spans: &[Span], base: u32) -> String {
+    let mut s = String::new();
+    for sp in spans {
+        s.push_str("§r");
+        if sp.color != base {
+            s.push_str("§x");
+            for i in (0..6).rev() {
+                s.push('§');
+                s.push(char::from_digit((sp.color >> (i * 4)) & 15, 16).unwrap_or('0'));
+            }
+        }
+        for (on, c) in [
+            (sp.bold, 'l'),
+            (sp.italic, 'o'),
+            (sp.underline, 'n'),
+            (sp.strike, 'm'),
+            (sp.obf, 'k'),
+        ] {
+            if on {
+                s.push('§');
+                s.push(c);
+            }
+        }
+        s.push_str(&sp.text.replace('§', ""));
+    }
+    s
+}
+
 struct Msg {
     added: u64,
     spans: Vec<Span>,
@@ -971,5 +1013,29 @@ mod tests {
             .map(|s| s.text.as_str())
             .collect();
         assert_eq!(s, "<Bob> hi");
+    }
+}
+
+#[cfg(test)]
+mod legacy_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_string_has_italic_and_rgb() {
+        let sp = vec![Span {
+            italic: true,
+            color: 0x123456,
+            ..Span::plain("hi".into())
+        }];
+        assert_eq!(
+            spans_to_legacy(&sp, 0xAA00AA),
+            "§r§x§1§2§3§4§5§6§ohi".to_string()
+        );
+        let base = vec![Span {
+            italic: true,
+            color: 0xAA00AA,
+            ..Span::plain("x".into())
+        }];
+        assert_eq!(spans_to_legacy(&base, 0xAA00AA), "§r§ox");
     }
 }

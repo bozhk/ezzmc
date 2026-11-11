@@ -60,6 +60,14 @@ impl RangeAllocator {
         self.used
     }
 
+    /// Диагностика фрагментации: (самый большой свободный блок, число свободных блоков).
+    pub fn free_stats(&self) -> (u32, usize) {
+        (
+            self.free.iter().map(|&(_, l)| l).max().unwrap_or(0),
+            self.free.len(),
+        )
+    }
+
     /// Выделяет `len` элементов; `len == 0` ничего не занимает.
     pub fn alloc(&mut self, len: u32) -> Option<u32> {
         if len == 0 {
@@ -142,6 +150,7 @@ pub struct Placement {
 
 /// Одна команда `DrawIndexedIndirect` (20 байт).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct IndirectCmd {
     pub index_count: u32,
     pub instance_count: u32,
@@ -152,6 +161,13 @@ pub struct IndirectCmd {
 
 impl IndirectCmd {
     pub const SIZE: u64 = 20;
+
+    /// Команды как готовые байты буфера (без копирования): `repr(C)` из 5×u32/i32, паддинга нет.
+    #[cfg(target_endian = "little")]
+    fn slice_as_bytes(v: &[IndirectCmd]) -> &[u8] {
+        // SAFETY: IndirectCmd — repr(C) из пяти 4-байтовых полей (20 Б) без паддинга; любые байты читаемы.
+        unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), std::mem::size_of_val(v)) }
+    }
 
     pub fn to_bytes(&self) -> [u8; 20] {
         let mut o = [0u8; 20];
@@ -174,6 +190,8 @@ pub struct ArenaLayout {
     slots: Vec<Option<SectionPos>>,
     free_slots: Vec<u32>,
     sections: HashMap<SectionPos, Placement>,
+    /// Растёт при любой вставке/удалении секции: признак «раскладка менялась» для кэша кадра.
+    pub rev: u64,
 }
 
 impl ArenaLayout {
@@ -186,6 +204,7 @@ impl ArenaLayout {
             slots: Vec::new(),
             free_slots: Vec::new(),
             sections: HashMap::default(),
+            rev: 0,
         }
     }
 
@@ -215,7 +234,14 @@ impl ArenaLayout {
         self.vertices.used()
     }
 
+    /// Диагностика: (занято, ёмкость, самый большой свободный блок, число свободных блоков).
+    pub fn vertex_stats(&self) -> (u32, u32, u32, usize) {
+        let (big, n) = self.vertices.free_stats();
+        (self.vertices.used(), self.vertices.capacity(), big, n)
+    }
+
     pub fn remove(&mut self, pos: SectionPos) -> Option<Placement> {
+        self.rev += 1;
         let p = self.sections.remove(&pos)?;
         for (i, l) in p.layers.iter().enumerate() {
             self.vertices.free(l.first_vertex, l.quads * 4);
@@ -238,6 +264,7 @@ impl ArenaLayout {
         pos: SectionPos,
         quads: [u32; RenderLayer::COUNT],
     ) -> Result<Placement, ArenaError> {
+        self.rev += 1;
         if let Some(&q) = quads.iter().find(|&&q| q > PATTERN_QUADS) {
             return Err(ArenaError::TooManyQuads(q));
         }
@@ -342,6 +369,35 @@ impl ArenaLayout {
         }
     }
 
+    /// Команды всех слоёв за один проход (один хеш-поиск на секцию вместо одного на слой).
+    pub fn commands_all(
+        &self,
+        near_first: &[SectionPos],
+        translucent_far_first: bool,
+    ) -> [Vec<IndirectCmd>; RenderLayer::COUNT] {
+        let mut out: [Vec<IndirectCmd>; RenderLayer::COUNT] = Default::default();
+        for pos in near_first {
+            let Some(p) = self.sections.get(pos) else {
+                continue;
+            };
+            for (i, l) in p.layers.iter().enumerate() {
+                if l.quads > 0 {
+                    out[i].push(IndirectCmd {
+                        index_count: l.quads * 6,
+                        instance_count: 1,
+                        first_index: l.first_index,
+                        base_vertex: l.first_vertex as i32,
+                        first_instance: p.slot,
+                    });
+                }
+            }
+        }
+        if translucent_far_first {
+            out[TRANSLUCENT].reverse();
+        }
+        out
+    }
+
     /// Команды слоя для секций в заданном порядке (пустые слои пропускаются).
     pub fn commands(
         &self,
@@ -365,13 +421,36 @@ impl ArenaLayout {
     }
 }
 
+fn slot_set<T>(v: &mut Vec<Option<T>>, slot: u32, val: Option<T>) {
+    let i = slot as usize;
+    if v.len() <= i {
+        if val.is_none() {
+            return;
+        }
+        v.resize_with(i + 1, || None);
+    }
+    v[i] = val;
+}
+
 fn u32_bytes(v: &[u32]) -> Vec<u8> {
-    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+    // Предвыделение + chunks_exact_mut: без FlatMap по одному u32 (горячо при resort/upload).
+    let mut out = vec![0u8; v.len() * 4];
+    for (dst, x) in out.chunks_exact_mut(4).zip(v) {
+        dst.copy_from_slice(&x.to_le_bytes());
+    }
+    out
 }
 
 /// Индексы шаблона `0,1,2,2,3,0` на `quads` квадов.
 pub fn quad_pattern(quads: u32) -> Vec<u32> {
     ezzmc_mesh::sort::identity_indices(quads as usize)
+}
+
+/// Запись резидентной секции в слотовом массиве (копия `Placement` + позиция).
+#[derive(Clone, Copy)]
+struct SlabEntry {
+    pos: SectionPos,
+    p: Placement,
 }
 
 struct Translucent {
@@ -397,7 +476,10 @@ pub struct TerrainArena {
     stale_slots: Vec<u32>,
     max_slots: u32,
     first_instance_ok: bool,
-    sort: HashMap<SectionPos, Translucent>,
+    /// Сортировка прозрачных квадов по слоту секции (без хеширования на кадр).
+    sort: Vec<Option<Translucent>>,
+    /// Плотный список резидентных секций по слотам: отсечение и сбор команд без хеш-поисков.
+    slab: Vec<Option<SlabEntry>>,
     /// Команды последнего `prepare_draws` по слоям.
     cmds: [Vec<IndirectCmd>; RenderLayer::COUNT],
 }
@@ -460,7 +542,8 @@ impl TerrainArena {
             first_instance_ok: device
                 .features()
                 .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
-            sort: HashMap::default(),
+            sort: Vec::new(),
+            slab: Vec::new(),
             cmds: Default::default(),
         }
     }
@@ -481,7 +564,12 @@ impl TerrainArena {
         let old_slot = self.layout.get(pos).map(|p| p.slot);
         let quads = std::array::from_fn(|i| (mesh.layers[i].len() / 4) as u32);
         let p = self.layout.insert(pos, quads)?;
-        self.sort.remove(&pos);
+        if let Some(old) = old_slot {
+            slot_set(&mut self.sort, old, None);
+            slot_set(&mut self.slab, old, None);
+        }
+        slot_set(&mut self.sort, p.slot, None);
+        slot_set(&mut self.slab, p.slot, Some(SlabEntry { pos, p }));
         if let Some(old) = old_slot.filter(|&s| s != p.slot) {
             self.write_src_cmds(queue, old, None);
         }
@@ -494,24 +582,24 @@ impl TerrainArena {
             if v.is_empty() {
                 continue;
             }
-            // Блоками по 16 байт: `flat_map` по байтам не векторизуется и давал ~20% кадра на загрузке.
-            let mut bytes = Vec::with_capacity(v.len() * PackedVertex::SIZE);
-            for p in v.iter() {
-                bytes.extend_from_slice(&p.to_bytes());
-            }
+            #[cfg(target_endian = "little")]
+            let bytes = PackedVertex::slice_as_bytes(v);
+            #[cfg(not(target_endian = "little"))]
+            let bytes = &v.iter().flat_map(|p| p.to_bytes()).collect::<Vec<u8>>()[..];
             queue.write_buffer(
                 &self.vertex_buf,
                 u64::from(l.first_vertex) * PackedVertex::SIZE as u64,
-                &bytes,
+                bytes,
             );
         }
         if p.layers[TRANSLUCENT].quads > 0 {
-            self.sort.insert(
-                pos,
-                Translucent {
+            slot_set(
+                &mut self.sort,
+                p.slot,
+                Some(Translucent {
                     sort: SortState::from_vertices(&mesh.layers[TRANSLUCENT]),
                     pov: None,
-                },
+                }),
             );
             self.resort(queue, pos, camera);
         }
@@ -572,8 +660,9 @@ impl TerrainArena {
     }
 
     pub fn remove(&mut self, pos: SectionPos) {
-        self.sort.remove(&pos);
         if let Some(p) = self.layout.remove(pos) {
+            slot_set(&mut self.sort, p.slot, None);
+            slot_set(&mut self.slab, p.slot, None);
             self.stale_slots.push(p.slot);
         }
     }
@@ -589,9 +678,20 @@ impl TerrainArena {
 
     /// Пересортирует прозрачные квады, если нужно (`PointOfView::needs_resort`). Возвращает, была ли запись.
     pub fn resort(&mut self, queue: &wgpu::Queue, pos: SectionPos, camera: [f64; 3]) -> bool {
-        let (Some(p), Some(t)) = (self.layout.get(pos), self.sort.get_mut(&pos)) else {
+        let Some(slot) = self.layout.get(pos).map(|p| p.slot) else {
             return false;
         };
+        self.resort_slot(queue, slot, camera)
+    }
+
+    fn resort_slot(&mut self, queue: &wgpu::Queue, slot: u32, camera: [f64; 3]) -> bool {
+        let (Some(Some(e)), Some(Some(t))) = (
+            self.slab.get(slot as usize),
+            self.sort.get_mut(slot as usize),
+        ) else {
+            return false;
+        };
+        let (pos, p) = (e.pos, e.p);
         let pov = PointOfView::of(camera, [pos.x, pos.y, pos.z]);
         if !PointOfView::needs_resort(t.pov, pov) {
             return false;
@@ -611,6 +711,87 @@ impl TerrainArena {
         true
     }
 
+    /// Отсечение + пересортировка прозрачных + сбор команд за один проход по слотам (без хеш-поисков).
+    /// `visible(x,y,z)` — тест секции (вызывается параллельно); `resort_budget` — сколько секций
+    /// пересортировать за вызов. Возвращает (число видимых секций, бюджет пересортировки исчерпан).
+    pub fn cull_prepare(
+        &mut self,
+        queue: &wgpu::Queue,
+        camera: [f64; 3],
+        resort_budget: usize,
+        visible: impl Fn(i32, i32, i32) -> bool + Sync,
+    ) -> (usize, bool) {
+        use rayon::prelude::*;
+        let cam32 = camera;
+        // (расстояние², слот) видимых секций; расстояние ≥ 0 → порядок f32-битов = порядок значений.
+        let mut keyed: Vec<u64> = self
+            .slab
+            .par_iter()
+            .enumerate()
+            .filter_map(|(slot, e)| {
+                let e = e.as_ref()?;
+                let pos = e.pos;
+                if !visible(pos.x, pos.y, pos.z) {
+                    return None;
+                }
+                let d = |c: i32, v: f64| f64::from(c * 16 + 8) - v;
+                let (x, y, z) = (d(pos.x, cam32[0]), d(pos.y, cam32[1]), d(pos.z, cam32[2]));
+                let dist = (x * x + y * y + z * z) as f32;
+                Some((u64::from(dist.to_bits()) << 32) | slot as u64)
+            })
+            .collect();
+        let n_visible = keyed.len();
+        // Пересортировка прозрачных — до сбора команд (индексы пишутся в буфер независимо от команд).
+        let mut resorted = 0;
+        for &k in &keyed {
+            let slot = (k & 0xFFFF_FFFF) as u32;
+            let has_t = self.sort.get(slot as usize).is_some_and(Option::is_some);
+            if has_t && self.resort_slot(queue, slot, camera) {
+                resorted += 1;
+                if resorted >= resort_budget {
+                    break;
+                }
+            }
+        }
+        keyed.sort_unstable();
+        let mut all: [Vec<IndirectCmd>; RenderLayer::COUNT] = Default::default();
+        for &k in &keyed {
+            let Some(Some(e)) = self.slab.get((k & 0xFFFF_FFFF) as usize) else {
+                continue;
+            };
+            for (i, l) in e.p.layers.iter().enumerate() {
+                if l.quads > 0 {
+                    all[i].push(IndirectCmd {
+                        index_count: l.quads * 6,
+                        instance_count: 1,
+                        first_index: l.first_index,
+                        base_vertex: l.first_vertex as i32,
+                        first_instance: e.p.slot,
+                    });
+                }
+            }
+        }
+        all[TRANSLUCENT].reverse();
+        self.write_cmds(queue, all);
+        (n_visible, resorted >= resort_budget)
+    }
+
+    fn write_cmds(&mut self, queue: &wgpu::Queue, mut all: [Vec<IndirectCmd>; RenderLayer::COUNT]) {
+        let cap = self.max_slots as usize;
+        for layer in RenderLayer::ALL {
+            let cmds = &mut all[layer.index()];
+            cmds.truncate(cap);
+            #[cfg(target_endian = "little")]
+            let bytes = IndirectCmd::slice_as_bytes(cmds);
+            #[cfg(not(target_endian = "little"))]
+            let bytes = &cmds.iter().flat_map(|c| c.to_bytes()).collect::<Vec<u8>>()[..];
+            if !bytes.is_empty() {
+                queue.write_buffer(&self.indirect_buf, self.layer_offset(layer), bytes);
+            }
+        }
+        self.cmds = all;
+    }
+
     /// Собирает команды слоёв для видимых секций и заливает их в индирект-буфер.
     /// Непрозрачные слои — ближние первыми (раннее отсечение по глубине), прозрачные — дальние первыми.
     pub fn prepare_draws(&mut self, queue: &wgpu::Queue, visible: &[SectionPos], camera: [f64; 3]) {
@@ -623,29 +804,30 @@ impl TerrainArena {
         let mut keyed: Vec<(f64, SectionPos)> = visible.iter().map(|p| (dist(p), *p)).collect();
         keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
         let near: Vec<SectionPos> = keyed.into_iter().map(|(_, p)| p).collect();
-        let far: Vec<SectionPos> = near.iter().rev().copied().collect();
+        // VANILLA: прозрачный слой — дальние первыми (reverse ближних); остальные — ближние первыми.
+        let mut all = self.layout.commands_all(&near, true);
+        let cap = self.max_slots as usize;
         for layer in RenderLayer::ALL {
-            let order = if layer == RenderLayer::Translucent {
-                &far
-            } else {
-                &near
-            };
-            let cmds = self.layout.commands(layer, order.iter().copied());
-            let cap = self.max_slots as usize;
-            let cmds = &cmds[..cmds.len().min(cap)];
+            let cmds = &mut all[layer.index()];
+            cmds.truncate(cap);
             let mut bytes = Vec::with_capacity(cmds.len() * IndirectCmd::SIZE as usize);
-            for c in cmds {
+            for c in cmds.iter() {
                 bytes.extend_from_slice(&c.to_bytes());
             }
             if !bytes.is_empty() {
                 queue.write_buffer(&self.indirect_buf, self.layer_offset(layer), &bytes);
             }
-            self.cmds[layer.index()] = cmds.to_vec();
         }
+        self.cmds = all;
     }
 
     fn layer_offset(&self, layer: RenderLayer) -> u64 {
         layer.index() as u64 * u64::from(self.max_slots) * IndirectCmd::SIZE
+    }
+
+    /// Ревизия раскладки секций (растёт при вставке/удалении).
+    pub fn revision(&self) -> u64 {
+        self.layout.rev
     }
 
     /// Число секций, нарисованных в слое при последнем `prepare_draws`.
@@ -680,7 +862,7 @@ impl TerrainArena {
     }
 }
 
-/// Вершинный формат террейна: `Uint16x4` позиция+свет, `Unorm16x2` UV, `Unorm8x4` цвет.
+/// Вершинный формат террейна: `Uint16x4` позиция+свет, `Uint16x2` UV (÷65536), `Unorm8x4` цвет.
 pub fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     const ATTRS: [wgpu::VertexAttribute; 3] = [
         wgpu::VertexAttribute {
@@ -689,7 +871,7 @@ pub fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
             shader_location: 0,
         },
         wgpu::VertexAttribute {
-            format: wgpu::VertexFormat::Unorm16x2,
+            format: wgpu::VertexFormat::Uint16x2,
             offset: 8,
             shader_location: 1,
         },
@@ -834,7 +1016,9 @@ impl TerrainPipelines {
                     bias: if matches!(layer, RenderLayer::Cutout | RenderLayer::Tripwire) {
                         wgpu::DepthBiasState {
                             constant: -2,
-                            slope_scale: -1.0,
+                            // slope_scale тянул к камере крутые (боковые) грани листвы поверх верхних —
+                            // тёмная линия по границам блоков; только постоянный сдвиг.
+                            slope_scale: 0.0,
                             clamp: 0.0,
                         }
                     } else {

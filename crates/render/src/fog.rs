@@ -1,6 +1,5 @@
 //! Туман. VANILLA: FogRenderer#setupFog/computeFogColor + fog/environment/* (26.3).
-//! Свободная камера без сущности: эффекты Blindness/Darkness/NightVision и water vision не
-//! применяются (VANILLA-UNSURE: подключить, когда появится игрок).
+//! Эффекты Blindness/Darkness/NightVision приходят в `FogInput::effects` (клиент хранит их в `effects.rs`).
 
 use crate::sky::atmospheric_fog_color;
 use crate::uniforms::FogUniform;
@@ -45,7 +44,19 @@ impl Default for FogAttrs {
     }
 }
 
+/// Эффекты камеры-сущности, влияющие на туман (FogRenderer#FOG_ENVIRONMENTS, computeFogColor).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FogEffects {
+    /// Blindness: оставшаяся длительность в тиках (`-1` — бесконечный).
+    pub blindness: Option<i32>,
+    /// Darkness: `getBlendFactor(partial)`.
+    pub darkness: Option<f32>,
+    /// `nightVisionScale`, если есть NightVision и нет Darkness (иначе 0).
+    pub night_vision: f32,
+}
+
 pub struct FogInput {
+    pub effects: FogEffects,
     pub fog_type: FogType,
     pub attrs: FogAttrs,
     pub day_time: i64,
@@ -185,18 +196,51 @@ pub fn setup_fog(i: &FogInput, st: &FogState) -> FogUniform {
             )
         }
     };
+    // VANILLA: FOG_ENVIRONMENTS по порядку Lava, PowderSnow, Blindness, Darkness, Water, Atmospheric;
+    // эффекты применимы при любом fogType, кроме лавы/снега (те идут раньше в списке).
+    let (mut start, mut end, mut sky_end, mut cloud_end) = (start, end, sky_end, cloud_end);
+    let lava_or_snow = matches!(i.fog_type, FogType::Lava | FogType::PowderSnow);
+    let fx = &i.effects;
+    let mut void_dark = ((i.void_darkness_onset + i.min_y as f32 - i.cam_y as f32)
+        / i.void_darkness_onset)
+        .clamp(0.0, 1.0);
+    if !lava_or_snow {
+        if let Some(dur) = fx.blindness {
+            // BlindnessFogEnvironment
+            let d = if dur < 0 {
+                5.0
+            } else {
+                rd + (5.0 - rd) * (dur as f32 / 20.0).min(1.0)
+            };
+            (start, end, sky_end, cloud_end) = (d * 0.25, d, d * 0.8, d * 0.8);
+            void_dark = if !(0..=19).contains(&dur) {
+                1.0
+            } else {
+                (dur as f32 / 20.0).max(void_dark)
+            };
+        } else if let Some(blend) = fx.darkness {
+            // DarknessFogEnvironment
+            let d = rd + (15.0 - rd) * blend;
+            (start, end, sky_end, cloud_end) = (d * 0.75, d, d, d);
+            void_dark = blend.max(void_dark);
+        }
+    }
     // Затемнение у дна мира (не в лаве/снегу).
     let mut col = base;
-    let onset = i.void_darkness_onset;
-    let darkness = ((onset + i.min_y as f32 - i.cam_y as f32) / onset).clamp(0.0, 1.0);
+    let darkness = void_dark;
     if darkness > 0.0 && !matches!(i.fog_type, FogType::Lava | FogType::PowderSnow) {
         let k = (1.0 - darkness) * (1.0 - darkness);
         col = [col[0] * k, col[1] * k, col[2] * k];
     }
-    // VANILLA: FogRenderer#computeFogColor — в воде яркость растёт с getWaterVision (нормировка по max).
-    if matches!(i.fog_type, FogType::Water) && col[0] != 0.0 && col[1] != 0.0 && col[2] != 0.0 {
+    // VANILLA: FogRenderer#computeFogColor — brightenFactor: в воде getWaterVision, иначе ночное зрение.
+    let bright = if matches!(i.fog_type, FogType::Water) {
+        i.water_vision
+    } else {
+        fx.night_vision
+    };
+    if bright > 0.0 && col[0] != 0.0 && col[1] != 0.0 && col[2] != 0.0 {
         let k = 1.0 / col[0].max(col[1]).max(col[2]);
-        let t = i.water_vision;
+        let t = bright;
         col = col.map(|v| v + (v * k - v) * t);
     }
     let span = (rd / 10.0).clamp(4.0, 64.0);
@@ -217,6 +261,7 @@ mod tests {
 
     fn input(t: FogType) -> FogInput {
         FogInput {
+            effects: FogEffects::default(),
             fog_type: t,
             attrs: FogAttrs::default(),
             day_time: 6000,
@@ -242,6 +287,25 @@ mod tests {
         assert_eq!(f.render_distance_end, 192.0);
         assert_eq!(f.render_distance_start, 192.0 - 19.2);
         assert_eq!(f.sky_end, 192.0);
+    }
+
+    #[test]
+    fn blindness_and_darkness_pull_fog_in() {
+        let mut i = input(FogType::Atmospheric);
+        i.effects.blindness = Some(-1);
+        let f = setup_fog(&i, &FogState::default());
+        assert_eq!((f.environmental_start, f.environmental_end), (1.25, 5.0));
+        assert_eq!((f.sky_end, f.clouds_end), (4.0, 4.0));
+        // Darkness blend 1: distance 15, start ×0.75
+        let mut i = input(FogType::Atmospheric);
+        i.effects.darkness = Some(1.0);
+        let f = setup_fog(&i, &FogState::default());
+        assert_eq!((f.environmental_start, f.environmental_end), (11.25, 15.0));
+        // Лава перекрывает эффекты.
+        let mut i = input(FogType::Lava);
+        i.effects.blindness = Some(-1);
+        let f = setup_fog(&i, &FogState::default());
+        assert_eq!(f.environmental_end, 1.0);
     }
 
     #[test]

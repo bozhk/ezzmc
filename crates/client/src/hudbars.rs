@@ -33,6 +33,84 @@ pub const SPRITES: &[(&str, &str)] = &[
         "heart_hardcore_half_blinking",
         "sprites/hud/heart/hardcore_half_blinking",
     ),
+    ("heart_poisoned_full", "sprites/hud/heart/poisoned_full"),
+    (
+        "heart_poisoned_full_blinking",
+        "sprites/hud/heart/poisoned_full_blinking",
+    ),
+    ("heart_poisoned_half", "sprites/hud/heart/poisoned_half"),
+    (
+        "heart_poisoned_half_blinking",
+        "sprites/hud/heart/poisoned_half_blinking",
+    ),
+    (
+        "heart_poisoned_hardcore_full",
+        "sprites/hud/heart/poisoned_hardcore_full",
+    ),
+    (
+        "heart_poisoned_hardcore_full_blinking",
+        "sprites/hud/heart/poisoned_hardcore_full_blinking",
+    ),
+    (
+        "heart_poisoned_hardcore_half",
+        "sprites/hud/heart/poisoned_hardcore_half",
+    ),
+    (
+        "heart_poisoned_hardcore_half_blinking",
+        "sprites/hud/heart/poisoned_hardcore_half_blinking",
+    ),
+    ("heart_withered_full", "sprites/hud/heart/withered_full"),
+    (
+        "heart_withered_full_blinking",
+        "sprites/hud/heart/withered_full_blinking",
+    ),
+    ("heart_withered_half", "sprites/hud/heart/withered_half"),
+    (
+        "heart_withered_half_blinking",
+        "sprites/hud/heart/withered_half_blinking",
+    ),
+    (
+        "heart_withered_hardcore_full",
+        "sprites/hud/heart/withered_hardcore_full",
+    ),
+    (
+        "heart_withered_hardcore_full_blinking",
+        "sprites/hud/heart/withered_hardcore_full_blinking",
+    ),
+    (
+        "heart_withered_hardcore_half",
+        "sprites/hud/heart/withered_hardcore_half",
+    ),
+    (
+        "heart_withered_hardcore_half_blinking",
+        "sprites/hud/heart/withered_hardcore_half_blinking",
+    ),
+    ("heart_absorbing_full", "sprites/hud/heart/absorbing_full"),
+    (
+        "heart_absorbing_full_blinking",
+        "sprites/hud/heart/absorbing_full_blinking",
+    ),
+    ("heart_absorbing_half", "sprites/hud/heart/absorbing_half"),
+    (
+        "heart_absorbing_half_blinking",
+        "sprites/hud/heart/absorbing_half_blinking",
+    ),
+    (
+        "heart_absorbing_hardcore_full",
+        "sprites/hud/heart/absorbing_hardcore_full",
+    ),
+    (
+        "heart_absorbing_hardcore_full_blinking",
+        "sprites/hud/heart/absorbing_hardcore_full_blinking",
+    ),
+    (
+        "heart_absorbing_hardcore_half",
+        "sprites/hud/heart/absorbing_hardcore_half",
+    ),
+    (
+        "heart_absorbing_hardcore_half_blinking",
+        "sprites/hud/heart/absorbing_hardcore_half_blinking",
+    ),
     ("armor_full", "sprites/hud/armor_full"),
     ("armor_half", "sprites/hud/armor_half"),
     ("armor_empty", "sprites/hud/armor_empty"),
@@ -61,6 +139,12 @@ pub struct Stats {
     pub xp_level: i32,
     pub hardcore: bool,
     pub tick: u64,
+    /// VANILLA: Player#getAbsorptionAmount (метаданные #17).
+    pub absorption: f32,
+    /// VANILLA: Hud.HeartType#forPlayer: 0 обычные, 1 отравление, 2 иссушение.
+    pub heart_kind: u8,
+    /// VANILLA: effect Regeneration → сердце «подпрыгивает» (heartOffsetIndex).
+    pub regen: bool,
 }
 
 /// VANILLA: Gui#lastHealth/displayHealth/healthBlinkTime/lastHealthTime.
@@ -111,7 +195,8 @@ pub fn draw_health(p: &mut GuiPainter, st: &mut HudState, s: &Stats, gw: f32, gh
     let x_right = (gw / 2.0) as i32 + 91;
     let y_base = gh as i32 - 39;
     let max_health = s.max_health.max(old as f32).max(cur as f32);
-    let rows = (max_health / 2.0 / 10.0).ceil() as i32;
+    let absorption = s.absorption.ceil() as i32;
+    let rows = ((max_health + absorption as f32) / 2.0 / 10.0).ceil() as i32;
     let row_h = (10 - (rows - 2)).max(3);
 
     // Броня.
@@ -131,24 +216,58 @@ pub fn draw_health(p: &mut GuiPainter, st: &mut HudState, s: &Stats, gw: f32, gh
         }
     }
 
-    // Сердца.
+    // Сердца. VANILLA: Hud#extractHearts (+ сердца поглощения после обычных).
+    let kind = match s.heart_kind {
+        1 => "poisoned_",
+        2 => "withered_",
+        _ => "",
+    };
     let hc = if s.hardcore { "hardcore_" } else { "" };
     let containers = (max_health / 2.0).ceil() as i32;
-    for idx in (0..containers).rev() {
+    let abs_containers = (absorption as f32 / 2.0).ceil() as i32;
+    let regen_idx = if s.regen {
+        (s.tick % (max_health + 5.0).ceil() as u64) as i32
+    } else {
+        -1
+    };
+    for idx in (0..containers + abs_containers).rev() {
         let (row, col) = (idx / 10, idx % 10);
         let x = x_left + col * 8;
         let mut y = y_base - row * row_h;
-        if cur <= 4 {
+        if cur + absorption <= 4 {
             y += rng.next_int_bound(2);
+        }
+        if idx < containers && idx == regen_idx {
+            y -= 2;
         }
         let bl = |b: bool| if b { "_blinking" } else { "" };
         blit9(p, &format!("heart_{hc}container{}", bl(blink)), x, y);
         let halves = idx * 2;
+        if idx >= containers {
+            let ah = halves - containers * 2;
+            if ah < absorption {
+                let half = ah + 1 == absorption;
+                let k = if s.heart_kind == 2 {
+                    "withered_"
+                } else {
+                    "absorbing_"
+                };
+                blit9(
+                    p,
+                    &format!("heart_{k}{hc}{}", if half { "half" } else { "full" }),
+                    x,
+                    y,
+                );
+            }
+        }
         if blink && halves < old {
             let half = halves + 1 == old;
             blit9(
                 p,
-                &format!("heart_{hc}{}_blinking", if half { "half" } else { "full" }),
+                &format!(
+                    "heart_{kind}{hc}{}_blinking",
+                    if half { "half" } else { "full" }
+                ),
                 x,
                 y,
             );
@@ -157,7 +276,7 @@ pub fn draw_health(p: &mut GuiPainter, st: &mut HudState, s: &Stats, gw: f32, gh
             let half = halves + 1 == cur;
             blit9(
                 p,
-                &format!("heart_{hc}{}", if half { "half" } else { "full" }),
+                &format!("heart_{kind}{hc}{}", if half { "half" } else { "full" }),
                 x,
                 y,
             );

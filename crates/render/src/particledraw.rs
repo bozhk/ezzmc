@@ -49,12 +49,17 @@ pub fn push_vertex_raw(
     c: [u8; 4],
     light: (u16, u16),
 ) {
-    for v in p.into_iter().chain(uv) {
-        out.extend_from_slice(&v.to_le_bytes());
-    }
-    out.extend_from_slice(&c);
-    out.extend_from_slice(&i32::from(light.0).to_le_bytes());
-    out.extend_from_slice(&i32::from(light.1).to_le_bytes());
+    // Один блок 32 байта: один reserve/копирование вместо 8 extend_from_slice по 4 байта.
+    let mut b = [0u8; VERTEX_SIZE];
+    b[0..4].copy_from_slice(&p[0].to_le_bytes());
+    b[4..8].copy_from_slice(&p[1].to_le_bytes());
+    b[8..12].copy_from_slice(&p[2].to_le_bytes());
+    b[12..16].copy_from_slice(&uv[0].to_le_bytes());
+    b[16..20].copy_from_slice(&uv[1].to_le_bytes());
+    b[20..24].copy_from_slice(&c);
+    b[24..28].copy_from_slice(&i32::from(light.0).to_le_bytes());
+    b[28..32].copy_from_slice(&i32::from(light.1).to_le_bytes());
+    out.extend_from_slice(&b);
 }
 
 fn build(out: &mut Vec<u8>, q: &ParticleQuad, right: [f32; 3], up: [f32; 3]) {

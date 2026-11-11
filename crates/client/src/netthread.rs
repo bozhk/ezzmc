@@ -108,6 +108,10 @@ pub enum NetEvt {
     Health(f32, i32, f32),
     /// ClientboundSetExperiencePacket: прогресс, уровень.
     Experience(f32, i32),
+    /// ClientboundUpdateMobEffectPacket локального игрока: (effect id, amplifier, duration, flags).
+    Effect(i32, i32, i32, u8),
+    /// ClientboundRemoveMobEffectPacket локального игрока.
+    EffectRemove(i32),
     /// UpdateAttributes локального игрока: (имя атрибута без minecraft:, значение).
     Attribute(&'static str, f32),
     Hardcore(bool),
@@ -405,6 +409,7 @@ fn run(
     // иначе game_time клиента отстаёт от серверного и текстуры дождя/снега прыгают при каждом set_time.
     let tick_len = std::time::Duration::from_millis(50);
     let mut next_tick = std::time::Instant::now() + tick_len;
+    let mut last_abs = 0.0f32;
     loop {
         let wait = next_tick.saturating_duration_since(std::time::Instant::now());
         let t_poll = std::time::Instant::now();
@@ -582,6 +587,13 @@ fn run(
                     // запаздывать относительно сетки, и сущности иначе замирают и прыгают.
                     l.tick_time_at(std::time::Instant::now());
                     crate::itemphys::tick(l);
+                    crate::itemphys::tick_falling(l);
+                    // VANILLA: Player#getAbsorptionAmount (метаданные #15 игрока).
+                    let abs = l.float15.get(&h.player_id).copied().unwrap_or(0.0);
+                    if abs != last_abs {
+                        last_abs = abs;
+                        let _ = tx.send(NetEvt::Attribute("absorption", abs));
+                    }
                 }
             }
             next_tick += tick_len;
@@ -769,6 +781,20 @@ fn run(
                     if pname == "waypoint" {
                         if let Some((op, wp)) = parse_waypoint(&body) {
                             let _ = tx.send(NetEvt::Waypoint(op, wp));
+                        }
+                        continue;
+                    }
+                    if pname == "update_mob_effect" {
+                        if let Some((id, amp, dur, fl)) =
+                            crate::effects::parse_update(&body, h.player_id)
+                        {
+                            let _ = tx.send(NetEvt::Effect(id, amp, dur, fl));
+                        }
+                        continue;
+                    }
+                    if pname == "remove_mob_effect" {
+                        if let Some(id) = crate::effects::parse_remove(&body, h.player_id) {
+                            let _ = tx.send(NetEvt::EffectRemove(id));
                         }
                         continue;
                     }
@@ -1079,6 +1105,12 @@ fn parse_attributes(body: &[u8], own_id: i32, tx: &crossbeam_channel::Sender<Net
             Some("armor") => "armor",
             Some("max_health") => "max_health",
             Some("max_absorption") => "max_absorption",
+            Some("block_interaction_range") => "block_interaction_range",
+            Some("entity_interaction_range") => "entity_interaction_range",
+            Some("attack_speed") => "attack_speed",
+            Some("mining_efficiency") => "mining_efficiency",
+            Some("block_break_speed") => "block_break_speed",
+            Some("submerged_mining_speed") => "submerged_mining_speed",
             _ => continue,
         };
         let _ = tx.send(NetEvt::Attribute(key, value as f32));

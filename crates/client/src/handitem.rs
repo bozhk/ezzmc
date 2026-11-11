@@ -1,6 +1,6 @@
 //! Предмет в руке: `items/<имя>.json` → модель → квады для 1-го лица и F5.
 //! `builtin/generated` экструдируется из пикселей спрайта (толщина 1/16), блочные модели — из элементов.
-use crate::itemicon::{eval, Ctx};
+use crate::itemicon::{eval, Ctx, CHEST_MARK};
 use ezzmc_assets::atlas::Identifier;
 use ezzmc_assets::bake::{bake_elements, ModelState, SpriteGetter, SpriteUv};
 use ezzmc_assets::block_atlas::BlockAtlas;
@@ -143,6 +143,45 @@ impl HandMesh {
     }
 }
 
+/// Дописать `extra` под `base` (ширина — максимум), пересчитав UV обоих атласов.
+fn append_atlas(base: &mut BlockAtlas, extra: &BlockAtlas) {
+    let (w, h) = (base.width.max(extra.width), base.height + extra.height);
+    let mut img = ezzmc_assets::texture::Image::new(w, h);
+    for y in 0..base.height {
+        for x in 0..base.width {
+            img.set(x, y, base.mips[0].get(x, y));
+        }
+    }
+    for y in 0..extra.height {
+        for x in 0..extra.width {
+            img.set(x, base.height + y, extra.mips[0].get(x, y));
+        }
+    }
+    let (wf, hf) = (w as f32, h as f32);
+    let (bw, bh) = (base.width as f32, base.height as f32);
+    let (ew, eh) = (extra.width as f32, extra.height as f32);
+    for uv in base.sprites.values_mut() {
+        uv.u0 = uv.u0 * bw / wf;
+        uv.u1 = uv.u1 * bw / wf;
+        uv.v0 = uv.v0 * bh / hf;
+        uv.v1 = uv.v1 * bh / hf;
+    }
+    for (id, uv) in &extra.sprites {
+        base.sprites.insert(
+            id.clone(),
+            SpriteUv {
+                u0: uv.u0 * ew / wf,
+                u1: uv.u1 * ew / wf,
+                v0: (bh + uv.v0 * eh) / hf,
+                v1: (bh + uv.v1 * eh) / hf,
+            },
+        );
+    }
+    base.width = w;
+    base.height = h;
+    base.mips = vec![img];
+}
+
 /// Кэш моделей и атласы спрайтов.
 pub struct HandItems {
     blocks: HashMap<Identifier, SpriteUv>,
@@ -173,9 +212,14 @@ impl SpriteGetter for Getter<'_> {
 
 impl HandItems {
     pub fn new(rm: &ResourceManager, blocks: &HashMap<Identifier, SpriteUv>) -> Option<Self> {
-        let items = BlockAtlas::build_named(rm, "items", 0)
+        let mut items = BlockAtlas::build_named(rm, "items", 0)
             .map_err(|e| tracing::warn!("атлас предметов: {e}"))
             .ok()?;
+        // Спрайты сундуков (`atlases/chests.json`, ChestModel) — в один атлас с предметами,
+        // чтобы рисовать их теми же буферами руки/земли.
+        if let Ok(chests) = BlockAtlas::build_named(rm, "chests", 0) {
+            append_atlas(&mut items, &chests);
+        }
         Some(Self {
             blocks: blocks.clone(),
             items,
@@ -211,9 +255,16 @@ impl HandItems {
             eval(json.get("model")?, cx, dc.serialized_name(), &mut layers);
             let mut quads = Vec::new();
             let mut xf = None;
-            for (model, tints) in layers {
+            for (model, tints, off) in layers {
+                let chest = model.strip_prefix(CHEST_MARK).map(str::to_owned);
                 let mut loader = ModelLoader::new(rm);
-                let Some((resolved, _)) = loader.resolve(&Identifier::parse(&model)) else {
+                // Сундук: display-трансформы берутся из `item/chest` (template_chest).
+                let mid = if chest.is_some() {
+                    "minecraft:item/chest"
+                } else {
+                    &model
+                };
+                let Some((resolved, _)) = loader.resolve(&Identifier::parse(mid)) else {
                     continue;
                 };
                 let t = resolved.transform(dc);
@@ -235,6 +286,10 @@ impl HandItems {
                         * Mat4::from_scale(Vec3::from(t.scale))
                         * Mat4::from_translation(Vec3::splat(-0.5))
                 });
+                if let Some(tex) = chest {
+                    self.chest_quads(&tex, &mut quads);
+                    continue;
+                }
                 let slots = resolved.texture_slots();
                 let elements = resolved.elements();
                 if elements.is_empty() {
@@ -243,7 +298,7 @@ impl HandItems {
                             break;
                         };
                         let tint = tints.get(i).copied().unwrap_or(0xFF_FFFF);
-                        self.extrude(id, tint, i as f32, &mut quads);
+                        self.extrude(rm, id, tint, i as f32, &mut quads);
                     }
                 } else {
                     let g = Getter {
@@ -268,7 +323,7 @@ impl HandItems {
                         let l1 = Vec3::new(-0.104, 0.977, 0.188);
                         let shade = ((n.dot(l0).abs().max(n.dot(l1).abs())) * 0.6 + 0.4).min(1.0);
                         quads.push(Quad {
-                            pos: q.pos,
+                            pos: q.pos.map(|p| [p[0] + off[0], p[1] + off[1], p[2] + off[2]]),
                             uv: q.uv,
                             color: tint_rgb(tint, shade),
                             tint: tint_rgb(tint, 1.0),
@@ -294,22 +349,73 @@ impl HandItems {
         })
     }
 
-    /// VANILLA: ItemModelGenerator — две грани z=7.5/8.5 и боковые полоски по краю непрозрачных пикселей.
-    fn extrude(&self, id: &Identifier, tint: u32, layer: f32, out: &mut Vec<Quad>) {
-        let Some(uv) = self.items.sprites.get(id).copied() else {
+    /// VANILLA: ChestSpecialRenderer — модель одиночного сундука (openness 0) из `ChestModel`.
+    fn chest_quads(&self, tex: &str, out: &mut Vec<Quad>) {
+        let id = Identifier::new("minecraft", &format!("entity/chest/{tex}"));
+        let Some(uv) = self.items.sprites.get(&id).copied() else {
             return;
         };
-        let aw = self.items.width as f32;
-        let ah = self.items.height as f32;
-        let (x0, y0) = ((uv.u0 * aw).round() as u32, (uv.v0 * ah).round() as u32);
-        let (w, h) = (
-            ((uv.u1 - uv.u0) * aw).round() as u32,
-            ((uv.v1 - uv.v0) * ah).round() as u32,
-        );
+        for q in crate::chest::model_single().quads(Mat4::IDENTITY) {
+            let n = q.normal;
+            // VANILLA-UNSURE: освещение — как у блочных моделей в руке (формула GUI по нормали).
+            let l0 = Vec3::new(-0.933, 0.263, -0.244);
+            let l1 = Vec3::new(-0.104, 0.977, 0.188);
+            let shade = ((n.dot(l0).abs().max(n.dot(l1).abs())) * 0.6 + 0.4).min(1.0);
+            out.push(Quad {
+                pos: q.pos.map(|p| p.to_array()),
+                uv: q
+                    .uv
+                    .map(|[u, v]| [uv.u0 + u * (uv.u1 - uv.u0), uv.v0 + v * (uv.v1 - uv.v0)]),
+                color: tint_rgb(0xFF_FFFF, shade),
+                tint: tint_rgb(0xFF_FFFF, 1.0),
+                normal: n.to_array(),
+                items: true,
+            });
+        }
+    }
+
+    /// VANILLA: ItemModelGenerator — две грани z=7.5/8.5 и боковые полоски по краю непрозрачных пикселей.
+    fn extrude(
+        &self,
+        rm: &ResourceManager,
+        id: &Identifier,
+        tint: u32,
+        layer: f32,
+        out: &mut Vec<Quad>,
+    ) {
+        // Текстура блока в плоском предмете (item/vine → block/vine): UV из атласа блоков,
+        // непрозрачность — из самого PNG.
+        let block_img;
+        let (uv, items, img): (SpriteUv, bool, &ezzmc_assets::texture::Image) =
+            if let Some(uv) = self.items.sprites.get(id).copied() {
+                (uv, true, &self.items.mips[0])
+            } else if let Some(uv) = self.blocks.get(id).copied() {
+                let path = format!("assets/{}/textures/{}.png", id.namespace, id.path);
+                let Some(img) = rm
+                    .read(&path)
+                    .and_then(|d| ezzmc_assets::texture::Image::decode_png(&d).ok())
+                else {
+                    return;
+                };
+                block_img = img;
+                (uv, false, &block_img)
+            } else {
+                return;
+            };
+        let (aw, ah, x0, y0, w, h);
+        if items {
+            aw = self.items.width as f32;
+            ah = self.items.height as f32;
+            x0 = (uv.u0 * aw).round() as u32;
+            y0 = (uv.v0 * ah).round() as u32;
+            w = ((uv.u1 - uv.u0) * aw).round() as u32;
+            h = ((uv.v1 - uv.v0) * ah).round() as u32;
+        } else {
+            (x0, y0, w, h) = (0, 0, img.width, img.width.min(img.height));
+        }
         if w == 0 || h == 0 {
             return;
         }
-        let img = &self.items.mips[0];
         let opaque = |px: i32, py: i32| {
             px >= 0
                 && py >= 0
@@ -320,7 +426,6 @@ impl HandItems {
         let color = tint_rgb(tint, 1.0);
         let eps = layer * 0.0005;
         let (zb, zf) = (7.5 / 16.0 - eps, 8.5 / 16.0 + eps);
-        let items = true;
         // Грани: в координатах модели X вправо, Y вверх.
         let face = |z: f32, flip: bool, nz: f32| {
             let (ua, ub) = if flip { (uv.u1, uv.u0) } else { (uv.u0, uv.u1) };

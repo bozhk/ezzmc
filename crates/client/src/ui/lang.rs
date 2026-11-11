@@ -6,7 +6,11 @@ pub struct Lang(HashMap<String, String>);
 
 impl Lang {
     pub fn load(json: &[u8]) -> Self {
-        Self(serde_json::from_slice(json).unwrap_or_default())
+        let mut m: HashMap<String, String> = serde_json::from_slice(json).unwrap_or_default();
+        // Не ванильная клавиша зума: названия нет в en_us.json.
+        m.entry("key.zoom".to_owned())
+            .or_insert_with(|| "Zoom".to_owned());
+        Self(m)
     }
 
     pub fn get(&self, key: &str) -> Option<&str> {

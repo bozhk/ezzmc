@@ -77,6 +77,16 @@ pub const VIDEO: &[Def] = &[
         ]),
         "0",
     ),
+    d(
+        "attackIndicator",
+        "options.attackIndicator",
+        Cycle(&[
+            ("0", "options.attack.off"),
+            ("1", "options.attack.crosshair"),
+            ("2", "options.attack.hotbar"),
+        ]),
+        "1",
+    ),
     d("entityShadows", "options.entityShadows", Toggle, "true"),
     // VANILLA: Options#cutoutLeaves («See-Through Leaves»).
     d("cutoutLeaves", "options.cutoutLeaves", Toggle, "true"),

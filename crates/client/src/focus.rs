@@ -9,8 +9,7 @@ pub const PAUSE_DELAY_MS: u64 = 500;
 #[derive(Debug)]
 pub struct Focus {
     pub active: bool,
-    /// VANILLA: Options#pauseOnLostFocus (в ванили по умолчанию true).
-    /// ezzmc: по просьбе владельца по умолчанию выключено, чтобы игра не замирала при уходе с окна.
+    /// VANILLA: Options#pauseOnLostFocus (по умолчанию true).
     pub pause_on_lost_focus: bool,
     last_active_ms: u64,
 }
@@ -19,7 +18,7 @@ impl Focus {
     pub fn new(now_ms: u64) -> Self {
         Self {
             active: true,
-            pause_on_lost_focus: false,
+            pause_on_lost_focus: true,
             last_active_ms: now_ms,
         }
     }
@@ -69,11 +68,11 @@ mod tests {
     }
 
     #[test]
-    fn default_never_pauses() {
+    fn default_is_vanilla_pause_on_lost_focus() {
         let mut f = Focus::new(0);
-        assert!(!f.pause_on_lost_focus);
+        assert!(f.pause_on_lost_focus);
         f.set_active(false);
-        assert!(!f.frame(10_000));
+        assert!(f.frame(10_000));
     }
 
     #[test]

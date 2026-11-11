@@ -55,6 +55,8 @@ pub struct Entity {
     pub stuck: bool,
     /// Стрела: id владельца (поле `data` пакета add_entity), 0 — нет.
     pub owner: i32,
+    /// Поле `data` пакета add_entity (падающий блок: id состояния блока).
+    pub data: i32,
     /// AbstractArrow#ID_FLAGS (1 — крит, 2 — noPhysics).
     pub arrow_flags: u8,
     /// AbstractArrow#shakeTime (7 после попадания в блок).
@@ -76,6 +78,8 @@ pub struct Entity {
     pub death_at: Option<std::time::Instant>,
     /// Длительность красного оверлея, сек (10 тиков при уроне, 20 при смерти).
     pub hurt_dur: f32,
+    /// Squid#handleEntityEvent(19): счётчик сбросов tentacleMovement.
+    pub squid_reset: u32,
     /// Счётчик crit-анимаций (animate 4/5): 1 — обычный, 2 — магический.
     pub crit_seq: (u32, u8),
     steps: u32,
@@ -132,6 +136,7 @@ impl Entity {
             gravity,
             stuck: false,
             owner: 0,
+            data: 0,
             arrow_flags: 0,
             shake: 0,
             left_owner: false,
@@ -142,6 +147,7 @@ impl Entity {
             swing_seq: 0,
             hurt_at: None,
             hurt_dur: 0.0,
+            squid_reset: 0,
             death_at: None,
             crit_seq: (0, 0),
             steps: 0,

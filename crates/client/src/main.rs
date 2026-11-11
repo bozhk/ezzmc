@@ -1,12 +1,15 @@
+mod adventure;
 mod ambient;
 mod armor;
 mod atlasanim;
 mod audio;
 mod avatar;
+mod bell;
 mod blocksound;
 mod charpreview;
 mod chat;
 mod chatnet;
+mod chest;
 mod clipboard;
 mod control;
 mod cooldown;
@@ -18,6 +21,8 @@ mod debugscreen;
 mod dig;
 mod display;
 mod editbox;
+mod effects;
+mod effectshud;
 mod entityshadow;
 mod flammable;
 mod focus;
@@ -45,11 +50,15 @@ mod physics;
 #[allow(dead_code)] // face/hit/inside и дальности — для 185/186
 mod pick;
 mod pistonview;
+mod placement;
 mod playersound;
+mod sandbox;
 mod screenshot;
 mod settings;
+mod support;
 mod threads;
 mod timer;
+mod toolspeed;
 mod tooltip;
 mod ui;
 mod weather;
@@ -117,6 +126,8 @@ struct App {
     /// F3: экран отладки показан; `f3_pending` — F3 зажата без комбинаций (переключение при отпускании).
     debug_on: bool,
     f3_pending: bool,
+    /// F1: HUD скрыт (VANILLA: Hud#toggle / isHidden).
+    hud_hidden: bool,
     /// Главное меню (GUI); `None` до загрузки ресурсов.
     gui: Option<ui::Gui>,
     painter: Option<ezzmc_render::gui::GuiPainter>,
@@ -153,6 +164,8 @@ struct App {
     cursor_px: (f64, f64),
     /// Меню на экране (мир не показывается).
     menu_active: bool,
+    /// Был ли захвачен курсор в прошлом кадре (потеря захвата = открыт экран → releaseAll).
+    was_grabbed: bool,
     music: music::MusicManager,
     /// Игрок выбрал сервер в меню: мир грузится в начале следующего кадра.
     join_pending: bool,
@@ -1066,6 +1079,7 @@ impl App {
             .iter()
             .chain(hud::SPRITES)
             .chain(hudbars::SPRITES)
+            .chain(effectshud::SPRITES)
         {
             let full = format!("assets/minecraft/textures/gui/{path}.png");
             let from_store = if name.starts_with("panorama") {
@@ -1090,6 +1104,25 @@ impl App {
                     name.starts_with("panorama"),
                 ),
                 None => tracing::warn!("текстура GUI не найдена: {full}"),
+            }
+        }
+        // Иконки эффектов лежат вне gui/: textures/mob_effect/*.png.
+        for (name, path) in effectshud::MOB_EFFECT_SPRITES {
+            let full = format!("assets/minecraft/textures/{path}.png");
+            match rm
+                .read(&full)
+                .and_then(|d| ezzmc_assets::texture::Image::decode_png(&d).ok())
+            {
+                Some(i) => p.add_texture(
+                    &g.device,
+                    &g.queue,
+                    name,
+                    &i.to_rgba8(),
+                    i.width,
+                    i.height,
+                    false,
+                ),
+                None => tracing::warn!("иконка эффекта не найдена: {full}"),
             }
         }
         // Иконки паков: pack.png ванили и unknown_pack (VANILLA: PackSelectionScreen#DEFAULT_ICON).
@@ -1464,6 +1497,16 @@ impl ApplicationHandler for App {
                         {
                             self.want_screenshot = true;
                         }
+                        // VANILLA: Gui#handleKeybinds — key.toggleGui → Hud#toggle.
+                        if event.state == ElementState::Pressed
+                            && !self.menu_active
+                            && self
+                                .keys
+                                .get("key.toggleGui")
+                                .is_some_and(|b| b.key == keymap::Input::Key(k))
+                        {
+                            self.hud_hidden = !self.hud_hidden;
+                        }
                         // VANILLA: Minecraft#handleKeybinds — key.togglePerspective → CameraType#cycle.
                         if event.state == ElementState::Pressed
                             && self
@@ -1741,6 +1784,16 @@ impl ApplicationHandler for App {
                         }
                     }
                 }
+                if let Some(w) = &self.window {
+                    self.mouse.finish_release(w);
+                }
+                if let Some((x, y)) = self.mouse.recentered.take() {
+                    self.cursor_px = (x, y);
+                    self.inv_cursor_moved();
+                    if let Some(g) = &mut self.gui {
+                        g.on_cursor(x, y);
+                    }
+                }
                 let (Some(g), Some(sc)) = (&self.gpu, &mut self.swapchain) else {
                     return;
                 };
@@ -1814,6 +1867,14 @@ impl ApplicationHandler for App {
                         keys.get(n).is_some_and(keymap::Binding::is_down)
                     };
                     let ax = |p: bool, m: bool| f32::from(u8::from(p)) - f32::from(u8::from(m));
+                    // VANILLA: Minecraft#setScreen(≠null) → KeyMapping.releaseAll: любой открытый экран
+                    // (инвентарь, чат, пауза, креатив…) отпускает ЛКМ/ПКМ/движение, ломание прерывается.
+                    if self.was_grabbed && !self.mouse.grabbed {
+                        self.keys.release_all();
+                        self.input.release_all();
+                        v.attack_held = false;
+                    }
+                    self.was_grabbed = self.mouse.grabbed;
                     if self.mouse.grabbed && self.tour.is_empty() {
                         if v.walking {
                             // VANILLA: Minecraft#startAttack → player.swing(MAIN_HAND) на каждый клик.
@@ -1887,8 +1948,14 @@ impl ApplicationHandler for App {
                             );
                         }
                     } else if v.walking && self.tour.is_empty() {
+                        // VANILLA: Minecraft#setScreen → KeyMapping.releaseAll — открытый экран отпускает
+                        // атаку, ломание блока прерывается (Digger получает attack=false → ABORT).
+                        v.attack_held = false;
                         v.walk(dt, physics::Input::default());
                     }
+                    v.zoom_held = down(&self.keys, "key.zoom") && !self.chat.open;
+                    v.tick_zoom(dt);
+                    self.mouse.zoom_scale = f64::from(v.zoom_factor);
                     v.update(g);
                     // Отладка: EZZMC_AUTOSHOT=<сек> — скриншот и выход через N секунд после появления мира.
                     if let Some(sec) = autoshot_secs() {
@@ -1921,7 +1988,7 @@ impl ApplicationHandler for App {
                                 v.game_mode,
                                 v.target.is_some() || v.entity_target.is_some(),
                                 v.attack_strength(0.0),
-                                v.entity_target.is_some(),
+                                v.target_living_alive(),
                                 v.attack_delay(),
                             );
                             let hs = &mut self.hud_state;
@@ -1935,6 +2002,16 @@ impl ApplicationHandler for App {
                                 xp_level: v.xp_level,
                                 hardcore: v.hardcore,
                                 tick: self.tick_count,
+                                absorption: v.absorption,
+                                // VANILLA: Hud.HeartType#forPlayer — иссушение важнее отравления.
+                                heart_kind: if v.effects.has("wither") {
+                                    2
+                                } else if v.effects.has("poison") {
+                                    1
+                                } else {
+                                    0
+                                },
+                                regen: v.effects.has("regeneration"),
                             };
                             // VANILLA: gameMode.canHurtPlayer/hasExperience — выживание и приключение.
                             let survival = matches!(v.game_mode, 0 | 2);
@@ -1962,7 +2039,8 @@ impl ApplicationHandler for App {
                                 .map(|d| (d.0, d.1.clone()));
                             let inv_creative = self.inv_creative;
                             let creative = &self.creative;
-                            if inv_open && self.char_preview.is_none() {
+                            // Прогрев при входе в мир (а не при первом открытии инвентаря): иначе микрофриз.
+                            if self.char_preview.is_none() {
                                 self.char_preview = hud
                                     .as_ref()
                                     .map(|(_, rm)| charpreview::CharPreview::new(rm));
@@ -1981,10 +2059,20 @@ impl ApplicationHandler for App {
                                 .as_ref()
                                 .map(|g| g.opts.f32(&ui::options::VIDEO[3]) as u32);
                             let debug_on = self.debug_on;
+                            let hid = self.hud_hidden;
                             let fps_limit = self.fps_limit.limit();
                             let pitch = self.pitch;
                             let vsync = std::env::var("EZZMC_VSYNC").map_or(true, |v| v != "0");
                             sc.draw_and_present(g, f, cap, |view, w, h| {
+                                // VANILLA: 3D-прицел виден при открытом F3 (DebugScreenEntries#THREE_DIMENSIONAL_CROSSHAIR).
+                                v.hud_hidden = hid;
+                                v.debug_crosshair = (debug_on && !hid).then(|| {
+                                    ezzmc_render::text::gui_scale_opt(
+                                        w,
+                                        h,
+                                        gui_scale_opt.unwrap_or(0),
+                                    )
+                                });
                                 v.render(g, view, w, h, sky);
                                 if let Some(t) = text {
                                     // VANILLA: guiScale из настроек действует и в игре (раньше
@@ -1996,32 +2084,62 @@ impl ApplicationHandler for App {
                                     let (gw, gh) = t.gui_size(w, h);
                                     if let Some((p, rm)) = hud.as_mut() {
                                         let (gwf, ghf) = (gw as f32, gh as f32);
+                                        hud::new_frame();
                                         p.begin(t.scale());
-                                        if !inv_open && !dead {
+                                        // VANILLA: Hud#extractCrosshair — при 3D-прицеле (F3) плоский не рисуется.
+                                        if !inv_open
+                                            && !dead
+                                            && !hid
+                                            && !(debug_on && v.perspective == 0)
+                                        {
+                                            // attackIndicator: 1 = у прицела (иначе только сам прицел).
+                                            let ind = v.cfg.attack_indicator;
                                             hud::draw_crosshair(
-                                                p, gwf, ghf, cross.0, cross.1, cross.2, cross.3,
+                                                p,
+                                                gwf,
+                                                ghf,
+                                                cross.0,
+                                                cross.1,
+                                                if ind == 1 { cross.2 } else { 1.0 },
+                                                cross.3 && ind == 1,
                                                 cross.4,
                                             );
                                         }
-                                        hud::draw_hotbar(
-                                            p, t, &g.device, &g.queue, rm, &v.inv, gwf, ghf,
-                                        );
-                                        if survival && !dead {
+                                        if !hid {
+                                            hud::draw_hotbar(
+                                                p, t, &g.device, &g.queue, rm, &v.inv, gwf, ghf,
+                                            );
+                                        }
+                                        if v.cfg.attack_indicator == 2 && !hid {
+                                            hud::draw_hotbar_attack(
+                                                p,
+                                                gwf,
+                                                ghf,
+                                                cross.2,
+                                                v.cfg.left_handed,
+                                            );
+                                        }
+                                        if survival && !dead && !hid {
                                             hudbars::draw_health(p, hs, &stats, gwf, ghf);
                                         }
-                                        if loc_bar && !dead {
+                                        if !inv_open && !hid {
+                                            // VANILLA: Hud#extractEffects
+                                            let icons = effectshud::layout(v.effects.iter(), gwf);
+                                            effectshud::draw(p, &icons);
+                                        }
+                                        if loc_bar && !dead && !hid {
                                             hudbars::draw_locator(
                                                 p, &loc_wps, loc_cam, loc_yaw, loc_pitch, loc_fov,
                                                 gwf, ghf,
                                             );
-                                        } else if survival && !dead {
+                                        } else if survival && !dead && !hid {
                                             hudbars::draw_xp_bar(p, &stats, gwf, ghf);
                                         }
                                         p.flush(&g.device, &g.queue, view, w, h, None);
-                                        if survival && !dead {
+                                        if survival && !dead && !hid {
                                             hudbars::draw_xp_level(t, stats.xp_level, gwf, ghf);
                                         }
-                                        if let Some(m) = &overlay {
+                                        if let (Some(m), false) = (&overlay, hid) {
                                             // VANILLA: Gui#extractOverlayMessage — над хотбаром (gh − 68).
                                             let mw = t.text_width(m);
                                             t.draw(
@@ -2032,7 +2150,7 @@ impl ApplicationHandler for App {
                                                 true,
                                             );
                                         }
-                                        {
+                                        if !hid {
                                             let (ccfg, tick) = (self.chat_cfg, self.tick_count);
                                             chat.draw(t, ghf, tick, &ccfg);
                                             if chat.open {
@@ -2388,6 +2506,13 @@ fn start_control() -> Option<control::Control> {
 }
 
 fn main() {
+    // Безоконная песочница физики/мира (без игры и сервера): `--sandbox [файл | -e "скрипт"]`.
+    {
+        let a: Vec<String> = std::env::args().skip(1).collect();
+        if let Some(i) = a.iter().position(|x| x == "--sandbox") {
+            std::process::exit(sandbox::main(&a[i + 1..]));
+        }
+    }
     let packets = std::env::args().any(|a| a == "--log-packets");
     let _ = log::init(&log::LogConfig {
         log_packets: packets,
@@ -2465,12 +2590,14 @@ fn main() {
         fps_t0: 0,
         debug_on: std::env::var("EZZMC_F3").is_ok(),
         f3_pending: false,
+        hud_hidden: false,
         gui: None,
         painter: None,
         hud_rm: None,
         item_lang: ui::lang::Lang::default(),
         clipboard: clipboard::Clipboard::default(),
         menu_active: false,
+        was_grabbed: false,
         music: music::MusicManager::new(),
         inv_open: false,
         char_preview: None,

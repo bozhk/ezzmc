@@ -22,6 +22,14 @@ pub const SPRITES: &[(&str, &str)] = &[
         "atk_progress",
         "sprites/hud/crosshair_attack_indicator_progress",
     ),
+    (
+        "hotbar_atk_bg",
+        "sprites/hud/hotbar_attack_indicator_background",
+    ),
+    (
+        "hotbar_atk_progress",
+        "sprites/hud/hotbar_attack_indicator_progress",
+    ),
     ("hotbar", "sprites/hud/hotbar"),
     ("hotbar_sel", "sprites/hud/hotbar_selection"),
     ("container_inv", "container/inventory"),
@@ -175,6 +183,14 @@ fn icon_key(name: &str, cx: &crate::itemicon::Ctx) -> String {
     )
 }
 
+static BAKES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+const BAKES_PER_FRAME: u32 = 6;
+
+/// Начало кадра GUI: сброс счётчика выпечки иконок.
+pub fn new_frame() {
+    BAKES.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Загрузить иконку предмета, если ещё нет.
 // TODO(234): блоки — 3D-куб из модели (gui light), пока плоская текстура block/<name>.
 fn ensure_icon(
@@ -188,6 +204,10 @@ fn ensure_icon(
     let key = icon_key(name, cx);
     if p.has(&key) {
         return true;
+    }
+    // Бюджет выпечки на кадр: иначе открытие креатива (~60 иконок × 2 мс) даёт микрофриз.
+    if BAKES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= BAKES_PER_FRAME {
+        return false;
     }
     if let Some(ic) = crate::itemicon::bake(rm, name, cx) {
         p.add_texture(dev, q, &key, &ic.rgba, ic.w, ic.h, ic.w > 32);
@@ -250,6 +270,42 @@ pub fn draw_crosshair(
     }
 }
 
+/// VANILLA: Hud#extractItemHotbar — индикатор атаки рядом с хотбаром (attackIndicator = HOTBAR):
+/// справа, при левой основной руке — слева; заполнение снизу вверх, 19 шагов.
+pub fn draw_hotbar_attack(p: &mut GuiPainter, gw: f32, gh: f32, strength: f32, left_handed: bool) {
+    if strength >= 1.0 {
+        return;
+    }
+    let y = gh - 20.0;
+    let cx = (gw / 2.0).floor();
+    let x = if left_handed {
+        cx - 91.0 - 22.0
+    } else {
+        cx + 91.0 + 6.0
+    };
+    let progress = (strength * 19.0) as i32 as f32;
+    p.blit(
+        "hotbar_atk_bg",
+        x,
+        y,
+        18.0,
+        18.0,
+        [0.0, 0.0, 1.0, 1.0],
+        0xFFFF_FFFF,
+    );
+    if progress > 0.0 {
+        p.blit(
+            "hotbar_atk_progress",
+            x,
+            y + 18.0 - progress,
+            18.0,
+            progress,
+            [0.0, (18.0 - progress) / 18.0, 1.0, 1.0],
+            0xFFFF_FFFF,
+        );
+    }
+}
+
 /// Нарисовать хотбар в нижней части экрана. `gw/gh` — размер в GUI-пикселях.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_hotbar(
@@ -303,6 +359,27 @@ pub fn stack_icon(
 ) {
     if let Some(name) = ezzmc_protocol::generated::r26_3::ITEM.get(s.item as usize) {
         patch_icon(p, dev, q, rm, name, &s.patch, x, y);
+        // VANILLA: GuiGraphicsExtractor#itemBar — чёрная подложка 13×2 и цветная полоса высотой 1.
+        if let Some((w, rgb)) = crate::tooltip::durability_bar(name, &s.patch) {
+            p.blit(
+                "white",
+                x + 2.0,
+                y + 13.0,
+                13.0,
+                2.0,
+                [0.0, 0.0, 1.0, 1.0],
+                0xFF00_0000,
+            );
+            p.blit(
+                "white",
+                x + 2.0,
+                y + 13.0,
+                w as f32,
+                1.0,
+                [0.0, 0.0, 1.0, 1.0],
+                0xFF00_0000 | rgb,
+            );
+        }
         // VANILLA: GuiGraphicsExtractor#itemCooldown — белая полупрозрачная плашка (Integer.MAX_VALUE).
         let cd = crate::cooldown::percent(name);
         if cd > 0.0 {

@@ -136,6 +136,10 @@ impl App {
         }
         if down {
             let is = |app: &Self, n: &str| app.keys.get(n).is_some_and(|b| b.key == input);
+            // VANILLA: Gui#handleKeybinds — key.toggleGui → Hud#toggle (как в main.rs).
+            if is(self, "key.toggleGui") && !self.menu_active {
+                self.hud_hidden = !self.hud_hidden;
+            }
             if let Input::Key(KeyCode::Escape) = input {
                 if self.inv_open {
                     self.close_inv(true);
@@ -205,6 +209,7 @@ impl App {
                 "started": crate::audio::STARTED.load(std::sync::atomic::Ordering::Relaxed),
             },
             "screen": screen,
+            "hud_hidden": self.hud_hidden,
             "frames": self.frames,
             "fps": self.fps,
             "yaw": self.yaw,
@@ -224,11 +229,26 @@ impl App {
             s["speed_xz"] = json!((dx * dx + dz * dz).sqrt() * 20.0);
             s["crouching"] = json!(v.player.crouching);
             s["food"] = json!(v.food);
+            s["effects"] = json!(v
+                .effects
+                .iter()
+                .map(|e| json!({
+                    "name": e.name(),
+                    "amplifier": e.amplifier,
+                    "duration": e.duration,
+                    "ambient": e.ambient,
+                    "visible": e.visible,
+                    "show_icon": e.show_icon,
+                    "blend": e.blend(1.0),
+                }))
+                .collect::<Vec<_>>());
             s["using"] = json!(v.using.is_some());
             s["use_remaining"] = json!(v.using.as_ref().map(|u| u.remaining));
             s["sneaking"] = json!(v.player.crouching);
             s["game_mode"] = json!(v.game_mode);
             s["held_slot"] = json!(v.inv.selected);
+            s["attack_delay"] = json!(v.attack_delay());
+            s["attack_strength"] = json!(v.attack_strength(0.0));
             s["sections"] = json!(v.resident_sections());
         }
         s["chat"] = json!({
@@ -550,7 +570,7 @@ impl App {
                 };
                 let lines: Vec<Value> = crate::tooltip::stack_lines(&self.item_lang, t, s)
                     .into_iter()
-                    .map(|(text, color)| json!({"text": text, "color": format!("{color:06X}")}))
+                    .map(|(text, color)| json!({"text": crate::tooltip::strip_codes(&text), "color": format!("{color:06X}")}))
                     .collect();
                 ok(json!({"lines": lines}))
             }

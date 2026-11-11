@@ -93,6 +93,7 @@ pub fn place(block: &str, x: i32, y: i32, z: i32) {
 
 /// VANILLA: LevelEvent.PARTICLES_DESTROY_BLOCK (2001): breakSound (v+1)/2, pitch p·0.8.
 pub fn brk(block: &str, x: i32, y: i32, z: i32) {
+    tracing::debug!(target: "dbg", "brk {block} at [{x},{y},{z}]");
     let st = of(block);
     play(
         &st.brk,

@@ -19,6 +19,8 @@ pub struct ViewCfg {
     /// graphicsMode: 0 = fast, 1 = fancy, 2 = fabulous.
     pub graphics: u8,
     pub left_handed: bool,
+    /// attackIndicator: 0 = off, 1 = crosshair, 2 = hotbar.
+    pub attack_indicator: u8,
     pub hide_lightning_flashes: bool,
     /// Маска PlayerModelPart (бит 0 cape … бит 6 hat).
     pub parts: u8,
@@ -37,6 +39,7 @@ impl Default for ViewCfg {
             particles: 0,
             graphics: 1,
             left_handed: false,
+            attack_indicator: 1,
             hide_lightning_flashes: false,
             parts: 0x7F,
             sprint_window: 7,
@@ -61,6 +64,7 @@ impl ViewCfg {
             particles: o.get(find(VIDEO, "particles")).parse().unwrap_or(0),
             graphics: o.get(find(VIDEO, "graphicsMode")).parse().unwrap_or(1),
             left_handed: o.get(find(SKIN, "mainHand")) == "left",
+            attack_indicator: o.get(find(VIDEO, "attackIndicator")).parse().unwrap_or(1),
             hide_lightning_flashes: b(ACCESSIBILITY, "hideLightningFlashes"),
             parts: model_mask(o),
             sprint_window: o

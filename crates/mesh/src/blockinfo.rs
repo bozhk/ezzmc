@@ -184,7 +184,25 @@ pub fn outline_offset(state: BlockState, x: i32, z: i32) -> [f32; 3] {
             | "pointed_dripstone"
     );
     if moved {
-        block_offset(state, x, z)
+        shape_offset(state, x, z)
+    } else {
+        [0.0; 3]
+    }
+}
+
+/// Данные генератора сняты в позиции (0,0,0): форма сдвигаемых блоков уже содержит `getOffset(0,0)`
+/// (у бамбука, цветов, саженца, пропагулы — (−0.25, −0.25)). Чтобы получить `shape.move(getOffset(pos))`,
+/// добавляем только разницу с запечённым смещением.
+fn shape_offset(state: BlockState, x: i32, z: i32) -> [f32; 3] {
+    let (o, b) = (block_offset(state, x, z), block_offset(state, 0, 0));
+    [o[0] - b[0], o[1] - b[1], o[2] - b[2]]
+}
+
+/// VANILLA: BambooStalkBlock#getCollisionShape / SpeleothemBlock — `shape.move(getOffset(pos))`;
+/// у остальных блоков с offsetType коллизия не сдвигается (её нет). Форма в данных уже сдвинута на (0,0).
+pub fn collision_offset(state: BlockState, x: i32, z: i32) -> [f32; 3] {
+    if matches!(state.name(), "bamboo" | "pointed_dripstone") {
+        shape_offset(state, x, z)
     } else {
         [0.0; 3]
     }
@@ -330,9 +348,14 @@ mod tests {
         assert!(block_offset(grass, 1, 1).iter().any(|v| *v != 0.0));
         assert_eq!(outline_offset(grass, 1, 1), [0.0; 3]);
         assert_eq!(outline_offset(st("tall_grass"), 1, 1), [0.0; 3]);
-        // Цветы (FlowerBlock#getShape → .move(getOffset)): контур сдвинут так же, как рендер.
+        // Цветы (FlowerBlock#getShape → .move(getOffset)): контур сдвинут так же, как рендер,
+        // за вычетом смещения (0,0), уже запечённого в форму данных.
         let poppy = st("poppy");
-        assert_eq!(outline_offset(poppy, 1, 1), block_offset(poppy, 1, 1));
+        let (o, b0) = (block_offset(poppy, 1, 1), block_offset(poppy, 0, 0));
+        assert_eq!(
+            outline_offset(poppy, 1, 1),
+            [o[0] - b0[0], o[1] - b0[1], o[2] - b0[2]]
+        );
     }
 
     #[test]
@@ -394,5 +417,18 @@ mod tests {
         assert!(fluid(st("oak_stairs").with("waterlogged", "true").unwrap()).is_some());
         assert!(fluid(st("oak_stairs")).is_none());
         assert!(fluid(BlockState::AIR).is_none());
+    }
+
+    #[test]
+    fn moved_shapes_are_centered_at_their_own_offset() {
+        // Форма в данных = column(6) со смещением (0,0): [0.0625..0.4375]; с позиции (x,z) — центр 0.5 + getOffset.
+        let b = st("bamboo");
+        let (x, z) = (-2120, 8040);
+        let o = outline_offset(b, x, z);
+        let bx = outline_boxes(b)[0];
+        let center = (bx[0] + bx[3]) / 2.0 + f64::from(o[0]);
+        assert!((center - (0.5 + f64::from(block_offset(b, x, z)[0]))).abs() < 1e-6);
+        assert_eq!(outline_offset(b, 0, 0), [0.0; 3]);
+        assert_eq!(collision_offset(st("poppy"), 3, 5), [0.0; 3]);
     }
 }

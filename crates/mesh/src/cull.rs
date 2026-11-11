@@ -98,6 +98,44 @@ fn skips_same_block(name: &str) -> bool {
         || name.ends_with("copper_grate")
 }
 
+/// Наследники IronBarsBlock: решётки, панели стекла, медные решётки.
+fn is_iron_bars_block(n: &str) -> bool {
+    n == "iron_bars" || n == "glass_pane" || n.ends_with("_stained_glass_pane") || is_bars_tag(n)
+}
+
+/// Тег `minecraft:bars` (железная и медные решётки).
+fn is_bars_tag(n: &str) -> bool {
+    n == "iron_bars" || n.ends_with("copper_bars")
+}
+
+fn dir_prop(d: Direction) -> Option<&'static str> {
+    match d {
+        Direction::North => Some("north"),
+        Direction::South => Some("south"),
+        Direction::West => Some("west"),
+        Direction::East => Some("east"),
+        Direction::Down | Direction::Up => None,
+    }
+}
+
+/// VANILLA: IronBarsBlock#skipRendering — соседняя решётка того же блока (или оба из тега BARS):
+/// вертикальные грани скрыты, боковые — если обе стороны соединены.
+fn iron_bars_skip(state: BlockState, neighbor: BlockState, dir: Direction) -> bool {
+    let (n, nn) = (state.name(), neighbor.name());
+    let opp_prop = dir_prop(opposite(dir));
+    let tag_match = is_bars_tag(nn)
+        && is_bars_tag(n)
+        && opp_prop.is_some_and(|p| neighbor.property(p).is_some());
+    if !(n == nn || tag_match) {
+        return false;
+    }
+    let Some(prop) = dir_prop(dir) else {
+        return true;
+    };
+    state.property(prop) == Some("true")
+        && opp_prop.is_some_and(|p| neighbor.property(p) == Some("true"))
+}
+
 /// VANILLA: BlockBehaviour#skipRendering (Block, HalfTransparentBlock, PowderSnowBlock, LeavesBlock, MangroveRootsBlock).
 pub fn skip_rendering(
     state: BlockState,
@@ -107,6 +145,9 @@ pub fn skip_rendering(
 ) -> bool {
     let (n, nn) = (state.name(), neighbor.name());
     if skips_same_block(n) && n == nn {
+        return true;
+    }
+    if is_iron_bars_block(n) && iron_bars_skip(state, neighbor, dir) {
         return true;
     }
     if !cutout_leaves && n.ends_with("_leaves") && nn.ends_with("_leaves") {
@@ -274,5 +315,31 @@ mod tests {
         );
         assert!(should_render_face(l, l, Direction::East, true));
         assert!(!should_render_face(l, l, Direction::East, false));
+    }
+
+    #[test]
+    fn iron_bars_skip_connected_sides_only() {
+        let bars = |name: &str, props: &[(&str, &str)]| {
+            let b = ezzmc_world::generated::b26_3::BLOCKS
+                .iter()
+                .find(|b| b.name == name)
+                .unwrap();
+            let mut s = BlockState::from_id(b.default_state).unwrap();
+            for (k, v) in props {
+                s = s.with(k, v).unwrap();
+            }
+            s
+        };
+        let a = bars("copper_bars", &[("east", "true")]);
+        let b = bars("copper_bars", &[("west", "true")]);
+        assert!(iron_bars_skip(a, b, Direction::East));
+        // Соседняя решётка без соединения к нам — грань остаётся.
+        let c = bars("copper_bars", &[]);
+        assert!(!iron_bars_skip(a, c, Direction::East));
+        // Вертикальные грани между решётками скрыты всегда.
+        assert!(iron_bars_skip(a, c, Direction::Up));
+        // Другой материал (тег BARS) тоже считается.
+        let w = bars("waxed_copper_bars", &[("west", "true")]);
+        assert!(iron_bars_skip(a, w, Direction::East));
     }
 }

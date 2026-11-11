@@ -335,6 +335,20 @@ struct MobAnim {
     g_spikes: f32,
     g_spikes_o: f32,
     g_rng: u32,
+    // Squid#aiStep
+    sq_init: bool,
+    sq_reset: u32,
+    sq_move: f32,
+    sq_speed: f32,
+    sq_angle: f32,
+    sq_angle_o: f32,
+    sq_rot_speed: f32,
+    sq_x: f32,
+    sq_x_o: f32,
+    sq_z: f32,
+    sq_z_o: f32,
+    sq_y: f32,
+    sq_y_o: f32,
 }
 
 impl MobAnim {
@@ -373,6 +387,59 @@ impl MobAnim {
             self.g_spikes += (0.0 - self.g_spikes) * 0.25;
         } else {
             self.g_spikes += (1.0 - self.g_spikes) * 0.06;
+        }
+    }
+
+    /// VANILLA: Squid#aiStep (клиентская часть: deltaMovement = e.vel из пакетов).
+    // VANILLA-UNSURE: tentacleSpeed на клиенте не меняется (рандом сервера) — фиксируем средним 0.133.
+    fn tick_squid(&mut self, e: &ezzmc_world::entities::Entity, in_water: bool) {
+        use std::f32::consts::PI;
+        if !self.sq_init {
+            self.sq_init = true;
+            self.sq_y = e.yaw;
+            self.sq_y_o = e.yaw;
+            self.sq_speed = 1.0 / (0.5 + 1.0) * 0.2;
+            self.sq_reset = e.squid_reset;
+        }
+        if self.sq_reset != e.squid_reset {
+            self.sq_reset = e.squid_reset;
+            self.sq_move = 0.0;
+        }
+        self.sq_x_o = self.sq_x;
+        self.sq_z_o = self.sq_z;
+        self.sq_y_o = self.sq_y;
+        self.sq_angle_o = self.sq_angle;
+        self.sq_move += self.sq_speed;
+        if self.sq_move > PI * 2.0 {
+            self.sq_move = PI * 2.0;
+        }
+        if in_water {
+            if self.sq_move < PI {
+                let s = self.sq_move / PI;
+                self.sq_angle = (s * s * PI).sin() * PI * 0.25;
+                if s > 0.75 {
+                    self.sq_rot_speed = 1.0;
+                } else {
+                    self.sq_rot_speed *= 0.8;
+                }
+            } else {
+                self.sq_angle = 0.0;
+                self.sq_rot_speed *= 0.99;
+            }
+            // VANILLA: deltaMovement приходит set_entity_motion и держится до следующего пакета.
+            let m = [e.vel[0] as f32, e.vel[1] as f32, e.vel[2] as f32];
+            let hz = (m[0] * m[0] + m[2] * m[2]).sqrt();
+            let deg = 180.0 / PI;
+            // Без движения atan2(0,0)=0 — как в ванили (Mth.atan2 даёт 0).
+            // Только f64::atan2: f32::atan2 → atan2f зацикливается из-за заглушки glibc_compat.rs (см. STATUS → Баги).
+            let a_y = f64::from(m[0]).atan2(f64::from(m[2])) as f32;
+            let a_x = f64::from(hz).atan2(f64::from(m[1])) as f32;
+            self.sq_y += (-a_y * deg - self.sq_y) * 0.1;
+            self.sq_z += PI * self.sq_rot_speed * 1.5;
+            self.sq_x += (-a_x * deg - self.sq_x) * 0.1;
+        } else {
+            self.sq_angle = self.sq_move.sin().abs() * PI * 0.25;
+            self.sq_x += (-90.0 - self.sq_x) * 0.02;
         }
     }
 
@@ -571,7 +638,10 @@ impl Mobs {
                 sp.kind = cow_kind(e);
             }
             // VANILLA: Entity#isInWater ≈ вода в блоке на середине высоты хитбокса.
-            let in_water = matches!(sp.kind, Kind::Cod | Kind::Salmon | Kind::Guardian) && {
+            let in_water = matches!(
+                sp.kind,
+                Kind::Cod | Kind::Salmon | Kind::Guardian | Kind::Squid
+            ) && {
                 let h = ezzmc_world::entity_size::size(name).map_or(0.5, |s| s.1 as f64 * 0.5);
                 ezzmc_mesh::blockinfo::fluid(level.chunks.block(
                     e.pos[0].floor() as i32,
@@ -586,6 +656,9 @@ impl Mobs {
                 if sp.kind == Kind::Guardian {
                     // #16 BOOLEAN = DATA_ID_MOVING (в поле baby).
                     anim.tick_guardian(in_water, e.baby);
+                }
+                if sp.kind == Kind::Squid {
+                    anim.tick_squid(e, in_water);
                 }
                 if sp.kind == Kind::Chicken {
                     anim.tick_chicken(e.on_ground);
@@ -638,7 +711,25 @@ impl Mobs {
                 anim.g_tail_o + (anim.g_tail - anim.g_tail_o) * pt,
                 anim.g_spikes_o + (anim.g_spikes - anim.g_spikes_o) * pt,
             );
-            let body = anim.av.body_rot(pt);
+            let body = if sp.kind == Kind::Squid {
+                let d = (anim.sq_y - anim.sq_y_o + 180.0).rem_euclid(360.0) - 180.0;
+                anim.sq_y_o + pt * d
+            } else {
+                anim.av.body_rot(pt)
+            };
+            let sq_lerp = |a: f32, b: f32| a + (b - a) * pt;
+            let (sq_pre, sq_post) = if sp.kind == Kind::Squid {
+                // VANILLA: SquidRenderer#setupRotations.
+                let (up, down) = if e.baby { (0.25, -0.6) } else { (0.5, -1.2) };
+                (
+                    Mat4::from_translation(Vec3::new(0.0, up, 0.0)),
+                    Mat4::from_rotation_x(sq_lerp(anim.sq_x_o, anim.sq_x).to_radians())
+                        * Mat4::from_rotation_y(sq_lerp(anim.sq_z_o, anim.sq_z).to_radians())
+                        * Mat4::from_translation(Vec3::new(0.0, down, 0.0)),
+                )
+            } else {
+                (Mat4::IDENTITY, Mat4::IDENTITY)
+            };
             let flap = anim.o_flap + (anim.flap - anim.o_flap) * pt;
             let flap_speed = anim.o_flap_speed + (anim.flap_speed - anim.o_flap_speed) * pt;
             // VANILLA: CreeperRenderer#scale — раздувание перед взрывом.
@@ -672,7 +763,9 @@ impl Mobs {
                 (pos[0] - cam[0]) as f32,
                 (pos[1] - cam[1]) as f32,
                 (pos[2] - cam[2]) as f32,
-            )) * Mat4::from_rotation_y((180.0 - body).to_radians())
+            )) * sq_pre
+                * Mat4::from_rotation_y((180.0 - body).to_radians())
+                * sq_post
                 * death_flip(sp.kind, e.death_at)
                 * fish_wiggle(sp.kind, state.age_in_ticks, in_water)
                 * phantom_pitch(sp.kind, e.pitch)
@@ -819,7 +912,10 @@ impl Mobs {
                             animals::bat_anim(model, yr, state.age_in_ticks, e.byte16 & 1 != 0)
                         }
                         Kind::Fox => animals::fox_anim(model, yr, xr, wp, ws),
-                        Kind::Squid => animals::squid_anim(model, state.age_in_ticks),
+                        Kind::Squid => animals::squid_anim(
+                            model,
+                            anim.sq_angle_o + (anim.sq_angle - anim.sq_angle_o) * pt,
+                        ),
                         Kind::Witch => {
                             animals::witch_anim(model, yr, xr, wp, ws, state.age_in_ticks, e.id)
                         }
@@ -857,6 +953,12 @@ impl Mobs {
             }
             crate::entityshadow::bake(level, pos, cam, shadow_r, 1.0, sky_darken, shadow);
         }
+    }
+
+    /// Буфер вершин для текстуры (путь под `textures/entity/`): другие модельные рисовальщики
+    /// (сундуки) кладут сюда геометрию после `bake`.
+    pub fn out(&mut self, tex: &'static str) -> &mut Vec<u8> {
+        self.data.entry(tex).or_default()
     }
 
     /// Загружает данные в GPU; `make` создаёт `ParticleDraw` по PNG текстуры (путь без префикса/расширения).

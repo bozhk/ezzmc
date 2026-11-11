@@ -1,5 +1,5 @@
 //! Ломание блоков: порт MultiPlayerGameMode#startDestroyBlock/continueDestroyBlock (26.3).
-//! Только рука (инвентаря ещё нет): скорость 1.0, правильный инструмент = блок не требует инструмента.
+//! Скорость ломания — `toolspeed` (инструмент, Efficiency, Haste, Mining Fatigue, Aqua Affinity).
 use ezzmc_world::block::{BlockState, FLAG_REQUIRES_CORRECT_TOOL};
 
 /// ServerboundPlayerActionPacket.Action.
@@ -39,6 +39,7 @@ pub struct Aim {
 pub struct Body {
     pub on_ground: bool,
     pub under_water: bool,
+    pub gear: crate::toolspeed::Gear,
 }
 
 #[derive(Debug, Default)]
@@ -56,25 +57,18 @@ pub struct Digger {
     pub swing: bool,
 }
 
-/// VANILLA: BlockStateBase#getDestroyProgress (рука, без эффектов).
+/// VANILLA: BlockBehaviour#getDestroyProgress: Player#getDestroySpeed / твёрдость / (30 или 100).
 pub fn destroy_progress(state: BlockState, body: Body) -> f32 {
     let Some(p) = state.props() else { return 0.0 };
     if p.destroy_time < 0.0 {
         return 0.0;
     }
-    let mut speed = 1.0f32;
-    if body.under_water {
-        speed /= 5.0; // нет Aqua Affinity
-    }
-    if !body.on_ground {
-        speed /= 5.0;
-    }
-    let divisor = if p.has(FLAG_REQUIRES_CORRECT_TOOL) {
-        100.0
-    } else {
-        30.0
-    };
-    speed / p.destroy_time / divisor
+    let speed =
+        crate::toolspeed::destroy_speed(body.gear, state.name(), body.on_ground, body.under_water);
+    // Player#hasCorrectToolForDrops: блоку не нужен инструмент ИЛИ Tool#isCorrectForDrops.
+    let correct = !p.has(FLAG_REQUIRES_CORRECT_TOOL)
+        || crate::toolspeed::correct_for_drops(body.gear.tool, state.name());
+    speed / p.destroy_time / if correct { 30.0 } else { 100.0 }
 }
 
 impl Digger {
@@ -211,6 +205,14 @@ mod tests {
     const GROUND: Body = Body {
         on_ground: true,
         under_water: false,
+        gear: crate::toolspeed::Gear {
+            tool: "",
+            efficiency: 0.0,
+            break_speed: 1.0,
+            submerged: 0.2,
+            haste: 0,
+            fatigue: 0,
+        },
     };
 
     #[test]

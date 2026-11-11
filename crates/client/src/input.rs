@@ -45,11 +45,18 @@ pub struct Mouse {
     /// Получен CursorGrabMode::Locked (иначе Confined — курсор надо прятать и возвращать в центр).
     locked: bool,
     pub sensitivity: f64,
+    /// Множитель чувствительности при зуме (1.0 — без зума).
+    pub zoom_scale: f64,
     pub invert_x: bool,
     pub invert_y: bool,
     pub wheel_sens: f64,
     pub discrete_scroll: bool,
     scroll_acc: f64,
+    /// Курсор только что поставлен в центр окна (release): UI забирает позицию, не дожидаясь CursorMoved.
+    pub recentered: Option<(f64, f64)>,
+    /// Wayland: снятие Locked отложено на N кадров, чтобы подсказка позиции курсора успела
+    /// закоммититься на поверхности (иначе композитор её игнорирует).
+    release_pending: u8,
 }
 
 impl Default for Mouse {
@@ -61,11 +68,14 @@ impl Default for Mouse {
             fresh: false,
             locked: false,
             sensitivity: DEFAULT_SENSITIVITY,
+            zoom_scale: 1.0,
             invert_x: false,
             invert_y: false,
             wheel_sens: 1.0,
             discrete_scroll: false,
             scroll_acc: 0.0,
+            recentered: None,
+            release_pending: 0,
         }
     }
 }
@@ -98,7 +108,7 @@ impl Mouse {
 
     /// Забрать накопленное движение за кадр как поворот.
     pub fn take_turn(&mut self) -> Turn {
-        let k = sensitivity_factor(self.sensitivity) * TURN_SCALE;
+        let k = sensitivity_factor(self.sensitivity) * TURN_SCALE * self.zoom_scale;
         let sx = if self.invert_x { -1.0 } else { 1.0 };
         let sy = if self.invert_y { -1.0 } else { 1.0 };
         let t = Turn {
@@ -112,6 +122,15 @@ impl Mouse {
 
     /// VANILLA: grabMouse. Confined→Locked с откатом (Wayland: только Locked, X11: Confined).
     pub fn grab(&mut self, w: &Window) {
+        if self.release_pending > 0 {
+            // Освобождение ещё не дошло до композитора: захват остаётся, просто возобновляем.
+            self.release_pending = 0;
+            w.set_cursor_visible(false);
+            self.grabbed = true;
+            self.dx = 0.0;
+            self.dy = 0.0;
+            return;
+        }
         if self.grabbed {
             return;
         }
@@ -143,7 +162,8 @@ impl Mouse {
     /// Повторный запрос захвата (указатель вошёл в окно / первое движение после захвата).
     pub fn regrab(&mut self, w: &Window) {
         if self.grabbed {
-            self.release(w);
+            let _ = w.set_cursor_grab(CursorGrabMode::None);
+            self.grabbed = false;
             self.grab(w);
             self.fresh = false;
         }
@@ -154,11 +174,45 @@ impl Mouse {
         if !self.grabbed {
             return;
         }
-        let _ = w.set_cursor_grab(CursorGrabMode::None);
+        // VANILLA: MouseHandler#releaseMouse — курсор встаёт в центр окна. На Wayland позиция
+        // принимается как подсказка, пока курсор ещё захвачен (Locked); на X11 — после освобождения.
+        let center = |w: &Window| {
+            let s = w.inner_size();
+            let _ =
+                w.set_cursor_position(winit::dpi::PhysicalPosition::new(s.width / 2, s.height / 2));
+        };
+        center(w);
+        if self.locked {
+            self.release_pending = 3;
+            w.request_redraw();
+        } else {
+            let _ = w.set_cursor_grab(CursorGrabMode::None);
+            center(w);
+        }
+        let sz = w.inner_size();
+        self.recentered = Some((f64::from(sz.width) / 2.0, f64::from(sz.height) / 2.0));
         w.set_cursor_visible(true);
         self.grabbed = false;
         self.dx = 0.0;
         self.dy = 0.0;
+    }
+}
+
+impl Mouse {
+    /// Раз в кадр: завершает отложенное снятие захвата (см. `release_pending`).
+    pub fn finish_release(&mut self, w: &Window) {
+        if self.release_pending == 0 {
+            return;
+        }
+        self.release_pending -= 1;
+        if self.release_pending == 0 {
+            let _ = w.set_cursor_grab(CursorGrabMode::None);
+            let s = w.inner_size();
+            let _ =
+                w.set_cursor_position(winit::dpi::PhysicalPosition::new(s.width / 2, s.height / 2));
+        } else {
+            w.request_redraw();
+        }
     }
 }
 
