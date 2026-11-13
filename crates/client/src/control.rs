@@ -275,6 +275,17 @@ impl App {
                     .map(|x| x.text.as_str())
                     .collect::<String>()
             };
+            s["sidebar"] =
+                json!(v
+                    .scoreboard
+                    .sidebar_objective(&self.player_name)
+                    .map(|(k, o)| json!({
+                        "objective": k,
+                        "title": plain(&o.display),
+                        "lines": v.scoreboard.sidebar_lines(k).iter()
+                            .map(|(n, sc)| format!("{}: {}", plain(n), plain(sc)))
+                            .collect::<Vec<_>>(),
+                    })));
             s["title"] = json!(v.titles.current().map(|(t, sub, time)| json!({
                 "title": plain(t),
                 "subtitle": sub.map(plain),

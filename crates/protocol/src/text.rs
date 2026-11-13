@@ -125,6 +125,14 @@ impl Component {
         parse(&nbt_to_json(t), 0)
     }
 
+    /// Стиль из сетевого NBT (VANILLA: Style.Serializer.TRUSTED_STREAM_CODEC — compound полей стиля).
+    pub fn style_from_nbt(t: &Tag) -> ProtocolResult<Style> {
+        match nbt_to_json(t) {
+            Value::Object(o) => parse_style(&o, 0),
+            _ => Ok(Style::default()),
+        }
+    }
+
     /// Плоский текст без стилей. `lang`: ключ → шаблон (`%s`, `%1$s`). Нет перевода → fallback → ключ.
     pub fn to_plain(&self, lang: &dyn Fn(&str) -> Option<String>) -> String {
         let mut out = String::new();

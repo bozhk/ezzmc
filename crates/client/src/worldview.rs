@@ -307,6 +307,8 @@ pub struct WorldView {
     pub boss: crate::bossbar::BossBars,
     /// Титры `/title` (VANILLA: Hud title/subtitle).
     pub titles: crate::titles::Titles,
+    /// Scoreboard (цели/очки/команды). VANILLA: ClientPacketListener#scoreboard.
+    pub scoreboard: crate::scoreboard::Scoreboard,
     /// Неймтеги кадра: (позиция якоря, текст, присед) и матрица проекции этого кадра.
     nametags: Vec<([f64; 3], String, bool)>,
     nt_view: (Mat4, [f64; 3], f32),
@@ -1066,6 +1068,7 @@ impl WorldView {
             tab: Default::default(),
             boss: Default::default(),
             titles: Default::default(),
+            scoreboard: Default::default(),
             nametags: Vec::new(),
             nt_view: (Mat4::IDENTITY, [0.0; 3], 1.0),
             chat_in: Vec::new(),
@@ -1403,6 +1406,7 @@ impl WorldView {
                 NetEvt::Tab(e) => self.tab.apply(*e),
                 NetEvt::Boss(id, op) => self.boss.apply(id, *op),
                 NetEvt::Title(e) => self.titles.apply(e),
+                NetEvt::Scoreboard(e) => self.scoreboard.apply(*e),
                 NetEvt::Dialog(d) => self.dialog_in.push(d),
                 NetEvt::OpenSign(p, f) => self.sign_in.push((p, f)),
                 NetEvt::Suggestions(id, s, l, v) => self.sugg_in.push((id, s, l, v)),

@@ -140,6 +140,8 @@ pub enum NetEvt {
     Overlay(ezzmc_protocol::text::Component),
     /// set_title_text/set_subtitle_text/set_titles_animation/clear_titles.
     Title(crate::titles::TitleEvt),
+    /// set_objective/set_display_objective/set_score/reset_score/set_player_team.
+    Scoreboard(Box<crate::scoreboard::ScoreEvt>),
     /// Список игроков (Tab): player_info_update/remove, tab_list.
     Tab(Box<crate::tablist::TabEvt>),
     /// boss_event: (uuid, операция).
@@ -1134,6 +1136,15 @@ fn run(
                                 let _ = tx.send(ev);
                             }
                             None => tracing::warn!("{pname}: не разобран [len={}]", body.len()),
+                        }
+                        continue;
+                    }
+                    if let Some(r) = crate::scoreboard::parse(pname, &body) {
+                        match r {
+                            Ok(ev) => {
+                                let _ = tx.send(NetEvt::Scoreboard(Box::new(ev)));
+                            }
+                            Err(x) => tracing::warn!("{pname}: {x} [len={}]", body.len()),
                         }
                         continue;
                     }

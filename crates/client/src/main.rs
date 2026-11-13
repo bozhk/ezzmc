@@ -65,6 +65,7 @@ mod pistonview;
 mod placement;
 mod playersound;
 mod sandbox;
+mod scoreboard;
 mod screenshot;
 mod settings;
 mod shulkerbox;
@@ -2610,6 +2611,16 @@ impl ApplicationHandler for App {
                                         if !hid {
                                             v.draw_nametags(t, gwf, ghf);
                                             v.draw_signs(t, w, h);
+                                        }
+                                        if !hid {
+                                            // VANILLA: Hud#extractScoreboardSidebar — до overlay/титров.
+                                            v.scoreboard.draw_sidebar(
+                                                t,
+                                                item_lang,
+                                                &self.player_name,
+                                                gwf,
+                                                ghf,
+                                            );
                                         }
                                         if let (Some((m, ticks)), false) = (&overlay, hid) {
                                             // VANILLA: Hud#extractOverlayMessage — над хотбаром (gh − 68),
