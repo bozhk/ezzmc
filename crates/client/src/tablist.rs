@@ -199,17 +199,24 @@ impl TabList {
         t: &mut TextRenderer,
         lang: &Lang,
         gw: f32,
+        sb: &crate::scoreboard::Scoreboard,
     ) -> Vec<(f32, f32, &'static str)> {
         let infos = self.sorted();
         let legacy =
             |c: &Component, base: u32| chat::spans_to_legacy(&chat::flatten(c, lang, true), base);
+        // VANILLA: PlayerTabOverlay#getNameForDisplay — displayName или имя профиля с оформлением команды.
         let names: Vec<String> = infos
             .iter()
             .map(|e| {
-                let s = e
-                    .display
-                    .as_ref()
-                    .map_or_else(|| e.name.clone(), |c| legacy(c, 0xFFFFFF));
+                let s = match &e.display {
+                    Some(c) => legacy(c, 0xFFFFFF),
+                    None => match sb.team_of(&e.name) {
+                        Some(tm) => {
+                            legacy(&tm.format_name(Component::text(e.name.clone())), 0xFFFFFF)
+                        }
+                        None => e.name.clone(),
+                    },
+                };
                 if e.game_mode == SPECTATOR {
                     format!("§o{s}")
                 } else {
@@ -222,13 +229,38 @@ impl TabList {
             .map(|n| t.text_width(n))
             .fold(0.0_f32, f32::max)
             .ceil();
+        // VANILLA: очки цели слота LIST (PLAYER_LIST_DEFAULT — жёлтый); HEARTS — ширина 90.
+        let list_obj = sb.list_objective();
+        let spacer = t.text_width(" ");
+        let scores: Vec<Option<(String, f32)>> = infos
+            .iter()
+            .map(|e| {
+                let (k, _) = list_obj?;
+                let c = sb.list_score(k, &e.name)?;
+                let s = legacy(&c, 0xFFFFFF);
+                let w = t.text_width(&s);
+                Some((s, w))
+            })
+            .collect();
+        let max_score = scores
+            .iter()
+            .flatten()
+            .map(|(_, w)| if *w > 0.0 { spacer + w } else { 0.0 })
+            .fold(0.0_f32, f32::max);
+        let width_for_score = match list_obj {
+            Some((_, o)) if o.render_type == 1 => 90.0,
+            Some(_) => max_score,
+            None => 0.0,
+        };
         let slots = infos.len();
         let (mut rows, mut cols) = (slots, 1);
         while rows > 20 {
             cols += 1;
             rows = slots.div_ceil(cols);
         }
-        let slot_w = ((cols as f32 * (max_name + 13.0)).min(gw - 50.0) / cols as f32).floor();
+        let slot_w = ((cols as f32 * (max_name + width_for_score + 13.0)).min(gw - 50.0)
+            / cols as f32)
+            .floor();
         let cols_f = cols as f32;
         let xxo = (gw / 2.0 - (slot_w * cols_f + (cols_f - 1.0) * 5.0) / 2.0).floor();
         let mut yyo = 10.0;
@@ -269,6 +301,15 @@ impl TabList {
                 0xFFFFFF
             };
             t.draw(name, xo, yo, c, true);
+            if let (Some((_, o)), Some((sc, sw))) = (list_obj, &scores[i]) {
+                // VANILLA: extractTablistScore — не у наблюдателей, при right − left > 5.
+                // TODO-521: сердца (RenderType.HEARTS) не рисуются.
+                let left = xo + max_name + 1.0;
+                let right = left + width_for_score;
+                if e.game_mode != SPECTATOR && right - left > 5.0 && o.render_type != 1 {
+                    t.draw(sc, right - sw, yo, 0xFFFFFF, true);
+                }
+            }
             let sprite = match e.latency {
                 l if l < 0 => "tab_ping_unknown",
                 l if l < 150 => "tab_ping_5",

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use ezzmc_protocol::nbt;
-use ezzmc_protocol::text::{Component, Content, Style};
+use ezzmc_protocol::text::{Component, Style};
 use ezzmc_protocol::wire::Reader;
 use ezzmc_protocol::ProtocolResult;
 use ezzmc_render::text::TextRenderer;
@@ -62,13 +62,18 @@ pub struct Score {
 
 #[derive(Debug, Clone, Default)]
 pub struct Team {
+    /// Имя команды, флаги (friendly fire / видеть невидимых союзников), правило толкания —
+    /// хранятся по ванили, пока не используются (TODO-522).
+    #[allow(dead_code)]
     pub display: Option<Component>,
     pub prefix: Option<Component>,
     pub suffix: Option<Component>,
     /// TeamColor id 0..15.
     pub color: Option<u8>,
+    #[allow(dead_code)]
     pub options: u8,
     pub name_tag_visibility: i32,
+    #[allow(dead_code)]
     pub collision_rule: i32,
     pub players: Vec<String>,
 }
@@ -378,6 +383,47 @@ impl Scoreboard {
             .map(|(k, o)| (k.as_str(), o))
     }
 
+    /// Цель слота LIST (очки в Tab).
+    pub fn list_objective(&self) -> Option<(&str, &Objective)> {
+        let name = self.display[SLOT_LIST as usize].as_deref()?;
+        self.objectives
+            .get_key_value(name)
+            .map(|(k, o)| (k.as_str(), o))
+    }
+
+    /// Очки игрока в Tab. VANILLA: PlayerScoreEntry#formatValue(numberFormatOrDefault(PLAYER_LIST_DEFAULT)).
+    pub fn list_score(&self, objective: &str, player: &str) -> Option<Component> {
+        let obj = self.objectives.get(objective)?;
+        let s = self.scores.get(player)?.get(objective)?;
+        let def = NumFmt::Styled(Style {
+            color: Some(0xFFFF55),
+            ..Style::default()
+        });
+        let f = s
+            .number_format
+            .as_ref()
+            .or(obj.number_format.as_ref())
+            .unwrap_or(&def);
+        Some(f.format(s.value))
+    }
+
+    /// VANILLA: Entity#belowNameDisplay — «очки␠имя цели» (формат по умолчанию NO_STYLE).
+    pub fn below_name(&self, holder: &str) -> Option<Component> {
+        let name = self.display[SLOT_BELOW_NAME as usize].as_deref()?;
+        let obj = self.objectives.get(name)?;
+        let s = self.scores.get(holder)?.get(name)?;
+        let def = NumFmt::Styled(Style::default());
+        let f = s
+            .number_format
+            .as_ref()
+            .or(obj.number_format.as_ref())
+            .unwrap_or(&def);
+        Some(Component {
+            siblings: vec![f.format(s.value), Component::text(" "), obj.display.clone()],
+            ..Component::text("")
+        })
+    }
+
     /// Строки боковой панели: (имя, очки) по SCORE_DISPLAY_ORDER, без `#…`, не более 15.
     pub fn sidebar_lines(&self, objective: &str) -> Vec<(Component, Component)> {
         let Some(obj) = self.objectives.get(objective) else {
@@ -496,8 +542,10 @@ fn cmp_ci(a: &str, b: &str) -> std::cmp::Ordering {
     a.chars().map(k).cmp(b.chars().map(k))
 }
 
-/// Плоский текст компонента (агенту).
-pub fn plain(c: &Component) -> String {
+/// Плоский текст компонента (тесты).
+#[cfg(test)]
+fn plain(c: &Component) -> String {
+    use ezzmc_protocol::text::Content;
     let mut s = match &c.content {
         Content::Text(t) => t.clone(),
         _ => String::new(),

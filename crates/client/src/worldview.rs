@@ -68,6 +68,14 @@ fn foil_of(st: &ezzmc_protocol::item::ItemStack) -> bool {
     crate::handitem::stack_ctx(st).is_some_and(|(n, _)| crate::hud::has_foil(n, &st.patch))
 }
 
+/// Неймтег игрока (собирается в `bake_remote_players`).
+struct NameTag {
+    anchor: [f64; 3],
+    text: ezzmc_protocol::text::Component,
+    discrete: bool,
+    score: Option<ezzmc_protocol::text::Component>,
+}
+
 pub struct WorldView {
     /// 185: зажата ЛКМ (key.attack) — Minecraft#continueAttack.
     pub attack_held: bool,
@@ -310,7 +318,10 @@ pub struct WorldView {
     /// Scoreboard (цели/очки/команды). VANILLA: ClientPacketListener#scoreboard.
     pub scoreboard: crate::scoreboard::Scoreboard,
     /// Неймтеги кадра: (позиция якоря, текст, присед) и матрица проекции этого кадра.
-    nametags: Vec<([f64; 3], String, bool)>,
+    /// Неймтеги: якорь, имя (с оформлением команды), присед, строка очков below_name.
+    nametags: Vec<NameTag>,
+    /// Ник локального игрока (команды/scoreboard).
+    pub own_name: String,
     nt_view: (Mat4, [f64; 3], f32),
     pub chat_in: Vec<(ezzmc_protocol::text::Component, Option<crate::chat::Tag>)>,
     /// Диалоги от сервера: Some — показать, None — clear_dialog.
@@ -1070,6 +1081,7 @@ impl WorldView {
             titles: Default::default(),
             scoreboard: Default::default(),
             nametags: Vec::new(),
+            own_name: String::new(),
             nt_view: (Mat4::IDENTITY, [0.0; 3], 1.0),
             chat_in: Vec::new(),
             dialog_in: Vec::new(),
@@ -2457,44 +2469,65 @@ impl WorldView {
     /// VANILLA: EntityRenderer#submitNameTag — текст 0.025 блока/пиксель шрифта, по центру над якорем,
     /// подложка 0x40000000 (отступ 1 px). Тусклый see-through слой рисуется всегда, яркий —
     /// отдельным слоем с depth-тестом по буферу мира (`flush_nametags`).
-    pub fn draw_nametags(&self, t: &mut ezzmc_render::text::TextRenderer, gw: f32, gh: f32) {
+    pub fn draw_nametags(
+        &self,
+        t: &mut ezzmc_render::text::TextRenderer,
+        lang: &crate::ui::lang::Lang,
+        gw: f32,
+        gh: f32,
+    ) {
+        use crate::titles::{draw_spans, spans_width};
         let (vp, cam, fy) = self.nt_view;
-        let mut tags: Vec<(f32, f32, f32, f32, f32, &str, bool)> = Vec::new();
-        for (p, name, sneak) in &self.nametags {
-            let c = vp
-                * glam::Vec4::new(
-                    (p[0] - cam[0]) as f32,
-                    (p[1] - cam[1]) as f32,
-                    (p[2] - cam[2]) as f32,
-                    1.0,
-                );
-            if c.w <= 0.05 {
-                continue;
+        // (x, y, масштаб, w, z, спаны, присед)
+        type Tag = (f32, f32, f32, f32, f32, Vec<crate::chat::Span>, bool);
+        let mut tags: Vec<Tag> = Vec::new();
+        for nt in &self.nametags {
+            // VANILLA: EntityRenderer#submitNameDisplay — scoreText на якоре, имя выше на 9·1.15·0.025.
+            let lines = nt.score.iter().map(|c| (c, 0.0)).chain(std::iter::once((
+                &nt.text,
+                if nt.score.is_some() {
+                    9.0 * 1.15 * 0.025
+                } else {
+                    0.0
+                },
+            )));
+            for (c, dy) in lines {
+                let p = nt.anchor;
+                let v = vp
+                    * glam::Vec4::new(
+                        (p[0] - cam[0]) as f32,
+                        (p[1] + dy - cam[1]) as f32,
+                        (p[2] - cam[2]) as f32,
+                        1.0,
+                    );
+                if v.w <= 0.05 {
+                    continue;
+                }
+                let (x, y) = ((v.x / v.w * 0.5 + 0.5) * gw, (0.5 - v.y / v.w * 0.5) * gh);
+                tags.push((
+                    x,
+                    y,
+                    0.025 * fy * (gh / 2.0) / v.w,
+                    v.w,
+                    v.z / v.w,
+                    crate::chat::flatten(c, lang, true),
+                    nt.discrete,
+                ));
             }
-            let (x, y) = ((c.x / c.w * 0.5 + 0.5) * gw, (0.5 - c.y / c.w * 0.5) * gh);
-            tags.push((
-                x,
-                y,
-                0.025 * fy * (gh / 2.0) / c.w,
-                c.w,
-                c.z / c.w,
-                name,
-                *sneak,
-            ));
         }
         tags.sort_by(|a, b| b.3.total_cmp(&a.3));
-        for (x, y, sc, _, z, name, sneak) in tags {
-            let w = t.text_width(name);
+        for (x, y, sc, _, z, spans, sneak) in tags {
+            let w = spans_width(t, &spans);
             t.set_transform(Some((x, y, 0.0, sc)));
             t.set_depth(None);
             t.fill(-w / 2.0 - 1.0, -1.0, w / 2.0, 8.0, 0x4000_0000);
             // VANILLA: слой see-through 0x20FFFFFF (виден всегда) + яркий 0xFFFFFFFF с depth-тестом
-            // (у приседающего яркого слоя нет).
-            t.draw_alpha(name, -w / 2.0, 0.0, 0xFFFFFF, 32.0 / 255.0);
+            // (у приседающего яркого слоя нет). Цвета компонента сохраняются, alpha — от слоя.
+            draw_spans(t, &spans, -w / 2.0, 0.0, 32.0 / 255.0, false);
             if !sneak {
                 // Чуть ближе к камере, чтобы не бороться с глубиной самого якоря.
                 t.set_depth(Some((z - 1e-5).max(0.0)));
-                t.draw(name, -w / 2.0, 0.0, 0xFFFFFF, false);
+                draw_spans(t, &spans, -w / 2.0, 0.0, 1.0, false);
                 t.set_depth(None);
             }
         }
@@ -3793,9 +3826,38 @@ impl WorldView {
                 let range = if crouching { 32.0 } else { 64.0 };
                 if d2 < range * range {
                     if let Some(name) = self.tab.profiles.get(&e.uuid) {
-                        let h = if crouching { 1.5 } else { 1.8 };
-                        let anchor = [pos[0], pos[1] + h + 0.5, pos[2]];
-                        self.nametags.push((anchor, name.clone(), crouching));
+                        let sb = &self.scoreboard;
+                        let team = sb.team_of(name);
+                        // VANILLA: LivingEntityRenderer#shouldShowName — правило nameTagVisibility
+                        // команды (0 always, 1 never, 2 hideForOtherTeams, 3 hideForOwnTeam).
+                        let show = team.is_none_or(|tm| {
+                            let mine = sb.team_of(&self.own_name);
+                            let allied = mine.is_some_and(|m| std::ptr::eq(m, tm));
+                            match tm.name_tag_visibility {
+                                1 => false,
+                                2 => mine.is_none() || allied,
+                                3 => mine.is_none() || !allied,
+                                _ => true,
+                            }
+                        });
+                        if show {
+                            let h = if crouching { 1.5 } else { 1.8 };
+                            let anchor = [pos[0], pos[1] + h + 0.5, pos[2]];
+                            // VANILLA: Player#getDisplayName — PlayerTeam.formatNameForTeam.
+                            let text = ezzmc_protocol::text::Component::text(name.clone());
+                            let text = match team {
+                                Some(tm) => tm.format_name(text),
+                                None => text,
+                            };
+                            // VANILLA: Entity#belowNameDisplay — ближе BELOW_NAME_DISTANCE (10).
+                            let score = (d2 < 100.0).then(|| sb.below_name(name)).flatten();
+                            self.nametags.push(NameTag {
+                                anchor,
+                                text,
+                                discrete: crouching,
+                                score,
+                            });
+                        }
                     }
                 }
             }

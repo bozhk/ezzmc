@@ -1530,7 +1530,10 @@ impl App {
                 o.get(&ui::options::VIDEO[ui::options::COMPUTE_RENDERER]) == "true";
             ro
         }) {
-            Ok(v) => self.view = Some(v),
+            Ok(mut v) => {
+                v.own_name = self.player_name.clone();
+                self.view = Some(v);
+            }
             Err(e) => tracing::error!("мир: {e}"),
         }
     }
@@ -2609,7 +2612,7 @@ impl ApplicationHandler for App {
                                             hudbars::draw_xp_level(t, stats.xp_level, gwf, ghf);
                                         }
                                         if !hid {
-                                            v.draw_nametags(t, gwf, ghf);
+                                            v.draw_nametags(t, item_lang, gwf, ghf);
                                             v.draw_signs(t, w, h);
                                         }
                                         if !hid {
@@ -2708,7 +2711,8 @@ impl ApplicationHandler for App {
                                         }
                                         // VANILLA: Hud#extractTabList — пока зажат key.playerlist (не при открытом чате/инвентаре).
                                         if tab_down && !hid && !inv_open && !chat.open && !dead {
-                                            let icons = v.tab.draw(t, item_lang, gwf);
+                                            let icons =
+                                                v.tab.draw(t, item_lang, gwf, &v.scoreboard);
                                             t.flush(&g.device, &g.queue, view, w, h);
                                             t.begin(w, h);
                                             p.begin(t.scale());
