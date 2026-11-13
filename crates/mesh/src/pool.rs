@@ -3,17 +3,24 @@
 use crate::section::{mesh_section, ModelProvider, Neighborhood, SectionMesh, SectionPos};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use rustc_hash::FxHashMap as HashMap;
+use std::any::Any;
 use std::sync::Arc;
+
+/// Пост-обработка меша в рабочем потоке (напр. конвертация для compute-рендера): результат
+/// приезжает в `MeshResult::extra`, чтобы не нагружать рендер-поток.
+pub type Post = Arc<dyn Fn(&SectionMesh) -> Box<dyn Any + Send> + Send + Sync>;
+type Msg = (SectionPos, u64, SectionMesh, Option<Box<dyn Any + Send>>);
 
 pub struct MeshResult {
     pub pos: SectionPos,
     pub mesh: SectionMesh,
+    pub extra: Option<Box<dyn Any + Send>>,
 }
 
 pub struct MeshPool {
     pool: rayon::ThreadPool,
-    tx: Sender<(SectionPos, u64, SectionMesh)>,
-    rx: Receiver<(SectionPos, u64, SectionMesh)>,
+    tx: Sender<Msg>,
+    rx: Receiver<Msg>,
     generation: HashMap<SectionPos, u64>,
     pending: usize,
 }
@@ -35,7 +42,13 @@ impl MeshPool {
     }
 
     /// Поставить секцию в сборку; более ранние незавершённые результаты этой секции станут устаревшими.
-    pub fn submit(&mut self, pos: SectionPos, hood: Neighborhood, models: Arc<dyn ModelProvider>) {
+    pub fn submit(
+        &mut self,
+        pos: SectionPos,
+        hood: Neighborhood,
+        models: Arc<dyn ModelProvider>,
+        post: Option<Post>,
+    ) {
         let g = self.generation.entry(pos).or_insert(0);
         *g += 1;
         let gen = *g;
@@ -43,7 +56,8 @@ impl MeshPool {
         self.pending += 1;
         self.pool.spawn(move || {
             let mesh = mesh_section(pos, &hood, models.as_ref());
-            let _ = tx.send((pos, gen, mesh));
+            let extra = post.as_ref().map(|f| f(&mesh));
+            let _ = tx.send((pos, gen, mesh, extra));
         });
     }
 
@@ -57,10 +71,10 @@ impl MeshPool {
     /// Готовые, актуальные результаты (не блокирует).
     pub fn poll(&mut self) -> Vec<MeshResult> {
         let mut out = Vec::new();
-        while let Ok((pos, gen, mesh)) = self.rx.try_recv() {
+        while let Ok((pos, gen, mesh, extra)) = self.rx.try_recv() {
             self.pending -= 1;
             if self.generation.get(&pos) == Some(&gen) {
-                out.push(MeshResult { pos, mesh });
+                out.push(MeshResult { pos, mesh, extra });
             }
         }
         out
@@ -105,9 +119,9 @@ mod tests {
         let a = SectionPos { x: 0, y: 0, z: 0 };
         let b = SectionPos { x: 1, y: 0, z: 0 };
         let m: Arc<dyn ModelProvider> = Arc::new(NoModels);
-        p.submit(a, Neighborhood::default(), m.clone());
-        p.submit(a, Neighborhood::default(), m.clone());
-        p.submit(b, Neighborhood::default(), m);
+        p.submit(a, Neighborhood::default(), m.clone(), None);
+        p.submit(a, Neighborhood::default(), m.clone(), None);
+        p.submit(b, Neighborhood::default(), m, None);
         p.cancel(&b);
         let mut got = Vec::new();
         let t = Instant::now();

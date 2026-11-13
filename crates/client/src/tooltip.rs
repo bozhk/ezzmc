@@ -1,7 +1,7 @@
 //! Подсказка предмета (TODO-235): название (custom_name/item_name/lang/зелья), цвет редкости, зелья (эффекты,
 //! «When Applied:»), пластинка (описание jukebox_song), пустой бандл (описание), чары, lore, атрибуты («When in Main
 //! Hand…»), Unbreakable, спаунер (без имени сущности), F3+H (прочность, id), рамка.
-//! Нет: сетка и полоска бандла (визуальный компонент), имя сущности спаунера, категория креатива, tooltip_display,
+//! Бандл: сетка/полоска (`draw_block`, после тултипов кадра). Нет: выбранный предмет бандла (колесо), имя сущности спаунера, категория креатива, tooltip_display,
 //! компоненты (F3+H), OverrideText-стили.
 //! VANILLA: GuiGraphics#renderTooltip / TooltipRenderUtil (фон 0xF0100010, рамка 0x505000FF→0x5028007F).
 use crate::chat;
@@ -586,6 +586,17 @@ fn jukebox_line(lang: &Lang, b: &[u8]) -> Option<(String, u32)> {
     Some((plain(lang, &tag)?, GRAY))
 }
 
+/// Описание песни по id реестра jukebox_song (level_event 1010). VANILLA: JukeboxSong#description.
+pub fn song_description(lang: &Lang, id: i32) -> Option<String> {
+    let tag = JUKEBOX_DESC
+        .lock()
+        .ok()?
+        .get(usize::try_from(id).ok()?)?
+        .1
+        .clone()?;
+    plain(lang, &tag)
+}
+
 /// Описание песни по ключу реестра (дефолт пластинки из данных). VANILLA: jukebox_song.description.
 fn song_tag(key: &str) -> Option<Tag> {
     JUKEBOX_DESC
@@ -596,33 +607,356 @@ fn song_tag(key: &str) -> Option<Tag> {
         .and_then(|(_, t)| t.clone())
 }
 
-/// Пустой бандл: описание серым с переносом по 96 px. VANILLA: ClientBundleTooltip#extractEmptyBundleDescriptionText.
-/// Полоска «Empty» и сетка не рисуются (визуальный компонент, см. заголовок модуля).
-fn bundle_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack, out: &mut Vec<(String, u32)>) {
-    let filled = comp(&s.patch, "bundle_contents")
+/// Визуальный блок тултипа бандла (ClientBundleTooltip), рисуется после текста: `draw_block`.
+struct Block {
+    /// Левый верхний угол блока и ширина тултипа (контент 96 по центру).
+    x: f32,
+    y: f32,
+    w: f32,
+    items: Vec<ItemStack>,
+    /// Вес содержимого: (числитель, знаменатель).
+    weight: (i128, i128),
+    desc: Vec<String>,
+    /// Индекс выбранного предмета (колесо) или -1.
+    sel: i32,
+}
+
+/// Маркер строки: место под визуальный блок (по индексу 1, после имени).
+const BLOCK_MARK: &str = "\u{1}block";
+static PENDING: Mutex<Option<Block>> = Mutex::new(None);
+static BUNDLE_SRC: Mutex<Option<(Vec<ItemStack>, Vec<String>)>> = Mutex::new(None);
+/// Выбор предмета бандла под курсором: (слот меню, индекс или -1) и накопленное колесо.
+/// VANILLA: BundleMouseActions + BundleItem#getSelectedItemIndex (на сервер не уходит в компоненте, только пакетом).
+static SEL: Mutex<(i32, i32, f32)> = Mutex::new((-1, -1, 0.0));
+
+fn selected() -> i32 {
+    SEL.lock().map_or(-1, |g| g.1)
+}
+
+/// VANILLA: BundleItem#getNumberOfItemsToShow.
+fn items_to_show(n: usize) -> usize {
+    let avail = if n > 12 { 11 } else { 12 };
+    let on_row = n % 4;
+    let empty = if on_row == 0 { 0 } else { 4 - on_row };
+    n.min(avail - empty)
+}
+
+/// Колесо над бандлом в слоте `slot`. Возвращает пакет (слот, индекс).
+/// VANILLA: BundleMouseActions#onMouseScrolled + ScrollWheelHandler.
+pub fn bundle_wheel(slot: usize, s: &ItemStack, delta: f32) -> Option<(i32, i32)> {
+    if !ITEM
+        .get(s.item as usize)
+        .is_some_and(|n| n.ends_with("bundle"))
+    {
+        return None;
+    }
+    let n = comp(&s.patch, "bundle_contents")
+        .map(read_contents)
+        .map_or(0, |v| items_to_show(v.len()));
+    if n == 0 {
+        return None;
+    }
+    let mut g = SEL.lock().ok()?;
+    let slot = slot as i32;
+    if g.0 != slot {
+        *g = (slot, -1, 0.0);
+    }
+    if g.2 != 0.0 && g.2.signum() != delta.signum() {
+        g.2 = 0.0;
+    }
+    g.2 += delta;
+    let wheel = g.2 as i32;
+    if wheel == 0 {
+        return None;
+    }
+    g.2 -= wheel as f32;
+    let lim = n as i32;
+    let mut sel = (g.1 - wheel.signum()).max(-1);
+    while sel < 0 {
+        sel += lim;
+    }
+    while sel >= lim {
+        sel -= lim;
+    }
+    if sel == g.1 {
+        return None;
+    }
+    g.1 = sel;
+    Some((slot, sel))
+}
+
+/// Курсор ушёл с бандла (или сменился слот): сбросить выбор. VANILLA: BundleMouseActions#onStopHovering.
+pub fn bundle_unhover(hovered: Option<usize>) -> Option<(i32, i32)> {
+    let mut g = SEL.lock().ok()?;
+    if g.1 >= 0 && hovered.map(|h| h as i32) != Some(g.0) {
+        let old = g.0;
+        *g = (-1, -1, 0.0);
+        return Some((old, -1));
+    }
+    None
+}
+
+fn gcd(a: i128, b: i128) -> i128 {
+    if b == 0 {
+        a.abs().max(1)
+    } else {
+        gcd(b, a % b)
+    }
+}
+
+/// Вес стека. VANILLA: BundleContents#getWeight (бандл в бандле = 1/16 + вес содержимого; пчёлы = 1; иначе 1/maxStack).
+fn stack_weight(s: &ItemStack) -> (i128, i128) {
+    let name = ITEM.get(s.item as usize).copied().unwrap_or("air");
+    let (n, d) = if let Some(b) = comp(&s.patch, "bundle_contents") {
+        let (n, d) = contents_weight(&read_contents(b));
+        (n * 16 + d, d * 16)
+    } else if comp(&s.patch, "bees")
         .and_then(|b| Reader::new(b).var_int().ok())
         .unwrap_or(0)
-        > 0;
-    if filled {
-        return;
+        > 0
+    {
+        (1, 1)
+    } else {
+        let max = comp(&s.patch, "max_stack_size")
+            .and_then(|b| Reader::new(b).var_int().ok())
+            .unwrap_or_else(|| crate::itemdata::max_stack(name))
+            .max(1);
+        (1, i128::from(max))
+    };
+    (n * i128::from(s.count), d)
+}
+
+fn contents_weight(items: &[ItemStack]) -> (i128, i128) {
+    let (mut n, mut d) = (0i128, 1i128);
+    for s in items {
+        let (a, b) = stack_weight(s);
+        n = n * b + a * d;
+        d *= b;
+        let g = gcd(n, d);
+        n /= g;
+        d /= g;
     }
-    let text = lang.tr("item.minecraft.bundle.empty.description");
-    let mut cur = String::new();
-    for w in text.split(' ') {
-        let cand = if cur.is_empty() {
-            w.to_owned()
-        } else {
-            format!("{cur} {w}")
-        };
-        if !cur.is_empty() && t.text_width(&cand) > 96.0 {
-            out.push((std::mem::take(&mut cur), GRAY));
-            cur = w.to_owned();
-        } else {
-            cur = cand;
+    (n, d)
+}
+
+fn read_contents(b: &[u8]) -> Vec<ItemStack> {
+    let mut r = Reader::new(b);
+    let n = r.var_int().unwrap_or(0).clamp(0, 4096);
+    let mut v = Vec::new();
+    for _ in 0..n {
+        match ezzmc_protocol::item::read_template(&mut r) {
+            Ok(s) => v.push(s),
+            Err(_) => break,
         }
     }
-    if !cur.is_empty() {
-        out.push((cur, GRAY));
+    v
+}
+
+/// Бандл: маркер блока и данные (описание пустого — серым с переносом по 96 px).
+/// VANILLA: ClientBundleTooltip (сетка 4×≤3 по 24 px, полоска 96×13), extractEmptyBundleDescriptionText.
+fn bundle_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack, out: &mut Vec<(String, u32)>) {
+    let items = comp(&s.patch, "bundle_contents")
+        .map(read_contents)
+        .unwrap_or_default();
+    let mut desc = Vec::new();
+    if items.is_empty() {
+        let text = lang.tr("item.minecraft.bundle.empty.description");
+        let mut cur = String::new();
+        for w in text.split(' ') {
+            let cand = if cur.is_empty() {
+                w.to_owned()
+            } else {
+                format!("{cur} {w}")
+            };
+            if !cur.is_empty() && t.text_width(&cand) > 96.0 {
+                desc.push(std::mem::take(&mut cur));
+                cur = w.to_owned();
+            } else {
+                cur = cand;
+            }
+        }
+        if !cur.is_empty() {
+            desc.push(cur);
+        }
+    }
+    if let Ok(mut g) = BUNDLE_SRC.lock() {
+        *g = Some((items, desc));
+    }
+    out.push((BLOCK_MARK.to_owned(), 0));
+}
+
+/// Высота блока. VANILLA: ClientBundleTooltip#getHeight.
+fn block_height(items: usize, desc: usize) -> f32 {
+    if items == 0 {
+        (desc * 9 + 13 + 8) as f32
+    } else {
+        (items.min(12).div_ceil(4) * 24 + 13 + 8) as f32
+    }
+}
+
+/// Рисует блок бандла поверх уже выведенного тултипа (спрайты → иконки → текст). Вызывать после тултипов кадра.
+/// VANILLA: ClientBundleTooltip#extractImage.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_block(
+    p: &mut ezzmc_render::gui::GuiPainter,
+    t: &mut TextRenderer,
+    lang: &Lang,
+    g: &ezzmc_render::Gpu,
+    view: &wgpu::TextureView,
+    size: (u32, u32),
+    rm: &ezzmc_assets::pack::ResourceManager,
+) {
+    let Some(b) = PENDING.lock().ok().and_then(|mut g| g.take()) else {
+        return;
+    };
+    let (w, h) = size;
+    t.flush(&g.device, &g.queue, view, w, h);
+    t.begin(w, h);
+    p.begin(t.scale());
+    let left = b.x + ((b.w - 96.0) / 2.0).floor();
+    let n = b.items.len();
+    let mut texts = Vec::<(String, f32, f32, bool)>::new();
+    let bar_y = if n == 0 {
+        for (i, l) in b.desc.iter().enumerate() {
+            texts.push((l.clone(), left, b.y + i as f32 * 9.0, false));
+        }
+        b.y + b.desc.len() as f32 * 9.0 + 4.0
+    } else {
+        let gy = n.min(12).div_ceil(4);
+        let over = n > 12;
+        let rows = (if over { 11 } else { 12 }) - (if n % 4 == 0 { 0 } else { 4 - n % 4 });
+        let shown = n.min(rows);
+        let (xs, ys) = (left + 96.0, b.y + gy as f32 * 24.0);
+        let mut slot = 1usize;
+        for row in 1..=gy {
+            for col in 1..=4usize {
+                let (dx, dy) = (xs - col as f32 * 24.0, ys - row as f32 * 24.0);
+                if over && col * row == 1 {
+                    let hidden: i32 = b.items.iter().skip(shown).map(|s| s.count).sum();
+                    let txt = format!("+{hidden}");
+                    let tw = t.text_width(&txt);
+                    texts.push((txt, dx + 12.0 - (tw / 2.0).floor(), dy + 10.0, false));
+                } else if shown >= slot {
+                    let idx = shown - slot;
+                    let hl = b.sel == idx as i32;
+                    let it = &b.items[idx];
+                    p.nine_slice(
+                        if hl {
+                            "bundle_slot_hl_back"
+                        } else {
+                            "bundle_slot_bg"
+                        },
+                        dx,
+                        dy,
+                        24.0,
+                        24.0,
+                        [24.0, 24.0],
+                        [4.0; 4],
+                        0xFFFF_FFFF,
+                    );
+                    crate::hud::stack_icon(p, &g.device, &g.queue, rm, it, dx + 4.0, dy + 4.0);
+                    if hl {
+                        p.nine_slice(
+                            "bundle_slot_hl_front",
+                            dx,
+                            dy,
+                            24.0,
+                            24.0,
+                            [24.0, 24.0],
+                            [4.0; 4],
+                            0xFFFF_FFFF,
+                        );
+                    }
+                    if it.count != 1 {
+                        let c = it.count.to_string();
+                        texts.push((
+                            c.clone(),
+                            dx + 4.0 + 17.0 - t.text_width(&c),
+                            dy + 13.0,
+                            true,
+                        ));
+                    }
+                    slot += 1;
+                }
+            }
+        }
+        b.y + gy as f32 * 24.0 + 4.0
+    };
+    // Полоска. VANILLA: extractProgressbar (fill = trunc(weight·94), ≥1 → full).
+    let (wn, wd) = b.weight;
+    let fill = (wn * 94 / wd.max(1)).clamp(0, 94) as f32;
+    let full = wn >= wd;
+    if fill > 0.0 {
+        p.nine_slice(
+            if full {
+                "bundle_bar_full"
+            } else {
+                "bundle_bar_fill"
+            },
+            left + 1.0,
+            bar_y,
+            fill,
+            13.0,
+            [6.0, 6.0],
+            [2.0; 4],
+            0xFFFF_FFFF,
+        );
+    }
+    p.nine_slice(
+        "bundle_bar_border",
+        left,
+        bar_y,
+        96.0,
+        13.0,
+        [12.0, 12.0],
+        [2.0; 4],
+        0xFFFF_FFFF,
+    );
+    let label = if wn == 0 {
+        Some(lang.tr("item.minecraft.bundle.empty"))
+    } else if full {
+        Some(lang.tr("item.minecraft.bundle.full"))
+    } else {
+        None
+    };
+    p.flush(&g.device, &g.queue, view, w, h, None);
+    for (s, x, y, shadow) in texts {
+        t.draw(
+            &s,
+            x,
+            y,
+            if shadow || s.starts_with('+') {
+                0xFFFFFF
+            } else {
+                0xAAAAAA
+            },
+            true,
+        );
+    }
+    if let Some(l) = label {
+        let tw = t.text_width(&l);
+        t.draw(
+            &l,
+            left + 48.0 - (tw / 2.0).floor(),
+            bar_y + 3.0,
+            0xFFFFFF,
+            true,
+        );
+    }
+    // Имя выбранного предмета над тултипом. VANILLA: extractSelectedItemTooltip.
+    if let Some(sel) = b.items.get(usize::try_from(b.sel).unwrap_or(usize::MAX)) {
+        let mut lines = stack_lines(lang, t, sel);
+        if let Ok(mut g) = BUNDLE_SRC.lock() {
+            *g = None;
+        }
+        lines.truncate(1);
+        if let Some((name, col)) = lines.first() {
+            let tw = t.text_width(name);
+            let x = (b.x + b.w / 2.0 - 12.0 - tw / 2.0).floor();
+            let y = b.y - 15.0;
+            frame(t, x, y, tw, 8.0);
+            t.draw(name, x, y, *col, true);
+        }
     }
 }
 
@@ -759,6 +1093,30 @@ fn component_count(name: &str, patch: &ComponentPatch) -> usize {
         }
     }
     set.len()
+}
+
+/// Имя предмета без стиля/цвета. VANILLA: ItemStack#getHoverName (custom_name → item_name → зелье → lang).
+pub fn hover_name(lang: &Lang, s: &ItemStack) -> String {
+    let name = ITEM.get(s.item as usize).copied().unwrap_or("air");
+    comp(&s.patch, "custom_name")
+        .and_then(|b| text_of(lang, b))
+        .or_else(|| comp(&s.patch, "item_name").and_then(|b| text_of(lang, b)))
+        .or_else(|| {
+            potion_prefix(name).map(|p| {
+                let pd = comp(&s.patch, "potion_contents").and_then(decode_potion);
+                let suf = pd
+                    .as_ref()
+                    .map(potion_suffix)
+                    .unwrap_or_else(|| "empty".into());
+                lang.tr(&format!("{p}{suf}"))
+            })
+        })
+        .unwrap_or_else(|| item_title(lang, name))
+}
+
+/// Предмет несёт свой `custom_name` (патч). VANILLA: DataComponents#CUSTOM_NAME.
+pub fn has_custom_name(s: &ItemStack) -> bool {
+    comp(&s.patch, "custom_name").is_some()
 }
 
 /// Строки тултипа в порядке `ItemStack#addDetailsToTooltip`.
@@ -956,6 +1314,15 @@ pub fn stack_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack) -> Vec<(String,
     out
 }
 
+/// Фон и рамка тултипа вокруг текста (x, y, ширина, высота). VANILLA: TooltipRenderUtil.
+fn frame(t: &mut TextRenderer, x: f32, y: f32, w: f32, h: f32) {
+    t.fill(x - 3.0, y - 4.0, x + w + 3.0, y + h + 4.0, 0xF010_0010);
+    t.fill(x - 3.0, y - 3.0, x - 2.0, y + h + 3.0, 0x5050_00FF);
+    t.fill(x + w + 2.0, y - 3.0, x + w + 3.0, y + h + 3.0, 0x5028_007F);
+    t.fill(x - 3.0, y - 3.0, x + w + 3.0, y - 2.0, 0x5050_00FF);
+    t.fill(x - 3.0, y + h + 2.0, x + w + 3.0, y + h + 3.0, 0x5028_007F);
+}
+
 pub fn draw_colored(
     t: &mut TextRenderer,
     lines: &[(String, u32)],
@@ -967,12 +1334,22 @@ pub fn draw_colored(
     if lines.is_empty() {
         return;
     }
-    let w = lines.iter().map(|l| t.text_width(&l.0)).fold(0.0, f32::max);
-    let h = if lines.len() > 1 {
-        10.0 * lines.len() as f32 + 2.0
+    // Маркер визуального блока (бандл): место высотой bh после имени, ширина не меньше 96.
+    let mark = lines.iter().position(|l| l.0 == BLOCK_MARK);
+    let src = mark.and_then(|_| BUNDLE_SRC.lock().ok().and_then(|mut g| g.take()));
+    let bh = src
+        .as_ref()
+        .map_or(0.0, |(i, d)| block_height(i.len(), d.len()));
+    let text: Vec<&(String, u32)> = lines.iter().filter(|l| l.0 != BLOCK_MARK).collect();
+    let mut w = text.iter().map(|l| t.text_width(&l.0)).fold(0.0, f32::max);
+    if src.is_some() {
+        w = w.max(96.0);
+    }
+    let h = (if text.len() > 1 || src.is_some() {
+        10.0 * text.len() as f32 + 2.0
     } else {
         8.0
-    };
+    }) + bh;
     let mut x = mx + 12.0;
     let mut y = my - 12.0;
     if x + w + 4.0 > gw {
@@ -984,11 +1361,28 @@ pub fn draw_colored(
     t.fill(x + w + 2.0, y - 3.0, x + w + 3.0, y + h + 3.0, 0x5028_007F);
     t.fill(x - 3.0, y - 3.0, x + w + 3.0, y - 2.0, 0x5050_00FF);
     t.fill(x - 3.0, y + h + 2.0, x + w + 3.0, y + h + 3.0, 0x5028_007F);
-    for (i, l) in lines.iter().enumerate() {
+    let mark_at = mark.unwrap_or(usize::MAX);
+    // Блок идёт сразу после предыдущих строк (имя: 10 + зазор 2), остальные строки сдвигаются на bh.
+    if let Some((items, desc)) = &src {
+        let at = mark_at.min(text.len());
+        if let Ok(mut g) = PENDING.lock() {
+            *g = Some(Block {
+                x,
+                y: y + at as f32 * 10.0 + if at > 0 { 2.0 } else { 0.0 },
+                w,
+                items: items.clone(),
+                weight: contents_weight(items),
+                desc: desc.clone(),
+                sel: selected(),
+            });
+        }
+    }
+    for (i, l) in text.iter().enumerate() {
+        let dy = if i >= mark_at { bh } else { 0.0 };
         t.draw(
             &l.0,
             x,
-            y + i as f32 * 10.0 + if i > 0 { 2.0 } else { 0.0 },
+            y + i as f32 * 10.0 + if i > 0 { 2.0 } else { 0.0 } + dy,
             l.1,
             true,
         );

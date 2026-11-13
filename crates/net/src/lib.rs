@@ -4,6 +4,7 @@ pub mod conn;
 pub mod crypt;
 pub mod error;
 pub mod frame;
+pub mod legacy;
 pub mod play;
 pub mod replay;
 pub mod session;

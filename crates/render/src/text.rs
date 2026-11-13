@@ -10,7 +10,7 @@ const MAX_VERTS: usize = 4 * 16384;
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Vertex {
-    pos: [f32; 2],
+    pos: [f32; 4],
     uv: [f32; 2],
     color: [f32; 4],
 }
@@ -42,6 +42,15 @@ struct Glyph {
 
 pub struct TextRenderer {
     pipeline: wgpu::RenderPipeline,
+    /// Вариант с depth-тестом (создаётся при первом `flush_depth`).
+    depth_pipeline: Option<wgpu::RenderPipeline>,
+    module: wgpu::ShaderModule,
+    layout: wgpu::PipelineLayout,
+    color_format: wgpu::TextureFormat,
+    vb_depth: wgpu::Buffer,
+    /// Вершины слоя с depth-тестом (неймтеги) и глубина, с которой они пишутся (None — обычный слой).
+    depth_verts: Vec<Vertex>,
+    depth_z: Option<f32>,
     bind_group: wgpu::BindGroup,
     screen: wgpu::Buffer,
     vb: wgpu::Buffer,
@@ -54,6 +63,8 @@ pub struct TextRenderer {
     scale_opt: u32,
     /// Аффинное преобразование (центр, угол°, масштаб) для `push`/`fill` — сплэш.
     xf: Option<(f32, f32, f32, f32)>,
+    /// Мировой режим (таблички): матрица «пиксель шрифта → clip», размер окна в px, сдвиг глубины.
+    world: Option<(glam::Mat4, f32, f32, f32)>,
     rng: u32,
 }
 
@@ -210,7 +221,7 @@ impl TextRenderer {
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x2, 2 => Float32x4],
                 }],
             },
             fragment: Some(wgpu::FragmentState {
@@ -229,8 +240,21 @@ impl TextRenderer {
             multiview_mask: None,
             cache: None,
         });
+        let vb_depth = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("text vb depth"),
+            size: (MAX_VERTS * std::mem::size_of::<Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Self {
             pipeline,
+            depth_pipeline: None,
+            module,
+            layout,
+            color_format: color,
+            vb_depth,
+            depth_verts: Vec::new(),
+            depth_z: None,
             bind_group,
             screen,
             vb,
@@ -240,6 +264,7 @@ impl TextRenderer {
             scale: 1,
             scale_opt: 0,
             xf: None,
+            world: None,
             rng: 12345,
         }
     }
@@ -247,8 +272,11 @@ impl TextRenderer {
     /// Начало кадра: сбросить накопленный текст и выбрать GUI scale под размер окна.
     pub fn begin(&mut self, w: u32, h: u32) {
         self.verts.clear();
+        self.depth_verts.clear();
+        self.depth_z = None;
         self.scale = gui_scale_opt(w, h, self.scale_opt);
         self.xf = None;
+        self.world = None;
     }
 
     pub fn set_scale_option(&mut self, opt: u32) {
@@ -263,6 +291,49 @@ impl TextRenderer {
     /// координаты рисования — относительно этой точки. `None` — сброс.
     pub fn set_transform(&mut self, xf: Option<(f32, f32, f32, f32)>) {
         self.xf = xf;
+    }
+
+    /// Текст после этого вызова пишется в слой с depth-тестом (`flush_depth`) на глубине `z` (NDC 0..1).
+    pub fn set_depth(&mut self, z: Option<f32>) {
+        self.depth_z = z;
+    }
+
+    /// Текст после этого вызова лежит в мировой плоскости: `m` — clip-матрица (проекция·вид·модель,
+    /// локальные единицы = пиксели шрифта), `(w, h)` — размер окна в px, `bias` — сдвиг глубины к камере
+    /// (VANILLA: Font.DisplayMode.POLYGON_OFFSET). Пишется в слой с depth-тестом. `None` — сброс.
+    pub fn set_world(&mut self, w: Option<(glam::Mat4, f32, f32, f32)>) {
+        self.depth_z = w.map(|_| 0.0);
+        self.world = w;
+    }
+
+    /// Экранные px + глубина + `w` клип-пространства: вершинный шейдер возвращает `w`, и GPU
+    /// интерполирует UV перспективно-корректно (мировой текст под углом без «ступенек»).
+    fn tf3(&self, p: [f32; 2]) -> [f32; 4] {
+        if let Some((m, w, h, bias)) = self.world {
+            let c = m * glam::Vec4::new(p[0], p[1], 0.0, 1.0);
+            if c.w <= 0.01 {
+                return [-1.0e6, -1.0e6, 2.0, 1.0];
+            }
+            return [
+                (c.x / c.w * 0.5 + 0.5) * w,
+                (0.5 - c.y / c.w * 0.5) * h,
+                (c.z / c.w - bias).max(0.0),
+                c.w,
+            ];
+        }
+        let q = self.tf(p);
+        [q[0], q[1], self.depth_z.unwrap_or(0.0), 1.0]
+    }
+
+    fn emit(&mut self, v: Vertex) {
+        let list = if self.depth_z.is_some() {
+            &mut self.depth_verts
+        } else {
+            &mut self.verts
+        };
+        if list.len() < MAX_VERTS {
+            list.push(v);
+        }
     }
 
     fn tf(&self, p: [f32; 2]) -> [f32; 2] {
@@ -391,6 +462,12 @@ impl TextRenderer {
         }
     }
 
+    /// Строка без §-кодов и тени, цвет `rgb` с прозрачностью `alpha` (0..1).
+    pub fn draw_alpha(&mut self, s: &str, x: f32, y: f32, rgb: u32, alpha: f32) {
+        let c = |sh: u32| ((rgb >> sh) & 255) as f32 / 255.0;
+        self.push(s, x, y, [c(16), c(8), c(0), alpha]);
+    }
+
     /// Заливка прямоугольника (GUI-пиксели), `argb` — 0xAARRGGBB. VANILLA: GuiGraphics#fill.
     pub fn fill(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, argb: u32) {
         if self.verts.len() + 4 > MAX_VERTS {
@@ -399,10 +476,31 @@ impl TextRenderer {
         let c = |sh: u32| ((argb >> sh) & 255) as f32 / 255.0;
         let color = [c(16), c(8), c(0), c(24)];
         for p in [[x0, y0], [x1, y0], [x1, y1], [x0, y1]] {
-            self.verts.push(Vertex {
-                pos: self.tf(p),
+            self.emit(Vertex {
+                pos: self.tf3(p),
                 uv: [-1.0, -1.0],
                 color,
+            });
+        }
+    }
+
+    /// VANILLA: GuiGraphicsExtractor#fillGradient — вертикальный градиент `top` → `bottom` (ARGB).
+    pub fn fill_gradient(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, top: u32, bottom: u32) {
+        if self.verts.len() + 4 > MAX_VERTS {
+            return;
+        }
+        let c = |argb: u32, sh: u32| ((argb >> sh) & 255) as f32 / 255.0;
+        let col = |a: u32| [c(a, 16), c(a, 8), c(a, 0), c(a, 24)];
+        for (p, a) in [
+            ([x0, y0], top),
+            ([x1, y0], top),
+            ([x1, y1], bottom),
+            ([x0, y1], bottom),
+        ] {
+            self.emit(Vertex {
+                pos: self.tf3(p),
+                uv: [-1.0, -1.0],
+                color: col(a),
             });
         }
     }
@@ -437,8 +535,8 @@ impl TextRenderer {
                             ([x1 + s1, y1], [g.u1, g.v1]),
                             ([x0 + s1, y1], [g.u0, g.v1]),
                         ] {
-                            self.verts.push(Vertex {
-                                pos: self.tf(p),
+                            self.emit(Vertex {
+                                pos: self.tf3(p),
                                 uv,
                                 color,
                             });
@@ -536,8 +634,8 @@ impl TextRenderer {
             return;
         }
         for p in [[x0, y0], [x1, y0], [x1, y1], [x0, y1]] {
-            self.verts.push(Vertex {
-                pos: self.tf(p),
+            self.emit(Vertex {
+                pos: self.tf3(p),
                 uv: [-1.0, -1.0],
                 color,
             });
@@ -584,6 +682,102 @@ impl TextRenderer {
             pass.set_vertex_buffer(0, self.vb.slice(..));
             pass.set_index_buffer(self.ib.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..(self.verts.len() / 4 * 6) as u32, 0, 0..1);
+        }
+        queue.submit([enc.finish()]);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// Рисует слой `set_depth` поверх `target` с depth-тестом (LessEqual, без записи) по буферу мира.
+    pub fn flush_depth(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        depth_format: wgpu::TextureFormat,
+        w: u32,
+        h: u32,
+    ) {
+        if self.depth_verts.is_empty() {
+            return;
+        }
+        if self.depth_pipeline.is_none() {
+            self.depth_pipeline = Some(device.create_render_pipeline(
+                &wgpu::RenderPipelineDescriptor {
+                    label: Some("text depth"),
+                    layout: Some(&self.layout),
+                    vertex: wgpu::VertexState {
+                        module: &self.module,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<Vertex>() as u64,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x2, 2 => Float32x4],
+                        }],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &self.module,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: self.color_format,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: depth_format,
+                        depth_write_enabled: false,
+                        depth_compare: wgpu::CompareFunction::LessEqual,
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                },
+            ));
+        }
+        let mut u = Vec::with_capacity(16);
+        for v in [w as f32, h as f32, 0.0, 0.0] {
+            u.extend_from_slice(&v.to_le_bytes());
+        }
+        queue.write_buffer(&self.screen, 0, &u);
+        queue.write_buffer(&self.vb_depth, 0, bytes(&self.depth_verts));
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("text depth"),
+        });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("text depth"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            if let Some(pl) = &self.depth_pipeline {
+                pass.set_pipeline(pl);
+            }
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.vb_depth.slice(..));
+            pass.set_index_buffer(self.ib.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..(self.depth_verts.len() / 4 * 6) as u32, 0, 0..1);
         }
         queue.submit([enc.finish()]);
     }

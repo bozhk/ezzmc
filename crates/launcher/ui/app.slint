@@ -159,6 +159,7 @@ export component MainWindow inherits Window {
     in property <string> ms_status;
 
     callback play();
+    callback play_both();
     callback stop();
     callback save_settings();
     callback add_offline(string);
@@ -246,9 +247,9 @@ export component MainWindow inherits Window {
                         }
                         HorizontalLayout {
                             spacing: 16px;
-                            if root.target == 1: VerticalLayout {
+                            VerticalLayout {
                                 width: 240px; spacing: 6px;
-                                Text { text: "Версия"; color: Pal.muted; font-size: 12px; font-weight: 600; }
+                                Text { text: root.target == 1 ? "Версия" : "Версия ванили (для «Оба»)"; color: Pal.muted; font-size: 12px; font-weight: 600; }
                                 ComboBox { model: root.versions; current-value <=> root.version; }
                             }
                             Field { label: "Сервер (необязательно)"; hint: "127.0.0.1:25565"; value <=> root.server; horizontal-stretch: 1; }
@@ -260,6 +261,11 @@ export component MainWindow inherits Window {
                                 label: root.running ? "Игра запущена" : (root.busy ? "Подготовка…" : "▶  ИГРАТЬ");
                                 enabled: !root.busy && !root.running;
                                 clicked => { root.play(); }
+                            }
+                            Btn {
+                                width: 190px; height: 54px; label: "▶  ОБА (ezzmc + ваниль)";
+                                enabled: !root.busy && !root.running;
+                                clicked => { root.play_both(); }
                             }
                             if root.running: Btn { width: 130px; height: 54px; label: "Остановить"; danger: true; clicked => { root.stop(); } }
                         }

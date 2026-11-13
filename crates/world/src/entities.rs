@@ -2,7 +2,7 @@
 //! ClientPacketListener#handleAddEntity/handleMoveEntity/handleTeleportEntity/
 //! handleEntityPositionSync/handleRotateEntity/handleRemoveEntities (26.3),
 //! Entity#lerpPositionAndRotationStep (InterpolationHandler, 3 шага).
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// VANILLA: Mth#unpackDegrees.
 pub fn unpack_degrees(b: i8) -> f32 {
@@ -32,13 +32,24 @@ pub struct Entity {
     pub baby: bool,
     pub swell_dir: i32,
     pub bool17: bool,
+    /// Булева метаданная #19 (Axolotl#DATA_PLAYING_DEAD).
+    pub bool19: bool,
+    /// Булева метаданная #18 (Creaking#IS_TEARING_DOWN).
+    pub bool18: bool,
+    /// LivingEntity#DATA_HEALTH_ID (метаданные #9, float); -1 = ещё не приходило.
+    pub health: f32,
     pub byte18: u8,
+    /// Метаданные #17 типа BYTE (Shulker#DATA_PEEK_ID) и признак, что #18 (цвет шалкера) приходил.
+    pub byte17: u8,
+    pub byte18_set: bool,
     /// Entity#DATA_NO_GRAVITY (метаданные #5, boolean).
     pub no_gravity: bool,
     /// AbstractBoat#DATA_ID_PADDLE_LEFT/RIGHT (#11/#12).
     pub paddle: [bool; 2],
     /// VarInt-метаданные мобов (индекс ≥16): INT и реестровые холдеры (вариант кота/лягушки…).
     pub ints: Vec<(u8, i32)>,
+    /// Entity#DATA_POSE (метаданные #6): ординал Pose (0 STANDING, 6 LONG_JUMPING, 11 ROARING … 17 INHALING).
+    pub pose: i32,
     /// Метаданные #16 типа BYTE (Bat#DATA_ID_FLAGS: бит 1 = висит).
     pub byte16: u8,
     /// Стак предмета (метаданные #8 у `item`).
@@ -72,6 +83,8 @@ pub struct Entity {
     /// Предмет в основной/второй руке (set_equipment).
     pub held: Option<ezzmc_protocol::item::ItemStack>,
     pub held_off: Option<ezzmc_protocol::item::ItemStack>,
+    /// EquipmentSlot.SADDLE (7): у медного голема — предмет на антенне.
+    pub saddle: Option<ezzmc_protocol::item::ItemStack>,
     /// Броня (set_equipment): голова, грудь, ноги, ступни.
     pub armor: [Option<ezzmc_protocol::item::ItemStack>; 4],
     /// Счётчик взмахов (animate 0/3); рендер сравнивает с виденным.
@@ -84,6 +97,8 @@ pub struct Entity {
     pub hurt_dur: f32,
     /// Squid#handleEntityEvent(19): счётчик сбросов tentacleMovement.
     pub squid_reset: u32,
+    /// Сколько раз пришёл entity_event с данным id (0..71): клиентские AnimationState мобов (warden 4/61/62 и т. п.).
+    pub mob_events: [u32; 72],
     /// Счётчик crit-анимаций (animate 4/5): 1 — обычный, 2 — магический.
     pub crit_seq: (u32, u8),
     /// Локальный игрок управляет этим транспортом (Entity#isLocalInstanceAuthoritative): позицию и поворот
@@ -131,11 +146,17 @@ impl Entity {
             baby: false,
             swell_dir: 0,
             bool17: false,
+            bool19: false,
+            bool18: false,
+            health: -1.0,
             byte18: 0,
             no_gravity: false,
             paddle: [false; 2],
             ints: Vec::new(),
+            pose: 0,
             byte16: 0,
+            byte17: 0,
+            byte18_set: false,
             item: None,
             age: 0,
             vel: [0.0; 3],
@@ -152,11 +173,13 @@ impl Entity {
             dead: false,
             held: None,
             held_off: None,
+            saddle: None,
             armor: [None, None, None, None],
             swing_seq: 0,
             hurt_at: None,
             hurt_dur: 0.0,
             squid_reset: 0,
+            mob_events: [0; 72],
             death_at: None,
             crit_seq: (0, 0),
             local_ctrl: false,
@@ -442,6 +465,17 @@ fn projectile_kind(ty: usize) -> (u8, f64) {
 }
 
 /// Индекс `player` в реестре `entity_type` (26.3).
+/// `entity_size::size` по id типа: таблица строится один раз (раньше — `match` по строке на каждый вызов).
+pub fn size_by_type(ty: usize) -> Option<(f32, f32)> {
+    static T: std::sync::LazyLock<Vec<Option<(f32, f32)>>> = std::sync::LazyLock::new(|| {
+        ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+            .iter()
+            .map(|n| crate::entity_size::size(n))
+            .collect()
+    });
+    T.get(ty).copied().flatten()
+}
+
 pub fn player_type() -> Option<usize> {
     static T: std::sync::LazyLock<Option<usize>> = std::sync::LazyLock::new(|| {
         ezzmc_protocol::generated::r26_3::ENTITY_TYPE
@@ -477,6 +511,8 @@ impl Entities {
 
 /// Типы без выбираемого хитбокса (Entity#isPickable = false / не цель луча).
 const NOT_PICKABLE: &[&str] = &[
+    // EnderDragon#isPickable = false: бьются 8 EnderDragonPart (см. mobs.rs).
+    "ender_dragon",
     "item",
     "experience_orb",
     "lightning_bolt",
@@ -498,8 +534,13 @@ impl Entity {
         if NOT_PICKABLE.contains(name) {
             return None;
         }
-        let (w, mut h) = crate::entity_size::size(name)?;
-        if *name == "player" {
+        self.hitbox()
+    }
+
+    /// Бокс по размерам типа без учёта выбираемости (F3+B рисует и дракона, и предметы).
+    pub fn hitbox(&self) -> Option<([f64; 3], [f64; 3])> {
+        let (w, mut h) = size_by_type(self.ty)?;
+        if Some(self.ty) == player_type() {
             if self.flags & 16 != 0 {
                 h = 0.6;
             } else if self.flags & 1 != 0 {

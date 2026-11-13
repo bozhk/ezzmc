@@ -9,6 +9,7 @@ pub mod entities;
 pub mod entity_attach;
 pub mod entity_size;
 pub mod generated;
+pub mod legacy;
 pub mod level;
 pub mod light;
 pub mod lightengine;

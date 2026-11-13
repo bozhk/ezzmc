@@ -10,7 +10,8 @@ const W: u32 = 64;
 const COLOR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 fn quad(x0: u8, x1: u8, y0: u8, y1: u8, z: u8) -> ([VoxelVertex; 4], QuadMeta) {
-    let c = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+    // CCW для камеры на -Z, смотрящей в +Z (рендер-пайплайн режет задние грани, cull Back)
+    let c = [(x0, y0), (x0, y1), (x1, y1), (x1, y0)];
     (
         std::array::from_fn(|i| VoxelVertex::pack([c[i].0, c[i].1, z], 1, 3, 15, 15, i as u8)),
         QuadMeta {

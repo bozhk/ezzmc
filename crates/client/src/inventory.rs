@@ -53,6 +53,11 @@ pub enum InvEvent {
         title: String,
     },
     Close(i32),
+    /// ClientboundMerchantOffersPacket (житель/странствующий торговец).
+    Trades {
+        id: i32,
+        trades: Box<crate::merchantscreen::Trades>,
+    },
     /// ContainerSetData: свойство меню (печь: 0 горение, 1 длит., 2 готовка, 3 всего).
     Data {
         id: i32,
@@ -105,6 +110,13 @@ pub fn parse_packet(name: &str, body: &[u8]) -> ProtocolResult<Option<InvEvent>>
             InvEvent::Open { id, menu, title }
         }
         "container_close" => InvEvent::Close(r.var_int()?),
+        "merchant_offers" => {
+            let (id, trades) = crate::merchantscreen::parse(body)?;
+            InvEvent::Trades {
+                id,
+                trades: Box::new(trades),
+            }
+        }
         "container_set_data" => InvEvent::Data {
             id: r.var_int()?,
             prop: r.i16()?,
@@ -122,7 +134,15 @@ pub struct OpenMenu {
     pub title: String,
     pub slots: Vec<Slot>,
     /// Свойства меню (ContainerData).
-    pub data: [i16; 8],
+    pub data: [i16; 10],
+    /// Выбор эффектов маяка в экране (primary, secondary; id реестра +1, 0 — нет).
+    /// VANILLA: BeaconScreen#primary/secondary, обновляются в dataChanged и кнопками.
+    pub sel: [i16; 2],
+    /// Скроллбар списка (ткацкий станок): scrollOffs и захват мышью.
+    pub scroll: f32,
+    pub scrolling: bool,
+    /// Предложения торговца (меню merchant).
+    pub trades: Option<crate::merchantscreen::Trades>,
 }
 
 /// Состояние инвентаря клиента.
@@ -136,6 +156,9 @@ pub struct Inventory {
     pub open: Option<OpenMenu>,
     /// VANILLA: LocalPlayer#dropSpamThrottler (TickThrottler(20, 1280)): +20 за бросок, −1 за тик.
     pub drop_spam: i32,
+    /// Уровень опыта и «бесконечные материалы» (креатив/наблюдатель) — для экранов контейнеров.
+    pub xp_level: i32,
+    pub infinite_materials: bool,
 }
 
 impl Default for Inventory {
@@ -147,6 +170,8 @@ impl Default for Inventory {
             state_id: 0,
             open: None,
             drop_spam: 0,
+            xp_level: 0,
+            infinite_materials: false,
         }
     }
 }
@@ -234,13 +259,34 @@ impl Inventory {
                     menu,
                     title,
                     slots: Vec::new(),
-                    data: [0; 8],
+                    data: [0; 10],
+                    sel: [0; 2],
+                    scroll: 0.0,
+                    scrolling: false,
+                    trades: None,
                 });
+            }
+            InvEvent::Trades { id, trades } => {
+                // VANILLA: ClientPacketListener#handleMerchantOffers — только для открытого меню с этим id;
+                // выбранная сделка и прокрутка сбрасываются вместе с экраном (новое меню), при обновлении сохраняются.
+                if let Some(o) = self.open.as_mut().filter(|o| o.id == id) {
+                    let mut t = *trades;
+                    if let Some(old) = o.trades.as_ref() {
+                        t.shop_item = old.shop_item.min(t.offers.len().saturating_sub(1));
+                        t.scroll_off = old.scroll_off.min(t.offers.len().saturating_sub(7));
+                        t.dragging = old.dragging;
+                    }
+                    o.trades = Some(t);
+                }
             }
             InvEvent::Data { id, prop, value } => {
                 if let Some(o) = self.open.as_mut().filter(|o| o.id == id) {
                     if let Some(d) = usize::try_from(prop).ok().and_then(|i| o.data.get_mut(i)) {
                         *d = value;
+                    }
+                    // VANILLA: BeaconScreen dataChanged → primary/secondary из menu.
+                    if let 1 | 2 = prop {
+                        o.sel = [o.data[1], o.data[2]];
                     }
                 }
             }
@@ -469,7 +515,46 @@ impl Inventory {
         self.slots[i] = (rest.count > 0).then_some(rest);
     }
 
+    /// VANILLA: Slot#mayPlace для InventoryMenu: результат крафта — ничего; броня — только
+    /// предмет с `equippable` на этот слот (ArmorSlot, stack max 1).
+    fn may_place(&self, i: usize, st: &ItemStack) -> bool {
+        if self.open.is_some() {
+            return true;
+        }
+        if i == CRAFT_OUTPUT {
+            return false;
+        }
+        if !(ARMOR_START..ARMOR_START + 4).contains(&i) {
+            return true;
+        }
+        let name = ezzmc_protocol::generated::r26_3::ITEM
+            .get(st.item as usize)
+            .copied()
+            .unwrap_or("");
+        match i - ARMOR_START {
+            0 => {
+                name.ends_with("_helmet")
+                    || name.ends_with("_head")
+                    || name.ends_with("_skull")
+                    || name == "carved_pumpkin"
+            }
+            1 => name.ends_with("_chestplate") || name == "elytra",
+            2 => name.ends_with("_leggings"),
+            _ => name.ends_with("_boots"),
+        }
+    }
+
     fn predict_pickup(&mut self, i: usize, button: i8) {
+        // Нельзя положить курсор в слот, который не принимает предмет (клик ничего не делает);
+        // в слот брони стек >1 кладёт сервер (максимум 1) — не предсказываем.
+        if let Some(c) = &self.cursor {
+            if !self.may_place(i, c) {
+                return;
+            }
+            if self.open.is_none() && (ARMOR_START..ARMOR_START + 4).contains(&i) && c.count > 1 {
+                return;
+            }
+        }
         let mut cursor = self.cursor.take();
         let slots = self.menu_slots_mut();
         let Some(cell) = slots.get_mut(i) else {
@@ -569,7 +654,11 @@ impl Inventory {
         let mut left = c.count;
         let mut out = Vec::new();
         for &i in slots {
-            if is_output(self.open.is_some(), i) {
+            // VANILLA: AbstractContainerMenu#canItemQuickReplace + Slot#mayPlace (броня — max 1).
+            if is_output(self.open.is_some(), i)
+                || !self.may_place(i, c)
+                || (self.open.is_none() && (ARMOR_START..ARMOR_START + 4).contains(&i))
+            {
                 continue;
             }
             let Some(cell) = cells.get(i) else { continue };

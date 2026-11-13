@@ -325,6 +325,11 @@ pub struct Player {
     walk_dist_o: f32,
     bob: f32,
     bob_o: f32,
+    /// VANILLA: LivingEntity#hurtTime/hurtDuration, Player#hurtDir, deathTime — тряска камеры (GameRenderer#bobHurt).
+    pub hurt_time: i32,
+    pub hurt_dir: f32,
+    pub death_time: i32,
+    pub dead: bool,
     /// VANILLA: Camera#eyeHeight/eyeHeightOld — плавная высота глаз (присед).
     eye_h: f64,
     eye_h_o: f64,
@@ -382,6 +387,10 @@ impl Player {
             walk_dist_o: 0.0,
             bob: 0.0,
             bob_o: 0.0,
+            hurt_time: 0,
+            hurt_dir: 0.0,
+            death_time: 0,
+            dead: false,
             eye_h: EYE_STANDING,
             eye_h_o: EYE_STANDING,
             anim: crate::avatar::AvatarAnim::default(),
@@ -459,6 +468,34 @@ impl Player {
             * glam::Mat4::from_rotation_x((((d * pi - 0.2).cos() * bob).abs() * 5.0).to_radians())
     }
 
+    /// VANILLA: LivingEntity#handleDamageEvent / LocalPlayer#hurtTo → hurtTime = hurtDuration = 10.
+    /// `dir` — Player#animateHurt(yaw) (пакет hurt_animation); для остальных источников hurtDir не меняется.
+    pub fn hurt(&mut self, dir: Option<f32>) {
+        self.hurt_time = 10;
+        if let Some(d) = dir {
+            self.hurt_dir = d;
+        }
+    }
+
+    /// VANILLA: GameRenderer#bobHurt — матрица в пространстве вида (Rz(death)·Ry(−dir)·Rz(tilt)·Ry(dir)).
+    pub fn hurt_matrix(&self, pt: f32, tilt_strength: f32) -> glam::Mat4 {
+        let mut m = glam::Mat4::IDENTITY;
+        if self.dead {
+            let dur = (self.death_time as f32 + pt).min(20.0);
+            m = glam::Mat4::from_rotation_z((40.0 - 8000.0 / (dur + 200.0)).to_radians());
+        }
+        let hurt = self.hurt_time as f32 - pt;
+        if hurt < 0.0 {
+            return m;
+        }
+        let hurt = hurt / 10.0;
+        let hurt = (hurt * hurt * hurt * hurt * std::f32::consts::PI).sin();
+        let rr = self.hurt_dir.to_radians();
+        m * glam::Mat4::from_rotation_y(-rr)
+            * glam::Mat4::from_rotation_z((-hurt * 14.0 * tilt_strength).to_radians())
+            * glam::Mat4::from_rotation_y(rr)
+    }
+
     /// После `tick`: камера и анимация аватара. VANILLA: Camera#tick (eyeHeight += (target − eyeHeight) · 0.5)
     /// и LivingEntity#tick (тело/голова/ходьба/взмах).
     pub fn post_tick(&mut self, yaw: f32, pitch: f32) {
@@ -467,6 +504,15 @@ impl Player {
         self.anim.swimming = self.swimming || self.crawling; // VANILLA: Entity#isVisuallySwimming (Pose.SWIMMING)
         self.anim.in_water = self.in_water;
         self.anim.tick(self.pos, self.prev_pos, yaw, pitch);
+        // VANILLA: LivingEntity#aiStep (hurtTime--) и tickDeath (deathTime++ до 20, пока здоровье ≤ 0).
+        if self.hurt_time > 0 {
+            self.hurt_time -= 1;
+        }
+        if self.dead && self.death_time < 20 {
+            self.death_time += 1;
+        } else if !self.dead {
+            self.death_time = 0;
+        }
         // LocalPlayer#aiStep: xBob/yBob += (rot − bob)·0.5.
         self.y_bob_o = self.y_bob;
         self.x_bob_o = self.x_bob;

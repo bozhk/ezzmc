@@ -142,6 +142,8 @@ pub struct Level {
     pub chunks: ChunkCache,
     /// VANILLA: Level#getGameTime / getDayTime / tickDayTime.
     pub game_time: i64,
+    /// Число клиентских тиков (tick_time_at); в отличие от game_time не прыгает от set_time.
+    pub client_ticks: i64,
     pub day_time: i64,
     /// day_time предыдущего тика — для интерполяции неба по partial_tick.
     pub prev_day_time: i64,
@@ -167,6 +169,8 @@ pub struct Level {
     pub bolts: crate::lightning::Bolts,
     /// FLOAT-метаданные #17 по id сущности (у игрока — поглощение, Player#DATA_PLAYER_ABSORPTION_ID).
     pub float15: std::collections::HashMap<i32, f32>,
+    /// VANILLA: Player#DATA_SCORE_ID (#18) по id сущности.
+    pub player_score: std::collections::HashMap<i32, i32>,
     /// Позиции ударов молнии, ждущие звука (клиент забирает `take`).
     pub thunder: Vec<[f64; 3]>,
     pub entities: crate::entities::Entities,
@@ -182,6 +186,10 @@ pub struct Level {
     pub pearl_hits: Vec<[f64; 3]>,
     /// VANILLA: LivingEntity#makePoofParticles (entity_event 60): (позиция, ширина, высота).
     pub death_poofs: Vec<([f64; 3], f64, f64)>,
+    /// Позиции дракона, получившего урон (damage_event) — звук `entity.ender_dragon.hurt`.
+    pub dragon_hurts: Vec<[f64; 3]>,
+    /// Урон локальному игроку (damage_event/hurt_animation на own_id): `Some(yaw)` для hurt_animation — hurtDir.
+    pub own_hurts: Vec<Option<f32>>,
     /// VANILLA: ClientLevel#skyFlashTime (молния ставит 2, каждый тик −1).
     pub sky_flash_time: i32,
     /// VANILLA: DimensionType#skybox (Overworld/End/None) — что рисовать вместо неба.
@@ -212,6 +220,7 @@ impl Level {
         Level {
             chunks: ChunkCache::new(format, view_radius),
             game_time: 0,
+            client_ticks: 0,
             day_time: 0,
             prev_day_time: 0,
             last_tick_at: std::time::Instant::now(),
@@ -228,6 +237,7 @@ impl Level {
             thunder_level: 0.0,
             bolts: Default::default(),
             float15: Default::default(),
+            player_score: Default::default(),
             thunder: Vec::new(),
             entities: Default::default(),
             pickups: Vec::new(),
@@ -236,6 +246,8 @@ impl Level {
             vehicle_resync: false,
             pearl_hits: Vec::new(),
             death_poofs: Vec::new(),
+            dragon_hurts: Vec::new(),
+            own_hurts: Vec::new(),
             sky_flash_time: 0,
             skybox: crate::dimension::Skybox::Overworld,
             dimension: None,
@@ -265,6 +277,7 @@ impl Level {
     pub fn tick_time_at(&mut self, at: std::time::Instant) {
         self.last_tick_at = at;
         self.game_time += 1;
+        self.client_ticks += 1;
         self.tick_clocks(self.game_time);
         self.sync_day_time();
         // VANILLA: ClientLevel#tick уменьшает skyFlashTime, затем тикают сущности (LightningBolt).
@@ -455,27 +468,54 @@ impl Level {
                 data: r.i32()?,
             },
             "level_particles" => {
-                let _override_limiter = r.bool()?;
-                let _always_show = r.bool()?;
-                let pos = [r.f64()?, r.f64()?, r.f64()?];
-                let dist = [r.f32()?, r.f32()?, r.f32()?];
-                let max_speed = r.f32()?;
-                let count = r.i32()?;
+                // VANILLA: ClientboundLevelParticlesPacket (26.x): particle (id+options), overrideLimiter,
+                // alwaysShow, x,y,z (double), dist xyz, maxSpeed xyz (float), count (VarInt), randomizationType (VarInt).
                 let id = usize::try_from(r.var_int()?).unwrap_or(usize::MAX);
                 match ezzmc_protocol::generated::r26_3::PARTICLE_TYPE.get(id) {
                     Some(&name) => {
-                        let block = if matches!(
-                            name,
-                            "block"
-                                | "block_marker"
-                                | "falling_dust"
-                                | "dust_pillar"
-                                | "block_crumble"
-                        ) {
-                            u32::try_from(r.var_int()?).ok()
-                        } else {
-                            None
-                        };
+                        let mut block = None;
+                        // Опции частицы (ParticleTypes#register streamCodec); item/vibration — сложные, пропускаем пакет.
+                        match name {
+                            "block" | "block_marker" | "falling_dust" | "dust_pillar"
+                            | "block_crumble" => block = u32::try_from(r.var_int()?).ok(),
+                            "dust" | "effect" | "instant_effect" | "geyser_base"
+                            | "geyser_poof" => {
+                                r.i32()?;
+                                r.f32()?;
+                            }
+                            "dust_color_transition" => {
+                                r.i32()?;
+                                r.i32()?;
+                                r.f32()?;
+                            }
+                            "entity_effect" | "tinted_leaves" | "flash" | "geyser"
+                            | "geyser_plume" => {
+                                r.i32()?;
+                            }
+                            "dragon_breath" | "sculk_charge" => {
+                                r.f32()?;
+                            }
+                            "shriek" => {
+                                r.var_int()?;
+                            }
+                            "trail" => {
+                                r.f64()?;
+                                r.f64()?;
+                                r.f64()?;
+                                r.i32()?;
+                                r.var_int()?;
+                            }
+                            "item" | "vibration" => return Ok(LevelEvent::None),
+                            _ => {}
+                        }
+                        let _override_limiter = r.bool()?;
+                        let _always_show = r.bool()?;
+                        let pos = [r.f64()?, r.f64()?, r.f64()?];
+                        let dist = [r.f32()?, r.f32()?, r.f32()?];
+                        // VANILLA-UNSURE: раздельные скорости по осям и randomizationType не учитываем (берём X).
+                        let max_speed = r.f32()?;
+                        let _ = (r.f32()?, r.f32()?);
+                        let count = r.var_int()?;
                         LevelEvent::Particles(ParticlesPacket {
                             name,
                             pos,
@@ -561,6 +601,9 @@ impl Level {
                 // VANILLA: LivingEntity#handleEntityEvent: 2/33/36/37/44/57 = hurt (hurtTime=10), 3 = death.
                 let (id, ev) = (r.i32()?, r.u8()?);
                 if let Some(e) = self.entities.map.get_mut(&id) {
+                    if let Some(c) = e.mob_events.get_mut(usize::from(ev)) {
+                        *c = c.wrapping_add(1);
+                    }
                     match ev {
                         2 | 33 | 36 | 37 | 44 | 57 => {
                             e.hurt_at = Some(std::time::Instant::now());
@@ -588,9 +631,24 @@ impl Level {
             "damage_event" | "hurt_animation" => {
                 // VANILLA: ClientPacketListener#handleDamageEvent / handleHurtAnimation → hurtTime=10.
                 let id = r.var_int()?;
+                if id == self.own_id {
+                    // VANILLA: Player#animateHurt(yaw) задаёт hurtDir; handleDamageEvent его не трогает.
+                    let dir = if name == "hurt_animation" {
+                        r.f32().ok()
+                    } else {
+                        None
+                    };
+                    self.own_hurts.push(dir);
+                }
                 if let Some(e) = self.entities.map.get_mut(&id) {
                     e.hurt_at = Some(std::time::Instant::now());
                     e.hurt_dur = 0.5;
+                    if name == "damage_event"
+                        && ezzmc_protocol::generated::r26_3::ENTITY_TYPE.get(e.ty)
+                            == Some(&"ender_dragon")
+                    {
+                        self.dragon_hurts.push(e.pos);
+                    }
                 }
                 LevelEvent::None
             }
@@ -616,6 +674,7 @@ impl Level {
                         match b & 0x7F {
                             0 => e.held = st,
                             1 => e.held_off = st,
+                            7 => e.saddle = st,
                             // EquipmentSlot: FEET 2, LEGS 3, CHEST 4, HEAD 5.
                             n @ 2..=5 => e.armor[(5 - n) as usize] = st,
                             _ => {}
@@ -731,7 +790,12 @@ impl Level {
                                         e.mob_flags = v;
                                     } else {
                                         e.byte18 = v;
+                                        e.byte18_set = true;
                                     }
+                                }
+                            } else if idx == 17 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    e.byte17 = v;
                                 }
                             } else if idx == 8 {
                                 // AbstractArrow#ID_FLAGS (у предметов #8 — другой тип).
@@ -744,6 +808,11 @@ impl Level {
                         }
                         1 | 20 => {
                             let v = r.var_int()?;
+                            if ty == 20 && idx == 6 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    e.pose = v;
+                                }
+                            }
                             if ty == 1 {
                                 self.set_int_meta(id, idx, v);
                             }
@@ -753,6 +822,9 @@ impl Level {
                                         e.fuse = v;
                                     }
                                 }
+                            }
+                            if ty == 1 && idx == 18 {
+                                self.player_score.insert(id, v);
                             }
                             if ty == 1 && idx == 16 {
                                 if let Some(e) = self.entities.map.get_mut(&id) {
@@ -783,6 +855,12 @@ impl Level {
                             if idx == 17 {
                                 self.float15.insert(id, v);
                             }
+                            // VANILLA: LivingEntity#DATA_HEALTH_ID = #9.
+                            if idx == 9 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    e.health = v;
+                                }
+                            }
                         }
                         4 => {
                             r.string(32767)?;
@@ -798,8 +876,16 @@ impl Level {
                                 r.bytes(8)?;
                             }
                         }
+                        // VANILLA: EntityDataSerializers#VILLAGER_DATA — holder(type), holder(profession), level (VarInt ×3).
+                        // Пакуем в int-мету: type | profession<<8 | level<<16.
+                        18 => {
+                            let (t, p, l) = (r.var_int()?, r.var_int()?, r.var_int()?);
+                            self.set_int_meta(id, idx, (t & 0xFF) | ((p & 0xFF) << 8) | (l << 16));
+                        }
+                        // DIRECTION (Shulker#DATA_ATTACH_FACE_ID #16).
                         12 => {
-                            r.var_int()?;
+                            let v = r.var_int()?;
+                            self.set_int_meta(id, idx, v);
                         }
                         8 => {
                             let v = r.u8()?;
@@ -810,6 +896,16 @@ impl Level {
                                     } else {
                                         e.bool17 = v != 0;
                                     }
+                                }
+                            }
+                            if idx == 18 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    e.bool18 = v != 0;
+                                }
+                            }
+                            if idx == 19 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    e.bool19 = v != 0;
                                 }
                             }
                             if idx == 5 {

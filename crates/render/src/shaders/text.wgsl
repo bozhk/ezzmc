@@ -11,9 +11,10 @@ struct VsOut {
 }
 
 @vertex
-fn vs_main(@location(0) p: vec2<f32>, @location(1) uv: vec2<f32>, @location(2) color: vec4<f32>) -> VsOut {
+fn vs_main(@location(0) p: vec4<f32>, @location(1) uv: vec2<f32>, @location(2) color: vec4<f32>) -> VsOut {
     var o: VsOut;
-    o.pos = vec4<f32>(p.x / screen.size.x * 2.0 - 1.0, 1.0 - p.y / screen.size.y * 2.0, 0.0, 1.0);
+    let ndc = vec3<f32>(p.x / screen.size.x * 2.0 - 1.0, 1.0 - p.y / screen.size.y * 2.0, p.z);
+    o.pos = vec4<f32>(ndc * p.w, p.w);
     o.uv = uv;
     o.color = color;
     return o;

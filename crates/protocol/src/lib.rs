@@ -5,6 +5,7 @@ pub mod item;
 pub mod nbt;
 pub mod text;
 pub mod types;
+pub mod version;
 pub mod wire;
 
 pub use error::{ProtocolError, ProtocolResult};

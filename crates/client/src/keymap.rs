@@ -127,6 +127,8 @@ fn defaults() -> Vec<(&'static str, Input, Category)> {
         ("key.togglePerspective", k(F5), Misc),
         ("key.smoothCamera", Input::Unbound, Misc),
         ("key.fullscreen", k(F11), Misc),
+        // Не ванильная: переключение режима рендера (compute ↔ ванильный путь).
+        ("key.renderMode", k(F8), Misc),
         // Не ванильная: зум по удержанию (в духе OptiFine), по умолчанию C.
         ("key.zoom", k(KeyC), Misc),
         ("key.advancements", k(KeyL), Misc),

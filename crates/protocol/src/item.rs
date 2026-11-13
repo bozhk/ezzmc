@@ -712,6 +712,22 @@ pub fn read_template(r: &mut Reader) -> ProtocolResult<ItemStack> {
     read_template_at(r, 0)
 }
 
+/// `ItemCost.STREAM_CODEC`: предмет, количество, `DataComponentExactPredicate` (список компонентов).
+/// VANILLA: ItemCost#itemStack = стек с патчем из предиката (asPatch).
+pub fn read_item_cost(r: &mut Reader) -> ProtocolResult<ItemStack> {
+    let item = read_item(r)?;
+    let count = r.var_int()?.max(1);
+    let n = r.length("cost components", 4096)?;
+    let mut patch = ComponentPatch::default();
+    for _ in 0..n {
+        let id = r.var_int()? as u32;
+        let start = r.pos();
+        walk(r, component(id)?, 1)?;
+        patch.added.push((id, r.since(start).into()));
+    }
+    Ok(ItemStack { item, count, patch })
+}
+
 fn read_template_at(r: &mut Reader, depth: u32) -> ProtocolResult<ItemStack> {
     let item = read_item(r)?;
     let count = r.var_int()?;

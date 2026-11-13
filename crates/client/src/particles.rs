@@ -70,6 +70,10 @@ enum Kind {
     Portal,
     /// CritParticle (крит-стрела, удар критом).
     Crit,
+    /// GlowParticle (светящийся кальмар).
+    Glow,
+    /// DragonBreathParticle (фиолетовое дыхание дракона).
+    DragonBreath,
 }
 
 /// VANILLA: DripParticle.* — стадия капли.
@@ -451,7 +455,33 @@ impl Particle {
                     self.z = self.start[2] + self.zd * pos;
                 }
             }
+            // VANILLA: DragonBreathParticle#tick (hasPhysics=false → onGround/hasHitGround недостижимы).
+            Kind::DragonBreath => {
+                self.xo = self.x;
+                self.yo = self.y;
+                self.zo = self.z;
+                let expired = self.age >= self.lifetime;
+                self.age += 1;
+                if expired {
+                    self.removed = true;
+                } else {
+                    self.sprite_from_age();
+                    let (xd, yd, zd) = (self.xd, self.yd, self.zd);
+                    self.do_move(level, xd, yd, zd);
+                    if self.y == self.yo {
+                        self.xd *= 1.1;
+                        self.zd *= 1.1;
+                    }
+                    self.xd *= f64::from(self.friction);
+                    self.zd *= f64::from(self.friction);
+                }
+            }
             Kind::Flame => self.base_tick(level),
+            // VANILLA: GlowParticle#tick.
+            Kind::Glow => {
+                self.base_tick(level);
+                self.sprite_from_age();
+            }
             Kind::Explode => {
                 self.base_tick(level);
                 self.sprite_from_age();
@@ -635,7 +665,8 @@ impl Particle {
             Kind::Lava => (240, sky),
             // VANILLA: HugeExplosionParticle#getLightCoords = 15728880.
             Kind::Huge => (240, 240),
-            Kind::Flame => {
+            // VANILLA: GlowParticle#getLightCoords — addSmoothBlockEmission(age/lifetime).
+            Kind::Flame | Kind::Glow => {
                 let t = ((self.age as f32 + partial) / self.lifetime as f32).clamp(0.0, 1.0);
                 ((f32::from(b) + t * 240.0).min(240.0) as u16, sky)
             }
@@ -652,7 +683,7 @@ impl Particle {
 
     fn quad_size(&self, partial: f32) -> f32 {
         match self.kind {
-            Kind::Smoke | Kind::Crit => {
+            Kind::Smoke | Kind::Crit | Kind::DragonBreath => {
                 self.quad_size
                     * ((self.age as f32 + partial) / self.lifetime as f32 * 32.0).clamp(0.0, 1.0)
             }
@@ -1454,6 +1485,75 @@ impl ParticleEngine {
         self.add(p);
     }
 
+    /// VANILLA: DragonBreathParticle#<init> + Provider (power=1 → setPower не меняет скорость).
+    pub fn add_dragon_breath(&mut self, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+        if !self.allow() {
+            return;
+        }
+        let Some(set) = self.sets.get("dragon_breath").cloned() else {
+            return;
+        };
+        let seed = self.seed();
+        let mut p = Particle::base(Kind::DragonBreath, x, y, z, seed);
+        p.quad_size = 0.1 * (p.rng.next_float() * 0.5 + 0.5) * 2.0;
+        p.friction = 0.96;
+        p.xd = xa;
+        p.yd = ya;
+        p.zd = za;
+        let r = &mut p.rng;
+        p.rgb = [
+            0.7176471 + r.next_float() * (0.8745098 - 0.7176471),
+            r.next_float() * 0.0,
+            0.8235294 + r.next_float() * (0.9764706 - 0.8235294),
+        ];
+        p.quad_size *= 0.75;
+        p.lifetime = (20.0 / (f64::from(p.rng.next_float()) * 0.8 + 0.2)) as i32;
+        p.has_physics = false;
+        p.set = Some(set);
+        p.sprite_from_age();
+        self.add(p);
+    }
+
+    /// VANILLA: DragonLandingPhase#doClientTick (motion = Some) / DragonSittingFlamingPhase#doClientTick (None).
+    /// `look` уже нормализован; Vec3#yRot в ваниле результат отбрасывает → вектор не вращается.
+    pub fn add_dragon_breath_burst(
+        &mut self,
+        head: [f64; 3],
+        look: [f64; 3],
+        motion: Option<[f64; 3]>,
+    ) {
+        let (hx, hy, hz) = (head[0], head[1] + 0.5, head[2]);
+        let k08 = f64::from(0.08_f32);
+        for _ in 0..8 {
+            let px = hx + self.rng.next_gaussian() / 2.0;
+            let py = hy + self.rng.next_gaussian() / 2.0;
+            let pz = hz + self.rng.next_gaussian() / 2.0;
+            match motion {
+                Some(m) => self.add_dragon_breath(
+                    px,
+                    py,
+                    pz,
+                    -look[0] * k08 + m[0],
+                    -look[1] * f64::from(0.3_f32) + m[1],
+                    -look[2] * k08 + m[2],
+                ),
+                None => {
+                    for j in 0..6 {
+                        let j = f64::from(j);
+                        self.add_dragon_breath(
+                            px,
+                            py,
+                            pz,
+                            -look[0] * k08 * j,
+                            -look[1] * f64::from(0.6_f32),
+                            -look[2] * k08 * j,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// VANILLA: PortalParticle#<init>.
     pub fn add_portal(&mut self, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
         if !self.allow() {
@@ -1619,6 +1719,69 @@ impl ParticleEngine {
             return;
         }
         self.add_ash("smoke", 1.0, None, x, y, z, xa, ya, za);
+    }
+
+    pub fn rand3(&mut self) -> (f64, f64, f64) {
+        (
+            self.rng.next_double(),
+            self.rng.next_double(),
+            self.rng.next_double(),
+        )
+    }
+
+    /// VANILLA: GlowParticle.GlowSquidProvider (GlowSquid#aiStep: GLOW с нулевой скоростью).
+    pub fn add_glow_squid(&mut self, x: f64, y: f64, z: f64) {
+        if !self.allow() {
+            return;
+        }
+        let Some(set) = self.sets.get("glow").cloned() else {
+            return;
+        };
+        let (xa, za) = (0.5 - self.rng.next_double(), 0.5 - self.rng.next_double());
+        let seed = self.seed();
+        let mut p = Particle::with_speed(Kind::Glow, x, y, z, xa, 0.0, za, seed);
+        p.friction = 0.96;
+        p.speed_up_blocked = true;
+        p.quad_size *= 0.75;
+        p.has_physics = false;
+        p.rgb = if self.rng.next_boolean() {
+            [0.6, 1.0, 0.8]
+        } else {
+            [0.08, 0.4, 0.4]
+        };
+        p.yd *= f64::from(0.2_f32);
+        p.xd *= f64::from(0.1_f32);
+        p.zd *= f64::from(0.1_f32);
+        p.lifetime = (8.0 / (self.rng.next_double() * 0.8 + 0.2)) as i32;
+        p.set = Some(set);
+        p.sprite_from_age();
+        self.add(p);
+    }
+
+    /// VANILLA: Blaze#aiStep (2 LARGE_SMOKE), EnderMan/Endermite#aiStep (2 PORTAL) — клиентский тик моба.
+    pub fn mob_ambient(&mut self, name: &str, pos: [f64; 3], w: f64, h: f64) {
+        for _ in 0..2 {
+            let mut r = [0.0_f64; 5];
+            for v in &mut r {
+                *v = self.rng.next_double();
+            }
+            let (x, y, z) = (
+                pos[0] + w * (2.0 * r[0] - 1.0) * 0.5,
+                pos[1] + h * r[1],
+                pos[2] + w * (2.0 * r[2] - 1.0) * 0.5,
+            );
+            match name {
+                "blaze" => self.add_ash("large_smoke", 2.5, None, x, y, z, 0.0, 0.0, 0.0),
+                _ => {
+                    let (xa, ya, za) = (
+                        (self.rng.next_double() - 0.5) * 2.0,
+                        -self.rng.next_double(),
+                        (self.rng.next_double() - 0.5) * 2.0,
+                    );
+                    self.add_portal(x, y, z, xa, ya, za);
+                }
+            }
+        }
     }
 
     /// VANILLA: BaseAshSmokeParticle#<init>: smoke (scale 1), large_smoke (2.5), dust (redstone).
@@ -1817,6 +1980,10 @@ impl ParticleEngine {
                 "rain" => e.add_rain(x, y, z),
                 "smoke" => e.add_smoke(x, y, z, xa, ya, za),
                 "portal" => e.add_portal(x, y, z, xa, ya, za),
+                // VANILLA-UNSURE: power из пакета не читаем (=1.0).
+                "dragon_breath" => e.add_dragon_breath(x, y, z, xa, ya, za),
+                // VANILLA: NoteParticle — xa = цвет (JukeboxSongPlayer#spawnMusicParticles).
+                "note" => e.add_note(x, y, z, xa),
                 "block" => {
                     if let Some(st) = p.block.and_then(BlockState::from_id) {
                         if spawns_terrain_particles(st) {

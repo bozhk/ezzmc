@@ -24,6 +24,8 @@ enum Kind {
     Chest(usize),
     /// Меню с отдельной фоновой текстурой 176×h (ключ спрайта в `hud::SPRITES`).
     Tex(&'static str, f32),
+    /// Кафедра: экран книги на весь GUI (BookViewScreen), без инвентаря.
+    Lectern,
     Other,
 }
 
@@ -35,15 +37,21 @@ pub struct Layout {
     pub slots: Vec<Option<(f32, f32)>>,
 }
 
+const H_MERCHANT: f32 = crate::merchantscreen::H;
+
 fn player_inv_rows(out: &mut Vec<Option<(f32, f32)>>, main_y: f32, hot_y: f32) {
+    player_inv_rows_x(out, 8.0, main_y, hot_y);
+}
+
+fn player_inv_rows_x(out: &mut Vec<Option<(f32, f32)>>, x: f32, main_y: f32, hot_y: f32) {
     for i in 0..27 {
         out.push(Some((
-            8.0 + (i % 9) as f32 * 18.0,
+            x + (i % 9) as f32 * 18.0,
             main_y + (i / 9) as f32 * 18.0,
         )));
     }
     for c in 0..9 {
-        out.push(Some((8.0 + c as f32 * 18.0, hot_y)));
+        out.push(Some((x + c as f32 * 18.0, hot_y)));
     }
 }
 
@@ -83,6 +91,15 @@ pub fn layout(inv: &Inventory) -> Layout {
         "generic_9x6" => 6,
         _ => 0,
     };
+    if name == "lectern" {
+        // VANILLA: LecternScreen — слот 0 = книга (не показывается), инвентарь не рисуется.
+        return Layout {
+            kind: Kind::Lectern,
+            w: 192.0,
+            h: 192.0,
+            slots: vec![None; o.slots.len()],
+        };
+    }
     let n = o.slots.len().max(36);
     if rows > 0 && n == rows * 9 + 36 {
         // VANILLA: ContainerScreen / ChestMenu.
@@ -111,6 +128,26 @@ pub fn layout(inv: &Inventory) -> Layout {
             )));
         }
     };
+    if name == "merchant" && n == 39 {
+        // VANILLA: MerchantMenu / MerchantScreen 276×166, villager.png 512×256.
+        return Layout {
+            kind: Kind::Tex("container_villager", H_MERCHANT),
+            w: crate::merchantscreen::W,
+            h: H_MERCHANT,
+            slots: crate::merchantscreen::slots(),
+        };
+    }
+    if name == "beacon" && n == 37 {
+        // VANILLA: BeaconMenu — слот оплаты (136,110), инвентарь addStandardInventorySlots(36,137); BeaconScreen 230×219.
+        let mut s = vec![Some((136.0, 110.0))];
+        player_inv_rows_x(&mut s, 36.0, 137.0, 195.0);
+        return Layout {
+            kind: Kind::Tex("container_beacon", 219.0),
+            w: 230.0,
+            h: 219.0,
+            slots: s,
+        };
+    }
     let simple = match name {
         "crafting" => Some(("container_crafting", 166.0, 46)),
         "furnace" => Some(("container_furnace", 166.0, 39)),
@@ -124,6 +161,10 @@ pub fn layout(inv: &Inventory) -> Layout {
         "enchantment" => Some(("container_enchanting", 166.0, 38)),
         "brewing_stand" => Some(("container_brewing", 166.0, 41)),
         "smithing" => Some(("container_smithing", 166.0, 40)),
+        "cartography_table" => Some(("container_cartography", 166.0, 39)),
+        "loom" => Some(("container_loom", 166.0, 40)),
+        "stonecutter" => Some(("container_stonecutter", 166.0, 38)),
+        "crafter_3x3" => Some(("container_crafter", 166.0, 46)),
         _ => None,
     };
     if let Some((tex, h, total)) = simple.filter(|x| n == x.2) {
@@ -158,6 +199,15 @@ pub fn layout(inv: &Inventory) -> Layout {
             "smithing" => {
                 s.extend([(8.0, 48.0), (26.0, 48.0), (44.0, 48.0), (98.0, 48.0)].map(Some))
             }
+            // VANILLA: CartographyTableMenu / StonecutterMenu / CrafterMenu.
+            "cartography_table" => s.extend([(15.0, 15.0), (15.0, 52.0), (145.0, 39.0)].map(Some)),
+            "stonecutter" => s.extend([(20.0, 33.0), (143.0, 33.0)].map(Some)),
+            // VANILLA: LoomMenu — banner, dye, pattern, result.
+            "loom" => s.extend([(13.0, 26.0), (33.0, 26.0), (23.0, 45.0), (143.0, 57.0)].map(Some)),
+            "crafter_3x3" => {
+                grid(&mut s, 26.0, 17.0, 3, 9);
+                s.push(Some((134.0, 35.0)));
+            }
             "hopper" => grid(&mut s, 44.0, 20.0, 5, 5),
             _ => grid(&mut s, 8.0, 18.0, 9, 27),
         }
@@ -186,10 +236,41 @@ impl Layout {
     pub fn is_player(&self) -> bool {
         self.kind == Kind::Player
     }
+    /// Меню с данной фоновой текстурой.
+    fn is_tex(&self, tex: &str) -> bool {
+        matches!(self.kind, Kind::Tex(t, _) if t == tex)
+    }
+    /// Окно наковальни.
+    pub fn is_anvil(&self) -> bool {
+        matches!(self.kind, Kind::Tex("container_anvil", _))
+    }
+    /// Окно стола зачарований.
+    pub fn is_enchanting(&self) -> bool {
+        matches!(self.kind, Kind::Tex("container_enchanting", _))
+    }
+    /// Окно ткацкого станка.
+    pub fn is_loom(&self) -> bool {
+        matches!(self.kind, Kind::Tex("container_loom", _))
+    }
+    /// Экран книги на кафедре.
+    pub fn is_lectern(&self) -> bool {
+        self.kind == Kind::Lectern
+    }
+    /// Окно торговли.
+    pub fn is_merchant(&self) -> bool {
+        matches!(self.kind, Kind::Tex("container_villager", _))
+    }
+    /// Окно маяка.
+    pub fn is_beacon(&self) -> bool {
+        matches!(self.kind, Kind::Tex("container_beacon", _))
+    }
     pub fn left(&self, gw: f32) -> f32 {
         ((gw - self.w) / 2.0).floor()
     }
     pub fn top(&self, gh: f32) -> f32 {
+        if self.kind == Kind::Lectern {
+            return crate::bookview::TOP;
+        }
         ((gh - self.h) / 2.0).floor()
     }
 
@@ -210,11 +291,128 @@ impl Layout {
 }
 
 /// Содержимое слота `i` активного меню.
+pub fn slot_stack_pub(inv: &Inventory, i: usize) -> Option<&ezzmc_protocol::item::ItemStack> {
+    slot_stack(inv, i)
+}
+
 fn slot_stack(inv: &Inventory, i: usize) -> Option<&ezzmc_protocol::item::ItemStack> {
     match &inv.open {
         Some(o) => o.slots.get(i)?.as_ref(),
         None => inv.slots.get(i)?.as_ref(),
     }
+}
+
+/// Символ шрифта `alt` (галактический алфавит) в области частного использования.
+pub fn alt_char(c: char) -> char {
+    char::from_u32(0xE000 + c as u32).unwrap_or(c)
+}
+
+/// VANILLA: EnchantmentNames — слова для случайных названий.
+const ENCH_WORDS: &[&str] = &[
+    "the",
+    "elder",
+    "scrolls",
+    "klaatu",
+    "berata",
+    "niktu",
+    "xyzzy",
+    "bless",
+    "curse",
+    "light",
+    "darkness",
+    "fire",
+    "air",
+    "earth",
+    "water",
+    "hot",
+    "dry",
+    "cold",
+    "wet",
+    "ignite",
+    "snuff",
+    "embiggen",
+    "twist",
+    "shorten",
+    "stretch",
+    "fiddle",
+    "destroy",
+    "imbue",
+    "galvanize",
+    "enchant",
+    "free",
+    "limited",
+    "range",
+    "of",
+    "towards",
+    "inside",
+    "sphere",
+    "cube",
+    "self",
+    "other",
+    "ball",
+    "mental",
+    "physical",
+    "grow",
+    "shrink",
+    "demon",
+    "elemental",
+    "spirit",
+    "animal",
+    "creature",
+    "beast",
+    "humanoid",
+    "undead",
+    "fresh",
+    "stale",
+    "phnglui",
+    "mglwnafh",
+    "cthulhu",
+    "rlyeh",
+    "wgahnagl",
+    "fhtagn",
+    "baguette",
+];
+
+/// VANILLA: EnchantmentNames#initSeed + getRandomName — названия по слотам (только для cost != 0),
+/// обрезанные по ширине `max_w[i]` (FontSplitter#headByWidth), уже в символах шрифта `alt`.
+fn ench_names(
+    seed: i64,
+    costs: [i16; 3],
+    max_w: [f32; 3],
+    tw: &dyn Fn(&str) -> f32,
+) -> [String; 3] {
+    let words = ENCH_WORDS;
+    let mut rng = ezzmc_world::noise::LegacyRandom::new(0);
+    rng.set_seed(seed);
+    let mut out = [String::new(), String::new(), String::new()];
+    for i in 0..3 {
+        if costs[i] == 0 {
+            continue;
+        }
+        let n = rng.next_int_bound(2) + 3;
+        let mut s = String::new();
+        for k in 0..n {
+            if k != 0 {
+                s.push(' ');
+            }
+            s.push_str(words[rng.next_int_bound(words.len() as i32) as usize]);
+        }
+        let mut head = String::new();
+        for c in s.chars() {
+            let mut t = head.clone();
+            t.push(alt_char(c));
+            if tw(&t) > max_w[i] {
+                break;
+            }
+            head = t;
+        }
+        out[i] = head;
+    }
+    out
+}
+
+fn inv_slot(o: &crate::inventory::OpenMenu, i: usize) -> Option<&ezzmc_protocol::item::ItemStack> {
+    o.slots.get(i)?.as_ref()
 }
 
 /// Команда клика (id контейнера и state_id берутся из инвентаря).
@@ -249,6 +447,25 @@ pub fn on_click(
     double: bool,
 ) -> Option<NetCmd> {
     let button = i8::from(right);
+    if let (Kind::Tex("container_enchanting", _), Some(o)) = (lay.kind, &inv.open) {
+        // VANILLA: EnchantmentScreen#mouseClicked + EnchantmentMenu#clickMenuButton (без проверки уровня игрока — её делает сервер).
+        let (l, t) = (lay.left(gw), lay.top(gh));
+        let lapis = inv_slot(o, 1).map_or(0, |s| s.count);
+        for i in 0..3usize {
+            let (xx, yy) = (mx - (l + 60.0), my - (t + 14.0 + 19.0 * i as f32));
+            if xx >= 0.0
+                && yy >= 0.0
+                && xx < 108.0
+                && yy < 19.0
+                && o.data[i] > 0
+                && inv_slot(o, 0).is_some()
+                && (inv.infinite_materials
+                    || (lapis > i as i32 && inv.xp_level >= i32::from(o.data[i])))
+            {
+                return Some(NetCmd::ContainerButton(o.id, i as i32));
+            }
+        }
+    }
     if let Some(i) = lay.slot_at(gw, gh, mx, my) {
         // VANILLA: AbstractContainerScreen#mouseClicked — двойной клик ЛКМ с предметом на курсоре → PICKUP_ALL.
         let input = if shift {
@@ -278,6 +495,8 @@ pub fn draw_sprites(
     gw: f32,
     gh: f32,
     drag: &[usize],
+    mx: f32,
+    my: f32,
 ) {
     let (l, t) = (lay.left(gw), lay.top(gh));
     let k = 1.0 / 256.0;
@@ -304,16 +523,155 @@ pub fn draw_sprites(
             );
         }
         Kind::Tex(tex, h) => {
+            // villager.png — 512×256, остальные 256×256.
+            let kx = if tex == "container_villager" {
+                k / 2.0
+            } else {
+                k
+            };
             p.blit(
                 tex,
                 l,
                 t,
-                176.0,
+                lay.w,
                 h,
-                [0.0, 0.0, 176.0 * k, h * k],
+                [0.0, 0.0, lay.w * kx, h * k],
                 0xFFFF_FFFF,
             );
+            if let (true, Some(o)) = (tex == "container_villager", &inv.open) {
+                crate::merchantscreen::draw_sprites(p, dev, q, rm, o, l, t, mx, my);
+            }
+            if let (true, Some(o)) = (tex == "container_loom", &inv.open) {
+                crate::loomscreen::draw_sprites(p, o, l, t, mx, my);
+            }
+            if let (true, Some(o)) = (tex == "container_beacon", &inv.open) {
+                crate::beaconscreen::draw_sprites(p, dev, q, rm, o, l, t, mx, my);
+            }
             if let (Some(kind), Some(o)) = (tex.strip_prefix("container_"), &inv.open) {
+                if kind == "enchanting" {
+                    // VANILLA: EnchantmentScreen#extractBackground (кнопки 108×19, data[0..3] — цены).
+                    let gold = inv_slot(o, 1).map_or(0, |s| s.count);
+                    for i in 0..3usize {
+                        let y = t + 14.0 + 19.0 * i as f32;
+                        let n = i + 1;
+                        let (x0, cost) = (l + 60.0, o.data[i]);
+                        if cost == 0 {
+                            p.blit(
+                                "ench_slot_off",
+                                x0,
+                                y,
+                                108.0,
+                                19.0,
+                                [0.0, 0.0, 1.0, 1.0],
+                                0xFFFF_FFFF,
+                            );
+                            continue;
+                        }
+                        let off = (gold < n as i32 || inv.xp_level < i32::from(cost))
+                            && !inv.infinite_materials;
+                        let hover = mx >= x0 && my >= y && mx < x0 + 108.0 && my < y + 19.0;
+                        let bg = if off {
+                            "ench_slot_off"
+                        } else if hover {
+                            "ench_slot_hi"
+                        } else {
+                            "ench_slot"
+                        };
+                        p.blit(bg, x0, y, 108.0, 19.0, [0.0, 0.0, 1.0, 1.0], 0xFFFF_FFFF);
+                        let lv = format!("ench_lvl_{n}{}", if off { "_off" } else { "" });
+                        p.blit(
+                            &lv,
+                            x0 + 1.0,
+                            y + 1.0,
+                            16.0,
+                            16.0,
+                            [0.0, 0.0, 1.0, 1.0],
+                            0xFFFF_FFFF,
+                        );
+                    }
+                }
+                if kind == "anvil" {
+                    // VANILLA: AnvilScreen#extractBackground — поле имени 110×16 (59,20), disabled без предмета
+                    // в слоте 0; extractErrorIcon — 28×21 (99,45), если слоты заняты, а результата нет.
+                    let has = |i: usize| inv_slot(o, i).is_some();
+                    p.blit(
+                        if has(0) {
+                            "anvil_field"
+                        } else {
+                            "anvil_field_off"
+                        },
+                        l + 59.0,
+                        t + 20.0,
+                        110.0,
+                        16.0,
+                        [0.0, 0.0, 1.0, 1.0],
+                        0xFFFF_FFFF,
+                    );
+                    if (has(0) || has(1)) && !has(2) {
+                        p.blit(
+                            "anvil_error",
+                            l + 99.0,
+                            t + 45.0,
+                            28.0,
+                            21.0,
+                            [0.0, 0.0, 1.0, 1.0],
+                            0xFFFF_FFFF,
+                        );
+                    }
+                }
+                if kind == "brewing" {
+                    // VANILLA: BrewingStandScreen#extractBackground (data: 0 варка, 1 топливо, 2 всего, 3 макс. топливо).
+                    let d = &o.data;
+                    let (fuel, total_fuel) = (i32::from(d[1]), i32::from(d[3]));
+                    let fl = if total_fuel > 0 {
+                        ((18 * fuel + total_fuel - 1) / total_fuel).clamp(0, 18)
+                    } else {
+                        0
+                    };
+                    if fl > 0 {
+                        let w = fl as f32;
+                        p.blit(
+                            "brew_fuel",
+                            l + 60.0,
+                            t + 44.0,
+                            w,
+                            4.0,
+                            [0.0, 0.0, w / 18.0, 1.0],
+                            0xFFFF_FFFF,
+                        );
+                    }
+                    let (tick, total) = (i32::from(d[0]), i32::from(d[2]));
+                    if tick > 0 && total > 0 {
+                        let len = (28.0 * (1.0 - tick as f32 / total as f32)) as i32;
+                        if len > 0 {
+                            let h = len as f32;
+                            p.blit(
+                                "brew_progress",
+                                l + 97.0,
+                                t + 16.0,
+                                9.0,
+                                h,
+                                [0.0, 0.0, 1.0, h / 28.0],
+                                0xFFFF_FFFF,
+                            );
+                        }
+                        const BUBBLES: [i32; 7] = [29, 24, 20, 16, 11, 6, 0];
+                        let len = BUBBLES[(tick / 2 % 7) as usize];
+                        if len > 0 {
+                            let h = len as f32;
+                            let v0 = (29.0 - h) / 29.0;
+                            p.blit(
+                                "brew_bubbles",
+                                l + 63.0,
+                                t + 14.0 + 29.0 - h,
+                                12.0,
+                                h,
+                                [0.0, v0, 1.0, 1.0],
+                                0xFFFF_FFFF,
+                            );
+                        }
+                    }
+                }
                 if matches!(kind, "furnace" | "blast_furnace" | "smoker") {
                     // VANILLA: AbstractFurnaceScreen#renderBg (огонь 14×14 снизу вверх, стрелка 24×16 слева направо).
                     let d = &o.data;
@@ -395,6 +753,8 @@ pub fn draw_text(
     gh: f32,
     mx: f32,
     my: f32,
+    anvil: &mut AnvilName,
+    caret: bool,
 ) {
     let (l, top) = (lay.left(gw), lay.top(gh));
     // VANILLA: Screen title — Component (translatable) → lang.
@@ -404,12 +764,94 @@ pub fn draw_text(
         .map_or_else(|| lang.tr("container.crafting"), |o| lang.tr(&o.title));
     let title = title.as_str();
     // VANILLA: titleLabelX 8 / 97 для InventoryScreen, titleLabelY 6 / 8.
+    // VANILLA: AnvilScreen — titleLabelX 60.
     let (tx, ty) = if lay.kind == Kind::Player {
         (97.0, 8.0)
+    } else if lay.is_anvil() {
+        (60.0, 6.0)
+    } else if lay.is_tex("container_smithing") {
+        // VANILLA: SmithingScreen — titleLabelX 44, titleLabelY 15.
+        (44.0, 15.0)
+    } else if lay.is_tex("container_cartography") || lay.is_tex("container_loom") {
+        (8.0, 4.0) // VANILLA: CartographyTableScreen — titleLabelY −= 2.
+    } else if lay.is_tex("container_stonecutter") {
+        (8.0, 5.0) // VANILLA: StonecutterScreen — titleLabelY−−.
+    } else if lay.is_tex("container_crafter") {
+        // VANILLA: CrafterScreen — заголовок по центру.
+        ((176.0 - t.width_fmt(title, false)) / 2.0, 6.0)
     } else {
         (8.0, 6.0)
     };
-    t.draw(title, l + tx, top + ty, 0x404040, false);
+    if let (true, Some(o)) = (lay.is_merchant(), &inv.open) {
+        // VANILLA: MerchantScreen#extractLabels — заголовок с уровнем, «Trades», «Inventory» (x=107).
+        crate::merchantscreen::draw_text(t, lang, o, title, l, top);
+    } else if lay.is_beacon() {
+        // VANILLA: BeaconScreen#extractLabels — свои подписи вместо заголовка и «Inventory».
+        crate::beaconscreen::draw_text(t, lang, l, top);
+    } else {
+        t.draw(title, l + tx, top + ty, 0x404040, false);
+    }
+    if lay.kind != Kind::Player && !lay.is_beacon() && !lay.is_merchant() {
+        // VANILLA: AbstractContainerScreen — inventoryLabelX 8, inventoryLabelY = imageHeight − 94.
+        t.draw(
+            &lang.tr("container.inventory"),
+            l + 8.0,
+            top + lay.h - 94.0,
+            0x404040,
+            false,
+        );
+    }
+    if let (true, Some(o)) = (lay.is_anvil(), &inv.open) {
+        anvil.draw(t, lang, inv, o, l, top, caret);
+    }
+    if let (Kind::Tex("container_enchanting", _), Some(o)) = (lay.kind, &inv.open) {
+        // VANILLA: EnchantmentScreen — число уровней справа в кнопке (цвет: доступно −8323296 / нет −12550384).
+        let gold = inv_slot(o, 1).map_or(0, |s| s.count);
+        let costs = [o.data[0], o.data[1], o.data[2]];
+        let max_w = [0, 1, 2].map(|i| 86.0 - t.width_fmt(&costs[i].to_string(), false));
+        let names = ench_names(
+            // data[3] — enchantmentSeed; пакет несёт short (знаковый), как в ванили
+            i64::from(o.data[3]),
+            costs,
+            max_w,
+            &|s| t.width_fmt(s, false),
+        );
+        for i in 0..3usize {
+            let cost = i32::from(o.data[i]);
+            if cost == 0 {
+                continue;
+            }
+            // VANILLA: EnchantmentScreen — название: обычный цвет / подсветка / затемнённый.
+            let (mx0, my0) = (mx - (l + 60.0), my - (top + 14.0 + 19.0 * i as f32));
+            let hover = mx0 >= 0.0 && my0 >= 0.0 && mx0 < 108.0 && my0 < 19.0;
+            let dis = (gold < i as i32 + 1 || inv.xp_level < cost) && !inv.infinite_materials;
+            let ncol = if dis {
+                0x342F25
+            } else if hover {
+                0xFFFF80
+            } else {
+                0x685E4A
+            };
+            t.draw(
+                &names[i],
+                l + 80.0,
+                top + 16.0 + 19.0 * i as f32,
+                ncol,
+                false,
+            );
+            let off = (gold < i as i32 + 1 || inv.xp_level < cost) && !inv.infinite_materials;
+            let col = if off { 0x407F10 } else { 0x80FF20 };
+            let s = cost.to_string();
+            let w = t.width_fmt(&s, false);
+            t.draw(
+                &s,
+                l + 60.0 + 20.0 + 86.0 - w,
+                top + 16.0 + 19.0 * i as f32 + 7.0,
+                col,
+                true,
+            );
+        }
+    }
     for (i, pos) in lay.slots.iter().enumerate() {
         if let (Some((x, y)), Some(s)) = (pos, slot_stack(inv, i)) {
             hud::stack_count(t, s, l + x, top + y);
@@ -432,4 +874,137 @@ pub fn hover_item<'a>(
     my: f32,
 ) -> Option<&'a ezzmc_protocol::item::ItemStack> {
     slot_stack(inv, lay.slot_at(gw, gh, mx, my)?)
+}
+
+/// Поле имени наковальни.
+/// VANILLA: AnvilScreen (EditBox name, onNameChanged, slotChanged) + AnvilMenu#setItemName.
+#[derive(Default)]
+pub struct AnvilName {
+    pub edit: crate::editbox::EditBox,
+    menu: i32,
+    fp: Option<String>,
+    sent: Option<String>,
+}
+
+impl AnvilName {
+    /// Предмет в слоте 0 есть → поле редактируемо.
+    pub fn editable(o: &crate::inventory::OpenMenu) -> bool {
+        inv_slot(o, 0).is_some()
+    }
+
+    /// Синхронизация со слотом 0 (VANILLA: AnvilScreen#slotChanged). Вернёт имя для отправки.
+    pub fn sync(
+        &mut self,
+        lang: &crate::ui::lang::Lang,
+        o: &crate::inventory::OpenMenu,
+    ) -> Option<String> {
+        if self.menu != o.id || self.edit.max != 50 {
+            *self = Self::default();
+            self.edit.max = 50;
+            self.menu = o.id;
+        }
+        let stack = inv_slot(o, 0);
+        let fp = stack.map(|s| format!("{}|{}", s.item, crate::tooltip::hover_name(lang, s)));
+        if fp == self.fp {
+            return None;
+        }
+        self.fp = fp;
+        let name = stack.map_or_else(String::new, |s| crate::tooltip::hover_name(lang, s));
+        self.edit.set(&name);
+        self.changed(lang, o)
+    }
+
+    /// VANILLA: AnvilScreen#onNameChanged → AnvilMenu#setItemName.
+    pub fn changed(
+        &mut self,
+        lang: &crate::ui::lang::Lang,
+        o: &crate::inventory::OpenMenu,
+    ) -> Option<String> {
+        let stack = inv_slot(o, 0)?;
+        let mut name = self.edit.text.clone();
+        if !crate::tooltip::has_custom_name(stack)
+            && name == crate::tooltip::hover_name(lang, stack)
+        {
+            name.clear();
+        }
+        if name.chars().count() > 50 || self.sent.as_deref() == Some(name.as_str()) {
+            return None;
+        }
+        self.sent = Some(name.clone());
+        Some(name)
+    }
+
+    /// Подпись цены и поле имени (VANILLA: AnvilScreen#extractLabels, EditBox).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(
+        &mut self,
+        t: &mut TextRenderer,
+        lang: &crate::ui::lang::Lang,
+        inv: &Inventory,
+        o: &crate::inventory::OpenMenu,
+        l: f32,
+        top: f32,
+        caret: bool,
+    ) {
+        let cost = i32::from(o.data[0]);
+        if cost > 0 {
+            let mut color = 0x80FF20;
+            let label = if cost >= 40 && !inv.infinite_materials {
+                color = 0xFF6060;
+                Some(lang.tr("container.repair.expensive"))
+            } else if inv_slot(o, 2).is_some() {
+                if inv.xp_level < cost && !inv.infinite_materials {
+                    color = 0xFF6060;
+                }
+                Some(lang.fmt("container.repair.cost", &[&cost.to_string()]))
+            } else {
+                None
+            };
+            if let Some(s) = label {
+                let w = t.width_fmt(&s, false);
+                let tx = 176.0 - 8.0 - w - 2.0;
+                t.fill(l + tx - 2.0, top + 67.0, l + 168.0, top + 79.0, 0x4F00_0000);
+                t.draw(&s, l + tx, top + 69.0, color, true);
+            }
+        }
+        let e = &mut self.edit;
+        let (x, y, w) = (l + 62.0, top + 24.0, 103.0);
+        let cs: Vec<char> = e.text.chars().collect();
+        let sub = |a: usize, b: usize| cs[a..b].iter().collect::<String>();
+        e.scroll = e.scroll.min(cs.len()).min(e.cursor);
+        while e.scroll < e.cursor && t.width_fmt(&sub(e.scroll, e.cursor), false) > w {
+            e.scroll += 1;
+        }
+        // VANILLA: EditBox#scrollTo — текст заполняет поле, лишняя прокрутка слева убирается.
+        while e.scroll > 0 && t.width_fmt(&sub(e.scroll - 1, cs.len()), false) <= w {
+            e.scroll -= 1;
+        }
+        let mut end = e.scroll;
+        while end < cs.len() && t.width_fmt(&sub(e.scroll, end + 1), false) <= w {
+            end += 1;
+        }
+        let ty = y + 2.0;
+        let (a, b) = e.selection();
+        let (a, b) = (a.clamp(e.scroll, end), b.clamp(e.scroll, end));
+        if a < b && Self::editable(o) {
+            let x1 = x + t.width_fmt(&sub(e.scroll, a), false);
+            let x2 = x + t.width_fmt(&sub(e.scroll, b), false);
+            t.fill(x1, ty - 1.0, x2, ty + 9.0, 0xFF3A_5FD9);
+        }
+        let col = if Self::editable(o) {
+            0xFFFFFF
+        } else {
+            0x707070
+        };
+        t.draw(&sub(e.scroll, end), x, ty, col, true);
+        if Self::editable(o) && caret {
+            let c = e.cursor.clamp(e.scroll, end);
+            let cx = x + t.width_fmt(&sub(e.scroll, c), false);
+            if c == cs.len() {
+                t.draw("_", cx, ty, 0xFFFFFF, true);
+            } else {
+                t.fill(cx, ty - 1.0, cx + 1.0, ty + 9.0, 0xFFD0_D0D0);
+            }
+        }
+    }
 }

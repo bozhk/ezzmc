@@ -666,7 +666,7 @@ pub fn hit(st: &State, gw: f32, gh: f32, mx: f32, my: f32) -> Hit {
     Hit::None
 }
 
-fn stack_of(name: &str, count: i32) -> Option<ItemStack> {
+pub(crate) fn stack_of(name: &str, count: i32) -> Option<ItemStack> {
     let item = ezzmc_protocol::generated::r26_3::ITEM
         .iter()
         .position(|n| *n == name)? as u32;

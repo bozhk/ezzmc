@@ -24,9 +24,9 @@ pub struct Snap {
 }
 
 /// Текстура блеска и матрица её сдвига (VANILLA: TextureTransform#setupGlintTexturing).
-struct Glint<'a> {
-    tex: (&'a [u8], u32, u32),
-    mat: Mat4,
+pub(crate) struct Glint<'a> {
+    pub(crate) tex: (&'a [u8], u32, u32),
+    pub(crate) mat: Mat4,
 }
 
 /// Прямоугольник превью в координатах GUI меню (x0, y0, x1, y1) и размер модели.
@@ -377,7 +377,7 @@ impl CharPreview {
 
 /// Заливка треугольника: z-буфер (больше — ближе), nearest-выборка, alpha-test.
 #[allow(clippy::too_many_arguments)]
-fn fill_tri(
+pub(crate) fn fill_tri(
     px: &mut [u8],
     depth: &mut [f32],
     w: u32,

@@ -39,9 +39,7 @@ fn run(address: &str, host: &str, port: u16, protocol: i32) -> Result<StatusRepl
     if p.id != 0 {
         return Err(NetError::Closed);
     }
-    let json = Reader::new(&p.body)
-        .string(32767)
-        .map_err(NetError::from)?;
+    let json = Reader::new(&p.body).string(32767).map_err(NetError::from)?;
     let start = Instant::now();
     let mut w = Writer::new();
     w.i64(0);

@@ -11,7 +11,7 @@ use ezzmc_world::block::BlockState;
 use ezzmc_world::level::Level;
 use ezzmc_world::piston::{opposite, step, MovingPiston, DIRS};
 
-fn state_with(name: &str, props: &[(&str, &str)]) -> Option<BlockState> {
+pub(crate) fn state_with(name: &str, props: &[(&str, &str)]) -> Option<BlockState> {
     use ezzmc_world::generated::b26_3::BLOCKS;
     let mut s = BlockState::from_id(BLOCKS.iter().find(|b| b.name == name)?.default_state)?;
     for (k, v) in props {

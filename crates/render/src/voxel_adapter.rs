@@ -14,6 +14,8 @@ use ezzmc_mesh::layers::RenderLayer;
 use ezzmc_mesh::section::SectionMesh;
 use ezzmc_mesh::vertex::{PackedVertex, POS_BIAS, POS_SCALE};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::RwLock;
 
 /// Должно совпадать с `FACE_SHADE` / `AO_SHADE` в `shaders/voxel_draw.wgsl`.
 pub const FACE_SHADE: [f32; 6] = [0.5, 1.0, 0.8, 0.8, 0.6, 0.6];
@@ -24,24 +26,60 @@ const CELL: u16 = POS_SCALE as u16;
 pub const CONVERTED_LAYERS: [RenderLayer; 2] = [RenderLayer::Solid, RenderLayer::Cutout];
 
 /// Таблица UV-прямоугольников: id (`QuadMeta::texture`) → `[u0, v0, u1, v1]`.
+/// Потокобезопасна: конвертация идёт в рабочих потоках мешера (быстрый путь — read-lock).
 #[derive(Default)]
 pub struct RectTable {
-    map: HashMap<[u16; 4], u32>,
-    pub rects: Vec<[f32; 4]>,
+    inner: RwLock<RectInner>,
     /// Появились новые прямоугольники — буфер на GPU надо перезалить.
-    pub dirty: bool,
+    dirty: AtomicBool,
+}
+
+#[derive(Default)]
+struct RectInner {
+    map: HashMap<[u16; 4], u32>,
+    rects: Vec<[f32; 4]>,
 }
 
 impl RectTable {
-    fn intern(&mut self, key: [u16; 4]) -> u32 {
-        if let Some(&i) = self.map.get(&key) {
+    fn intern(&self, key: [u16; 4]) -> u32 {
+        if let Ok(g) = self.inner.read() {
+            if let Some(&i) = g.map.get(&key) {
+                return i;
+            }
+        }
+        let Ok(mut g) = self.inner.write() else {
+            return 0;
+        };
+        if let Some(&i) = g.map.get(&key) {
             return i;
         }
-        let i = self.rects.len() as u32;
-        self.rects.push(key.map(|v| f32::from(v) / 65536.0));
-        self.map.insert(key, i);
-        self.dirty = true;
+        let i = g.rects.len() as u32;
+        g.rects.push(key.map(|v| f32::from(v) / 65536.0));
+        g.map.insert(key, i);
+        self.dirty.store(true, Ordering::Release);
         i
+    }
+
+    /// Пометить таблицу «грязной» (пересоздание Renderer — надо залить заново).
+    pub fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    /// Если появились новые прямоугольники — вернуть копию таблицы для заливки на GPU.
+    pub fn take_dirty(&self) -> Option<Vec<[f32; 4]>> {
+        if self.dirty.swap(false, Ordering::AcqRel) {
+            self.inner.read().ok().map(|g| g.rects.clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.read().map_or(0, |g| g.rects.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -52,7 +90,7 @@ pub struct Converted {
 }
 
 /// Делит меш: цельные квады → `Converted`, остальное → `SectionMesh` для ванильной арены.
-pub fn split_mesh(mesh: &SectionMesh, rects: &mut RectTable) -> (Converted, SectionMesh) {
+pub fn split_mesh(mesh: &SectionMesh, rects: &RectTable) -> (Converted, SectionMesh) {
     let mut out = Converted::default();
     let mut rest = mesh.clone();
     for layer in CONVERTED_LAYERS {
@@ -85,19 +123,17 @@ fn light4(x: u8) -> u8 {
     ((u16::from(x) + 8) / 16).min(15) as u8
 }
 
-fn convert_quad(
-    q: &[PackedVertex; 4],
-    rects: &mut RectTable,
-) -> Option<([VoxelVertex; 4], QuadMeta)> {
+fn convert_quad(q: &[PackedVertex; 4], rects: &RectTable) -> Option<([VoxelVertex; 4], QuadMeta)> {
     let mut p = [[0u8; 3]; 4];
     for (i, v) in q.iter().enumerate() {
         p[i] = [lattice(v.pos[0])?, lattice(v.pos[1])?, lattice(v.pos[2])?];
     }
     // ровно одна постоянная ось
-    let consts: Vec<usize> = (0..3)
-        .filter(|&a| p.iter().all(|c| c[a] == p[0][a]))
-        .collect();
-    let [axis] = consts[..] else { return None };
+    let mut axes = (0..3usize).filter(|&a| p.iter().all(|c| c[a] == p[0][a]));
+    let axis = axes.next()?;
+    if axes.next().is_some() {
+        return None;
+    }
     // нормаль по обходу вершин (ваниль: CCW спереди)
     let d = |i: usize, j: usize| [0, 1, 2].map(|a| i32::from(p[i][a]) - i32::from(p[j][a]));
     let (e1, e2) = (d(1, 0), d(2, 0));
@@ -210,11 +246,11 @@ mod tests {
         let g = [153, 153, 153, 255]; // 0.6 от яркого
         let mut mesh = SectionMesh::default();
         mesh.layers[0].extend(top_quad([w, w, g, w]));
-        let mut rects = RectTable::default();
-        let (c, rest) = split_mesh(&mesh, &mut rects);
+        let rects = RectTable::default();
+        let (c, rest) = split_mesh(&mesh, &rects);
         assert_eq!(c.quads.len(), 1);
         assert!(rest.is_empty());
-        assert_eq!(rects.rects.len(), 1);
+        assert_eq!(rects.len(), 1);
         let v = c.verts;
         assert_eq!(v[0].face(), 1);
         assert_eq!(v[0].pos(), [1, 3, 4]);
@@ -243,8 +279,8 @@ mod tests {
         mesh.layers[1].extend(skew);
         // прозрачный слой — целый квад, но слой не конвертируется
         mesh.layers[2].extend(top_quad([w; 4]));
-        let mut rects = RectTable::default();
-        let (c, rest) = split_mesh(&mesh, &mut rects);
+        let rects = RectTable::default();
+        let (c, rest) = split_mesh(&mesh, &rects);
         assert!(c.quads.is_empty());
         assert_eq!(rest.quad_count(), 3);
     }

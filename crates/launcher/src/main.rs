@@ -6,7 +6,8 @@ mod launch;
 use config::{Account, Config, Kind};
 use ezzmc_auth::microsoft;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
-use std::process::Child;
+use std::process::{Child, Command};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,7 +22,7 @@ type Shared = Arc<Mutex<Config>>;
 
 #[derive(Clone, Default)]
 struct Runtime {
-    child: Arc<Mutex<Option<Child>>>,
+    children: Arc<Mutex<Vec<Child>>>,
     log: Arc<Mutex<String>>,
     ms_gen: Arc<AtomicU64>,
 }
@@ -154,7 +155,36 @@ fn merged_versions(game: &std::path::Path, remote: &[String], current: &str) -> 
     v
 }
 
+/// Без окна: `--print-session` печатает JSON `{name, uuid, token, online}` выбранного аккаунта
+/// (обновляя токен как при обычном запуске) — для MCP-запуска клиента тем же входом, что и у лаунчера.
+fn print_session() -> i32 {
+    let mut c = Config::load();
+    let idx = c.selected;
+    let Some(mut acc) = c.accounts.get(idx).cloned() else {
+        eprintln!("нет аккаунта");
+        return 1;
+    };
+    match launch::resolve_session(&mut acc, &c.msa_client_id()) {
+        Ok(s) => {
+            c.accounts[idx] = acc;
+            let _ = c.save();
+            println!(
+                "{}",
+                serde_json::json!({"name": s.name, "uuid": s.uuid, "token": s.token, "online": s.online})
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
 fn main() -> Result<(), slint::PlatformError> {
+    if std::env::args().any(|a| a == "--print-session") {
+        std::process::exit(print_session());
+    }
     let cfg: Shared = Arc::new(Mutex::new(Config::load()));
     let rt = Runtime::default();
     let ui = MainWindow::new()?;
@@ -343,14 +373,14 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_stop({
         let rt = rt.clone();
         move || {
-            if let Some(c) = lock(&rt.child).as_mut() {
+            for c in lock(&rt.children).iter_mut() {
                 let _ = c.kill();
             }
         }
     });
-    ui.on_play({
+    let start = {
         let (cfg, rt, weak) = (cfg.clone(), rt.clone(), weak.clone());
-        move || {
+        Rc::new(move |both: bool| {
             let Some(u) = weak.upgrade() else { return };
             let snapshot = {
                 let mut c = lock(&cfg);
@@ -363,21 +393,34 @@ fn main() -> Result<(), slint::PlatformError> {
             u.set_status("Подготовка…".into());
             let (cfg, rt, weak) = (cfg.clone(), rt.clone(), weak.clone());
             std::thread::spawn(move || {
-                let r = run_game(&cfg, &rt, &weak, snapshot);
+                let r = run_game(&cfg, &rt, &weak, snapshot, both);
                 let _ = weak.upgrade_in_event_loop(move |u| {
                     u.set_busy(false);
                     u.set_running(false);
                     u.set_progress(0.0);
+                    let _ = u.show();
                     match r {
                         Ok(msg) => u.set_status(msg.into()),
                         Err(e) => u.set_status(format!("Ошибка: {e}").into()),
                     }
                 });
             });
-        }
+        })
+    };
+    ui.on_play({
+        let start = start.clone();
+        move || start(false)
     });
+    ui.on_play_both(move || start(true));
 
-    ui.run()
+    // Окно прячется на время игры, поэтому цикл не должен завершаться при hide().
+    // Крестик окна завершает лаунчер (программный hide() этот обработчик не вызывает).
+    ui.window().on_close_requested(|| {
+        let _ = slint::quit_event_loop();
+        slint::CloseRequestResponse::HideWindow
+    });
+    ui.show()?;
+    slint::run_event_loop_until_quit()
 }
 
 fn ms_login(cfg: Shared, rt: Runtime, weak: Weak<MainWindow>, client_id: String, gen: u64) {
@@ -455,11 +498,14 @@ fn ms_login(cfg: Shared, rt: Runtime, weak: Weak<MainWindow>, client_id: String,
     toast(&weak, &format!("Вошёл как {}", mc.name));
 }
 
+// try_wait() уже забрал статус завершённого процесса — зомби не остаётся.
+#[allow(clippy::zombie_processes)]
 fn run_game(
     cfg: &Shared,
     rt: &Runtime,
     weak: &Weak<MainWindow>,
     snap: Config,
+    both: bool,
 ) -> Result<String, String> {
     let status = |s: &str, p: f32| {
         let s = s.to_string();
@@ -492,31 +538,29 @@ fn run_game(
             }
         ),
     );
-    let cmd = if snap.settings.target == 0 {
-        launch::build_ezzmc(&snap, &session)?
-    } else {
-        launch::build_java(&snap, &session, &|s, p| status(s, p))?
-    };
+    // (команда, метка в логе). «Оба»: сначала Java (может докачивать), потом ezzmc.
+    let mut cmds: Vec<(Command, &str)> = Vec::new();
+    if both || snap.settings.target != 0 {
+        cmds.push((
+            launch::build_java(&snap, &session, &|s, p| status(s, p))?,
+            if both { "[java] " } else { "" },
+        ));
+    }
+    if both || snap.settings.target == 0 {
+        cmds.push((
+            launch::build_ezzmc(&snap, &session)?,
+            if both { "[ezzmc] " } else { "" },
+        ));
+    }
     let capture = !snap.settings.close_on_launch;
-    let mut child = launch::spawn(cmd, capture)?;
-    if capture {
-        for (stream, tag) in [
-            (
-                child
-                    .stdout
-                    .take()
-                    .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
-                "",
-            ),
-            (
-                child
-                    .stderr
-                    .take()
-                    .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
-                "",
-            ),
-        ] {
-            if let Some(s) = stream {
+    for (cmd, tag) in cmds {
+        let mut child = launch::spawn(cmd, capture)?;
+        if capture {
+            let streams: [Option<Box<dyn std::io::Read + Send>>; 2] = [
+                child.stdout.take().map(|s| Box::new(s) as _),
+                child.stderr.take().map(|s| Box::new(s) as _),
+            ];
+            for s in streams.into_iter().flatten() {
                 let (rt, weak) = (rt.clone(), weak.clone());
                 std::thread::spawn(move || {
                     use std::io::BufRead;
@@ -526,12 +570,17 @@ fn run_game(
                 });
             }
         }
+        lock(&rt.children).push(child);
     }
-    *lock(&rt.child) = Some(child);
-    let _ = weak.upgrade_in_event_loop(|u| {
+    let close_on_launch = snap.settings.close_on_launch;
+    let _ = weak.upgrade_in_event_loop(move |u| {
         u.set_busy(false);
         u.set_running(true);
         u.set_status("Игра запущена".into());
+        if !close_on_launch {
+            // Лаунчер скрывается, пока идёт игра; вернётся в on_play после её закрытия.
+            let _ = u.hide();
+        }
     });
     if snap.settings.close_on_launch {
         std::thread::sleep(Duration::from_secs(2));
@@ -542,17 +591,23 @@ fn run_game(
     }
     loop {
         std::thread::sleep(Duration::from_millis(300));
-        let mut g = lock(&rt.child);
-        let Some(c) = g.as_mut() else { break };
-        match c.try_wait() {
-            Ok(Some(st)) => {
-                *g = None;
-                drop(g);
-                push_log(rt, weak, &format!("== игра завершилась: {st} =="));
-                return Ok(format!("Игра завершилась ({st})"));
+        let mut g = lock(&rt.children);
+        let mut i = 0;
+        while i < g.len() {
+            match g[i].try_wait() {
+                Ok(Some(st)) => {
+                    g.remove(i);
+                    push_log(rt, weak, &format!("== игра завершилась: {st} =="));
+                    if g.is_empty() {
+                        return Ok(format!("Игра завершилась ({st})"));
+                    }
+                }
+                Ok(None) => i += 1,
+                Err(e) => return Err(e.to_string()),
             }
-            Ok(None) => {}
-            Err(e) => return Err(e.to_string()),
+        }
+        if g.is_empty() {
+            break;
         }
     }
     Ok("Готово".into())

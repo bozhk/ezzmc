@@ -54,6 +54,11 @@ pub struct AvatarAnim {
 }
 
 impl AvatarAnim {
+    /// WalkAnimationState#speed (для isMoving).
+    pub fn walk_speed(&self) -> f32 {
+        self.walk_speed
+    }
+
     /// VANILLA: SwingState#startIfAble — нельзя перезапустить в первой половине взмаха.
     pub fn swing(&mut self) {
         if self.swinging && self.swing_ticks <= SWING_DURATION / 2 && self.swing_ticks > 0 {

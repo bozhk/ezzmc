@@ -107,7 +107,7 @@ use winit::{event::ElementState, event_loop::ActiveEventLoop, keyboard::KeyCode}
 impl App {
     /// Нажать/отпустить ввод агента: те же пути, что у настоящей клавиатуры (опрос движения,
     /// хотбар, инвентарь, выброс, левая рука).
-    fn control_press(&mut self, input: Input, down: bool) {
+    pub(crate) fn control_press(&mut self, input: Input, down: bool) {
         let state = if down {
             ElementState::Pressed
         } else {
@@ -130,6 +130,14 @@ impl App {
             if let Input::Key(KeyCode::KeyH) = input {
                 if self.f3_pending {
                     crate::tooltip::ADVANCED.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            // F3+B — хитбоксы сущностей (как в main.rs).
+            if let Input::Key(KeyCode::KeyB) = input {
+                if self.f3_pending {
+                    if let Some(v) = &mut self.view {
+                        v.toggle_hitboxes();
+                    }
                 }
             }
             self.f3_pending = false;
@@ -194,6 +202,10 @@ impl App {
     fn control_state(&self) -> Value {
         let screen = if self.view.is_none() {
             "menu"
+        } else if self.menu_active && self.gui.as_ref().is_some_and(|g| g.dialog_info().is_some()) {
+            "dialog"
+        } else if self.dead_screen {
+            "death"
         } else if self.menu_active {
             "pause"
         } else if self.inv_open {
@@ -251,6 +263,9 @@ impl App {
             s["attack_strength"] = json!(v.attack_strength(0.0));
             s["sections"] = json!(v.resident_sections());
         }
+        if let Some((title, kind, buttons)) = self.gui.as_ref().and_then(|g| g.dialog_info()) {
+            s["dialog"] = json!({"title": title, "kind": kind, "buttons": buttons});
+        }
         s["chat"] = json!({
             "open": self.chat.open,
             "input": self.chat.edit.text,
@@ -263,6 +278,7 @@ impl App {
                 "search": self.creative.search,
             });
         }
+        self.ctl_state_extra(&mut s);
         s
     }
 
@@ -276,6 +292,7 @@ impl App {
             self.mouse.grabbed = true;
         }
         self.focus.pause_on_lost_focus = false;
+        self.ctl_task_tick();
         let now = std::time::Instant::now();
         let joined = self.view.as_ref().is_some_and(|v| v.joined && v.have_pos);
         let mut i = 0;
@@ -327,6 +344,9 @@ impl App {
             "left" => Some(Input::Mouse(winit::event::MouseButton::Left)),
             _ => None,
         };
+        if let Some(r) = self.ctl_command(c, reply) {
+            return r;
+        }
         Some(match cmd {
             "ping" => ok(json!({"pong": true})),
             // Чат: chat_open {text} открывает экран; chat_type {text} печатает в поле;
@@ -370,6 +390,37 @@ impl App {
                 ok(json!({}))
             }
             "state" => ok(self.control_state()),
+            "visible" => {
+                // Какие сущности попали в кадр (по матрице последнего кадра) — чтобы не снимать пустоту.
+                let Some(v) = &self.view else {
+                    return Some(err("не в мире"));
+                };
+                let Ok(g) = v.net.level.lock() else {
+                    return Some(err("level lock"));
+                };
+                let Some(level) = g.as_ref() else {
+                    return Some(err("нет уровня"));
+                };
+                let all = v.visible_entities(level);
+                // Фильтры: max_dist (24), items (false — без предметов), type (подстрока), limit (25).
+                let max_dist = f("max_dist").unwrap_or(24.0);
+                let items = c["items"].as_bool().unwrap_or(false);
+                let ty = c["type"].as_str();
+                let limit = f("limit").unwrap_or(25.0) as usize;
+                let in_view: Vec<_> = all
+                    .iter()
+                    .filter(|e| {
+                        e["in_view"] == true
+                            && e["dist"].as_f64().is_some_and(|d| d <= max_dist)
+                            && (items || e["type"] != "item")
+                            && ty.is_none_or(|t| e["type"].as_str().is_some_and(|n| n.contains(t)))
+                    })
+                    .take(limit)
+                    .collect();
+                ok(json!({"in_view": in_view, "count_in_view": in_view.len(),
+                    "yaw": self.yaw, "pitch": self.pitch,
+                    "note": "проекция центра хитбокса, без учёта перекрытия блоками"}))
+            }
             "key" | "tap" => {
                 let Some(input) = c["key"].as_str().and_then(parse_input) else {
                     return Some(err("unknown key"));
@@ -404,7 +455,13 @@ impl App {
                 if !self.inv_open || self.inv_creative {
                     return Some(err("inventory screen not open"));
                 }
-                let Some(px) = c["slot"].as_u64().and_then(|s| self.slot_px(s as usize)) else {
+                // `menu_x`/`menu_y` — точка в GUI-px от левого верхнего угла меню (кнопки зачарования и т. п.).
+                let px = if let (Some(mx), Some(my)) = (num(&c["menu_x"]), num(&c["menu_y"])) {
+                    self.menu_px(mx as f32, my as f32)
+                } else {
+                    c["slot"].as_u64().and_then(|s| self.slot_px(s as usize))
+                };
+                let Some(px) = px else {
                     return Some(err("no such slot"));
                 };
                 let right = c["button"].as_str() == Some("right");
@@ -496,6 +553,28 @@ impl App {
                 self.creative.scroll(c["dy"].as_f64().unwrap_or(-1.0));
                 ok(json!({"row": self.creative.row}))
             }
+            "inv_scroll" => {
+                // Колесо в обычном экране с прокруткой (торговля, ткацкий станок).
+                let gc = self.gui_cursor();
+                let Some(v) = self.view.as_mut().filter(|_| self.inv_open) else {
+                    return Some(err("inventory screen not open"));
+                };
+                let dy = c["dy"].as_f64().unwrap_or(-1.0) as f32;
+                crate::loomscreen::wheel(&mut v.inv, dy);
+                crate::merchantscreen::wheel(&mut v.inv, dy);
+                // Бандл под курсором (BundleMouseActions#onMouseScrolled).
+                if let Some((gw, gh, mx, my)) = gc {
+                    let lay = crate::invscreen::layout(&v.inv);
+                    if let Some(sl) = lay.slot_at(gw, gh, mx, my) {
+                        if let Some(st) = crate::invscreen::slot_stack_pub(&v.inv, sl) {
+                            if let Some((a, b)) = crate::tooltip::bundle_wheel(sl, st, dy) {
+                                v.send_select_bundle(a, b);
+                            }
+                        }
+                    }
+                }
+                ok(json!({}))
+            }
             "creative_search" => {
                 if !self.inv_open || !self.inv_creative {
                     return Some(err("creative screen not open"));
@@ -506,6 +585,32 @@ impl App {
                 self.creative
                     .type_text(c["text"].as_str().unwrap_or(""), &self.item_lang);
                 ok(json!({"search": self.creative.search}))
+            }
+            "anvil_type" => {
+                // Агент: ввод в поле имени наковальни (`clear`: true — сначала стереть всё).
+                let Some(v) = self.view.as_ref() else {
+                    return Some(err("not joined"));
+                };
+                let open = v.inv.open.as_ref();
+                if !self.inv_open
+                    || !crate::invscreen::layout(&v.inv).is_anvil()
+                    || !open.is_some_and(crate::invscreen::AnvilName::editable)
+                {
+                    return Some(err("anvil screen with item in slot 0 not open"));
+                }
+                if c["clear"].as_bool() == Some(true) {
+                    self.anvil.edit.select_all();
+                    self.anvil.edit.erase(-1, false);
+                }
+                self.anvil.edit.type_text(c["text"].as_str().unwrap_or(""));
+                if let Some(n) = open.and_then(|o| self.anvil.changed(&self.item_lang, o)) {
+                    v.send_rename_item(n);
+                }
+                ok(json!({
+                    "name": self.anvil.edit.text,
+                    "cost": open.map(|o| o.data[0]),
+                    "result": open.and_then(|o| o.slots.get(2)).is_some_and(Option::is_some),
+                }))
             }
             "raw_move" => {
                 // TEMP-RAW-MOVE: разовый пакет move_player_pos_rot с точными x,y,z (для A/B).
@@ -531,6 +636,16 @@ impl App {
                 }
                 if let Some(p) = f("pitch") {
                     self.pitch = (p as f32).clamp(-90.0, 90.0);
+                }
+                ok(json!({}))
+            }
+            // Не ваниль: compute ↔ ванильный путь (как key.renderMode); on=true/false или переключить.
+            "render_mode" => {
+                if let (Some(v), Some(g)) = (&self.view, &mut self.gui) {
+                    let on = c["on"].as_bool().unwrap_or(!v.compute_renderer_enabled());
+                    g.opts.set("computeRenderer", on.to_string());
+                    g.opts.save();
+                    return Some(ok(json!({"on": on, "was": v.compute_renderer_enabled()})));
                 }
                 ok(json!({}))
             }
@@ -594,6 +709,20 @@ impl App {
                 });
                 ok(json!({"held_slot": v.inv.selected, "cursor": cursor, "slots": slots}))
             }
+            "dialog_button" => {
+                // Агент: нажать кнопку диалога сервера по индексу (см. state.dialog.buttons).
+                let Some(n) = c["index"].as_u64() else {
+                    return Some(err("index required"));
+                };
+                let Some(g) = &mut self.gui else {
+                    return Some(err("no menu"));
+                };
+                if g.dialog_press(n as usize) {
+                    ok(json!({}))
+                } else {
+                    err("no dialog")
+                }
+            }
             "ui_click" => {
                 // Агент: клик по экрану меню (координаты в пикселях окна).
                 let (Some(x), Some(y)) = (c["x"].as_f64(), c["y"].as_f64()) else {
@@ -638,4 +767,10 @@ impl App {
             other => err(format!("unknown command {other}")),
         })
     }
+}
+
+/// Число из JSON-числа или строки (инструменты агента иногда шлют числа строками).
+fn num(v: &Value) -> Option<f64> {
+    v.as_f64()
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }

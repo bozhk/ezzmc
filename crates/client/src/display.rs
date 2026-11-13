@@ -34,7 +34,8 @@ impl FramerateLimit {
     pub fn new(max_fps: u32) -> Self {
         Self {
             limit: max_fps.clamp(10, UNLIMITED_FPS),
-            inactivity: InactivityFpsLimit::Afk,
+            // Отклонение от ваниля по просьбе владельца: AFK-лимит 30 FPS ломает замеры без ввода.
+            inactivity: InactivityFpsLimit::Minimized,
             latest_input_ms: 0,
         }
     }
@@ -172,6 +173,7 @@ mod tests {
     #[test]
     fn throttle_rules() {
         let mut f = FramerateLimit::new(120);
+        f.inactivity = InactivityFpsLimit::Afk; // ванильное поведение (у нас по умолчанию выключено)
         f.on_input(0);
         assert_eq!(f.throttle(1000, false, true, false), Throttle::None);
         assert_eq!(f.effective(Throttle::None), 120);

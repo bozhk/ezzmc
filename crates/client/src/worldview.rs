@@ -10,6 +10,7 @@ use ezzmc_mesh::layers::RenderLayer;
 use ezzmc_mesh::models::BlockModels;
 use ezzmc_mesh::pool::MeshPool;
 use ezzmc_mesh::queue::RebuildQueue;
+use ezzmc_mesh::section::SectionMesh;
 use ezzmc_mesh::section::{ModelProvider, Neighborhood, SectionPos};
 use ezzmc_render::hiz::HiZ;
 use ezzmc_render::lightmap::{LightmapParams, LightmapTexture};
@@ -18,7 +19,7 @@ use ezzmc_render::renderer::{CullCamera, Renderer};
 use ezzmc_render::skydraw::{CelestialImages, SkyDraw};
 use ezzmc_render::terrain::{TerrainArena, TerrainPipelines};
 use ezzmc_render::uniforms::{ChunkSectionUniform, FogUniform, GlobalsUniform, ProjectionUniform};
-use ezzmc_render::voxel_adapter::{split_mesh, RectTable};
+use ezzmc_render::voxel_adapter::{split_mesh, Converted, RectTable};
 use ezzmc_render::Gpu;
 use ezzmc_world::block::BlockState;
 use ezzmc_world::level::{Level, LevelEvent};
@@ -90,6 +91,18 @@ pub struct WorldView {
     pub armor: f32,
     pub max_health: f32,
     pub hardcore: bool,
+    /// VANILLA: LocalPlayer#showDeathScreen.
+    pub show_death_screen: bool,
+    /// VANILLA: Player#getScore.
+    pub score: i32,
+    /// Пришёл combat_kill: открыть DeathScreen (причина смерти).
+    pub death_in: Option<Option<ezzmc_protocol::text::Component>>,
+    /// Пришёл Respawn: экран смерти закрыть.
+    pub respawn_in: bool,
+    /// Экран смерти уже запрошен (до Respawn): повторные combat_kill/set_health(0) не открывают его снова.
+    pub death_pending: bool,
+    /// LocalPlayer#flashOnSetHealth: первый set_health только запоминает здоровье.
+    health_seen: bool,
     /// VANILLA: Abilities#invulnerable (флаг 1).
     pub invulnerable: bool,
     /// VANILLA: LivingEntity#useItem/useItemRemaining — идёт еда/питьё.
@@ -134,8 +147,15 @@ pub struct WorldView {
     preview_blocks: std::rc::Rc<(Vec<u8>, u32, u32)>,
     preview_items: Option<std::rc::Rc<(Vec<u8>, u32, u32)>>,
     mobs: crate::mobs::Mobs,
+    /// Id песни из level_event 1010 (Hud#setNowPlaying) — забирает main.
+    pub now_playing: Option<i32>,
     chests: crate::chest::Chests,
     bells: crate::bell::Bells,
+    tables: crate::enchtable::Tables,
+    skulls: crate::skull::Skulls,
+    shulker_boxes: crate::shulkerbox::ShulkerBoxes,
+    banners: crate::banner::Banners,
+    signs: crate::sign::Signs,
     /// Стрелы: текстуры arrow/arrow_spectral/arrow_tipped стопкой 32×96.
     arrow_draw: ezzmc_render::particledraw::ParticleDraw,
     /// VANILLA: PistonHeadRenderer — движущиеся блоки (атлас блоков).
@@ -143,6 +163,8 @@ pub struct WorldView {
     /// Тени сущностей (shadow.png) и Level#getSkyDarken.
     shadow_draw: ezzmc_render::particledraw::ParticleDraw,
     sky_darken: i32,
+    /// Головы, надетые на игроков в этом кадре: (предмет, корень модели, свет) — рисуются после `mobs.bake`.
+    head_skulls: Vec<(&'static str, Mat4, (u8, u8))>,
     player_model: (
         ezzmc_render::entitymodel::Model,
         ezzmc_render::humanoid::HumanoidParts,
@@ -191,6 +213,11 @@ pub struct WorldView {
     /// Блеск предметов в руке (камера руки) и в мире.
     hand_glint_draw: Option<ezzmc_render::particledraw::ParticleDraw>,
     entity_glint_draw: Option<ezzmc_render::particledraw::ParticleDraw>,
+    /// GPU-инстансинг дропов: модели на GPU (по указателю HandMesh), экземпляры текущего кадра.
+    item_inst: Option<ezzmc_render::particledraw::ItemInstDraw>,
+    item_inst_map: std::collections::HashMap<*const crate::handitem::HandMesh, usize>,
+    item_inst_keep: Vec<std::rc::Rc<crate::handitem::HandMesh>>,
+    item_inst_frame: Vec<ItemInstFrame>,
     /// VANILLA: ModelBakery#FIRE_0 / FIRE_1 (пламя горящих сущностей).
     fire_uv: Option<(ezzmc_assets::bake::SpriteUv, ezzmc_assets::bake::SpriteUv)>,
     /// VANILLA: ItemInHandRenderer#mainHandItem (предмет, который сейчас рисуется) и слот.
@@ -200,11 +227,15 @@ pub struct WorldView {
     off_h: (f32, f32),
     hand_item_visible: bool,
     entity_item_visible: bool,
+    /// Пирамида видимости текущего кадра для отсечения мобов (VANILLA: EntityRenderer#shouldRender).
+    entity_frustum: Option<Frustum>,
     fog_buf: wgpu::Buffer,
     globals_buf: wgpu::Buffer,
     chunk_buf: wgpu::Buffer,
     group0: wgpu::BindGroup,
     depth: Option<(wgpu::TextureView, u32, u32)>,
+    /// Отдельный буфер глубины руки: мировой `depth` после кадра остаётся для depth-теста неймтегов.
+    hand_depth: Option<wgpu::TextureView>,
     gpu_queue: wgpu::Queue,
     color_format: wgpu::TextureFormat,
     atlas_view: wgpu::TextureView,
@@ -213,7 +244,7 @@ pub struct WorldView {
     /// Включён ли compute-рендер (флаг; без поддержки GPU остаётся `false`).
     use_compute: bool,
     vox: Option<Renderer>,
-    rects: RectTable,
+    rects: Arc<RectTable>,
     /// Секции, чьи цельные кубы лежат в `vox`.
     vox_resident: HashSet<SectionPos>,
     hiz: Option<HiZ>,
@@ -272,7 +303,16 @@ pub struct WorldView {
     pub health: f32,
     /// Входящий чат для главного потока: (текст, индикатор; None — action bar).
     pub sugg_in: Vec<(i32, i32, i32, Vec<String>)>,
+    pub tab: crate::tablist::TabList,
+    pub boss: crate::bossbar::BossBars,
+    /// Неймтеги кадра: (позиция якоря, текст, присед) и матрица проекции этого кадра.
+    nametags: Vec<([f64; 3], String, bool)>,
+    nt_view: (Mat4, [f64; 3], f32),
     pub chat_in: Vec<(ezzmc_protocol::text::Component, Option<crate::chat::Tag>)>,
+    /// Диалоги от сервера: Some — показать, None — clear_dialog.
+    pub dialog_in: Vec<Option<Box<crate::dialog::Dialog>>>,
+    /// open_sign_editor: (позиция, передняя сторона) — забирает main.
+    pub sign_in: Vec<([i32; 3], bool)>,
     lines: ezzmc_render::lines::LineDraw,
     /// F3: 3D-прицел (чёрная обводка + оси X/Y/Z); `Some(guiScale)` включает.
     /// VANILLA: DebugCrosshairRenderer.
@@ -280,6 +320,10 @@ pub struct WorldView {
     /// F1: HUD скрыт — без руки (VANILLA: GameRenderer#renderItemInHand, isHudHidden).
     pub hud_hidden: bool,
     cross_lines: [ezzmc_render::lines::LineDraw; 4],
+    /// F3+B: хитбоксы сущностей. VANILLA: EntityHitboxDebugRenderer.
+    pub show_hitboxes: bool,
+    /// Цвета: белый (бокс), красный (глаза), синий (взгляд), зелёный (части дракона).
+    hit_lines: [ezzmc_render::lines::LineDraw; 4],
     /// Блок под прицелом (контур) и жидкость под прицелом (F3); обновляются в `update`.
     pub target: Option<crate::pick::Target>,
     pub fluid_target: Option<crate::pick::Target>,
@@ -618,9 +662,11 @@ impl WorldView {
                 "splash",
                 "bubble",
                 "portal",
+                "dragon_breath",
                 "crit",
                 "explosion",
                 "poof",
+                "glow",
             ] {
                 let list: Vec<_> = rm
                     .read(&format!("assets/minecraft/particles/{name}.json"))
@@ -730,7 +776,7 @@ impl WorldView {
             &atlas_view,
             arrow_tex.as_ref().map(|d| (d.as_slice(), 32, 96)),
         );
-        let piston_draw = ezzmc_render::particledraw::ParticleDraw::new(
+        let piston_draw = ezzmc_render::particledraw::ParticleDraw::new_culled(
             &gpu.device,
             &gpu.queue,
             color,
@@ -835,6 +881,14 @@ impl WorldView {
             }
             None => (None, None),
         };
+        let item_inst = match (&entity_item_draw, &entity_glint_draw) {
+            (Some(a), Some(b)) => Some(ezzmc_render::particledraw::ItemInstDraw::new(
+                &gpu.device,
+                a,
+                b,
+            )),
+            _ => None,
+        };
         let mut vox = None;
         let mut use_compute = false;
         if opts.use_compute_renderer {
@@ -849,7 +903,7 @@ impl WorldView {
             atlas_anim,
             use_compute,
             vox,
-            rects: RectTable::default(),
+            rects: Arc::new(RectTable::default()),
             vox_resident: HashSet::default(),
             hiz: None,
             hiz_valid: false,
@@ -873,12 +927,19 @@ impl WorldView {
             preview_blocks,
             preview_items: None,
             mobs: crate::mobs::Mobs::default(),
+            now_playing: None,
             chests: crate::chest::Chests::default(),
             bells: crate::bell::Bells::default(),
+            tables: crate::enchtable::Tables::default(),
+            skulls: crate::skull::Skulls::default(),
+            shulker_boxes: crate::shulkerbox::ShulkerBoxes::default(),
+            banners: crate::banner::Banners::default(),
+            signs: crate::sign::Signs::default(),
             arrow_draw,
             piston_draw,
             shadow_draw,
             sky_darken: 0,
+            head_skulls: Vec::new(),
             player_model: ezzmc_render::humanoid::player_mesh(false),
             particles: crate::particles::ParticleEngine::new(sets),
             particle_draw,
@@ -914,6 +975,10 @@ impl WorldView {
             hand_item_draw,
             entity_item_draw,
             hand_glint_draw,
+            item_inst,
+            item_inst_map: std::collections::HashMap::new(),
+            item_inst_keep: Vec::new(),
+            item_inst_frame: Vec::new(),
             entity_glint_draw,
             fire_uv,
             hand_shown: None,
@@ -921,11 +986,13 @@ impl WorldView {
             off_h: (0.0, 0.0),
             hand_item_visible: false,
             entity_item_visible: false,
+            entity_frustum: None,
             fog_buf,
             globals_buf,
             chunk_buf,
             group0,
             depth: None,
+            hand_depth: None,
             atlas_size: (atlas.width, atlas.height),
             resident: HashSet::default(),
             arena_retry: std::collections::HashMap::default(),
@@ -964,6 +1031,12 @@ impl WorldView {
             armor: 0.0,
             max_health: 20.0,
             hardcore: false,
+            show_death_screen: true,
+            score: 0,
+            death_in: None,
+            respawn_in: false,
+            death_pending: false,
+            health_seen: false,
             invulnerable: false,
             using: None,
             attack_item: None,
@@ -988,11 +1061,21 @@ impl WorldView {
             joined: false,
             health: 20.0,
             sugg_in: Vec::new(),
+            tab: Default::default(),
+            boss: Default::default(),
+            nametags: Vec::new(),
+            nt_view: (Mat4::IDENTITY, [0.0; 3], 1.0),
             chat_in: Vec::new(),
+            dialog_in: Vec::new(),
+            sign_in: Vec::new(),
             lines: ezzmc_render::lines::LineDraw::new(&gpu.device, color, DEPTH_FORMAT),
             debug_crosshair: None,
             hud_hidden: false,
             cross_lines: std::array::from_fn(|_| {
+                ezzmc_render::lines::LineDraw::new(&gpu.device, color, DEPTH_FORMAT)
+            }),
+            show_hitboxes: false,
+            hit_lines: std::array::from_fn(|_| {
                 ezzmc_render::lines::LineDraw::new(&gpu.device, color, DEPTH_FORMAT)
             }),
             target: None,
@@ -1022,14 +1105,13 @@ impl WorldView {
     /// Атлас и таблица UV-прямоугольников → GPU (при новых прямоугольниках).
     fn sync_atlas(&mut self, gpu: &Gpu) {
         if let Some(v) = &mut self.vox {
-            if self.rects.dirty {
+            if let Some(rects) = self.rects.take_dirty() {
                 v.set_atlas(
                     gpu,
                     self.atlas_view.clone(),
                     self.lightmap.view.clone(),
-                    &self.rects.rects,
+                    &rects,
                 );
-                self.rects.dirty = false;
             }
         }
     }
@@ -1069,7 +1151,7 @@ impl WorldView {
             self.vox = Self::make_renderer(gpu, self.color_format);
         }
         self.use_compute = on && self.vox.is_some();
-        self.rects.dirty = true;
+        self.rects.mark_dirty();
         self.sync_atlas(gpu);
         self.hiz_valid = false;
         let _ = self.color_format;
@@ -1225,11 +1307,30 @@ impl WorldView {
                         min_y + height
                     );
                 }
-                NetEvt::GameMode(m) => self.game_mode = m,
+                NetEvt::GameMode(m) => {
+                    self.game_mode = m;
+                    // VANILLA: Player#hasInfiniteMaterials — креатив.
+                    self.inv.infinite_materials = m == 1;
+                }
                 NetEvt::Health(h, food, sat) => {
+                    // VANILLA: LocalPlayer#hurtTo — не первый set_health и здоровье упало → hurtTime = 10.
+                    if self.health_seen && h < self.health {
+                        self.player.hurt(None);
+                    }
+                    self.health_seen = true;
+                    self.player.dead = h <= 0.0;
                     self.health = h;
                     self.food = food;
                     self.saturation = sat;
+                    // VANILLA: Minecraft#setScreen — игрок isDeadOrDying (вход мёртвым) → DeathScreen/respawn.
+                    if h <= 0.0 && !self.death_pending {
+                        self.death_pending = true;
+                        if self.show_death_screen {
+                            self.death_in = Some(None);
+                        } else {
+                            self.send(crate::netthread::NetCmd::Respawn);
+                        }
+                    }
                 }
                 NetEvt::Experience(p, l) => {
                     // VANILLA: LocalPlayer#setExperienceValues — только смена прогресса;
@@ -1244,6 +1345,7 @@ impl WorldView {
                     }
                     self.xp_progress = p;
                     self.xp_level = l;
+                    self.inv.xp_level = l;
                 }
                 NetEvt::Effect(id, amp, dur, fl) => self.effects.update(id, amp, dur, fl),
                 NetEvt::EffectRemove(id) => self.effects.remove(id),
@@ -1260,6 +1362,30 @@ impl WorldView {
                     _ => {}
                 },
                 NetEvt::Hardcore(h) => self.hardcore = h,
+                NetEvt::ShowDeathScreen(b) => self.show_death_screen = b,
+                NetEvt::Score(s) => self.score = s,
+                NetEvt::Respawned => {
+                    self.respawn_in = true;
+                    self.death_pending = false;
+                    // VANILLA: новый LocalPlayer — flashOnSetHealth, hurtTime, deathTime сброшены.
+                    self.health_seen = false;
+                    self.player.hurt_time = 0;
+                    self.player.dead = false;
+                    self.player.death_time = 0;
+                }
+                NetEvt::CombatKill(msg) => {
+                    // VANILLA: handlePlayerCombatKill — DeathScreen либо сразу player.respawn().
+                    if let Some(prev) = self.death_in.as_mut() {
+                        *prev = msg;
+                    } else if !self.death_pending {
+                        self.death_pending = true;
+                        if self.show_death_screen {
+                            self.death_in = Some(msg);
+                        } else {
+                            self.send(crate::netthread::NetCmd::Respawn);
+                        }
+                    }
+                }
                 NetEvt::Waypoint(op, wp) => {
                     // VANILLA: ClientWaypointManager#trackWaypoint/updateWaypoint/untrackWaypoint.
                     if op == 1 {
@@ -1271,6 +1397,10 @@ impl WorldView {
                 NetEvt::UseComplete => self.complete_using(),
                 NetEvt::Chat(c, t) => self.chat_in.push((c, Some(t))),
                 NetEvt::Overlay(c) => self.chat_in.push((c, None)),
+                NetEvt::Tab(e) => self.tab.apply(*e),
+                NetEvt::Boss(id, op) => self.boss.apply(id, *op),
+                NetEvt::Dialog(d) => self.dialog_in.push(d),
+                NetEvt::OpenSign(p, f) => self.sign_in.push((p, f)),
                 NetEvt::Suggestions(id, s, l, v) => self.sugg_in.push((id, s, l, v)),
                 NetEvt::Inventory(iev) => self.inv.apply(iev),
                 NetEvt::Abilities { flags, fly_speed } => {
@@ -1304,6 +1434,9 @@ impl WorldView {
                         }
                     }
                 }
+                NetEvt::Ping(b) => {
+                    let _ = self.net.cmd.send(crate::netthread::NetCmd::Pong(b));
+                }
                 NetEvt::Motion(v) => {
                     // VANILLA: ClientPacketListener#handleSetEntityMotion → Entity#lerpMotion.
                     self.player.vel = v;
@@ -1314,8 +1447,14 @@ impl WorldView {
                     yaw,
                     pitch,
                     gen,
+                    id,
+                    state,
                 } => {
                     self.tp_gen_applied = gen;
+                    let _ = self
+                        .net
+                        .cmd
+                        .send(crate::netthread::NetCmd::AcceptTeleport(id, state));
                     // VANILLA: ClientPacketListener#handleMovePlayer — позиция сервера всегда применяется
                     // (раньше только первая: после /tp камера оставалась на старом месте и сервер
                     // перестал слать чанки).
@@ -1420,11 +1559,24 @@ impl WorldView {
                         if ty == 2000 {
                             self.particles.shoot_smoke(data, pos.x, pos.y, pos.z);
                         }
+                        // VANILLA: LevelEventHandler#playJukeboxSong / stopJukeboxSongAndNotifyNearby.
+                        if ty == 1010 {
+                            self.now_playing = Some(data);
+                        }
+                        if ty == 1010 || ty == 1011 {
+                            self.mobs.record_event([pos.x, pos.y, pos.z], ty == 1010);
+                        }
                         crate::levelsound::play(ty, [pos.x, pos.y, pos.z], data);
                     }
                     LevelEvent::BlockEvent { pos, b0, b1, .. } => {
                         // VANILLA: ChestBlockEntity#triggerEvent (крышка сундука).
                         self.chests.block_event(
+                            [pos.x, pos.y, pos.z],
+                            i32::from(b0),
+                            i32::from(b1),
+                        );
+                        // VANILLA: ShulkerBoxBlockEntity#triggerEvent (крышка шалкер-коробки).
+                        self.shulker_boxes.block_event(
                             [pos.x, pos.y, pos.z],
                             i32::from(b0),
                             i32::from(b1),
@@ -1581,6 +1733,23 @@ impl WorldView {
         for p in std::mem::take(&mut level.pearl_hits) {
             self.particles.pearl_hit(p);
         }
+        // VANILLA: LivingEntity#handleDamageEvent/Player#animateHurt → hurtTime = 10 (тряска камеры).
+        for dir in std::mem::take(&mut level.own_hurts) {
+            self.player.hurt(dir);
+        }
+        // VANILLA: LivingEntity#handleDamageEvent → playSound(getHurtSound, getSoundVolume, ±0.2).
+        for p in std::mem::take(&mut level.dragon_hurts) {
+            let pitch = (crate::levelsound::rf() - crate::levelsound::rf()) * 0.2 + 1.0;
+            crate::audio::play_at(
+                "entity.ender_dragon.hurt",
+                crate::audio::Cat::Hostile,
+                p[0],
+                p[1],
+                p[2],
+                5.0,
+                pitch,
+            );
+        }
         for (p, w, h) in std::mem::take(&mut level.death_poofs) {
             self.particles.death_poof(p, w, h);
         }
@@ -1628,6 +1797,27 @@ impl WorldView {
             for e in level.entities.iter().filter(|e| e.fuse > 0) {
                 self.particles
                     .add_smoke(e.pos[0], e.pos[1] + 0.5, e.pos[2], 0.0, 0.0, 0.0);
+            }
+            for e in level.entities.iter() {
+                let Some(n) = ezzmc_protocol::generated::r26_3::ENTITY_TYPE.get(e.ty) else {
+                    continue;
+                };
+                if *n == "glow_squid" {
+                    let (w, h) = ezzmc_world::entity_size::size(n).unwrap_or((0.8, 0.8));
+                    let r = &mut self.particles;
+                    let (w, h) = (f64::from(w), f64::from(h));
+                    let (rx, ry, rz) = r.rand3();
+                    r.add_glow_squid(
+                        e.pos[0] + w * (2.0 * rx - 1.0) * 0.6,
+                        e.pos[1] + h * ry,
+                        e.pos[2] + w * (2.0 * rz - 1.0) * 0.6,
+                    );
+                }
+                if matches!(*n, "blaze" | "enderman" | "endermite") {
+                    let (w, h) = ezzmc_world::entity_size::size(n).unwrap_or((0.6, 1.8));
+                    self.particles
+                        .mob_ambient(n, e.pos, f64::from(w), f64::from(h));
+                }
             }
             Self::entity_splashes(&mut self.particles, &mut self.wet_entities, level);
             self.ambient
@@ -1737,11 +1927,22 @@ impl WorldView {
                         }
                         let hood = Self::hood(level, pos.x, pos.z);
                         let models: Arc<dyn ModelProvider> = self.models.clone();
-                        self.pool.submit(pos, hood, models);
+                        // compute: конвертация секции в рабочем потоке, а не на рендер-потоке
+                        let post: Option<ezzmc_mesh::pool::Post> = if self.use_compute {
+                            let rects = self.rects.clone();
+                            Some(Arc::new(move |m: &ezzmc_mesh::section::SectionMesh| {
+                                Box::new(split_mesh(m, &rects)) as Box<dyn std::any::Any + Send>
+                            }))
+                        } else {
+                            None
+                        };
+                        self.pool.submit(pos, hood, models, post);
                     }
                 }
             }
         }
+        let prof_poll = std::time::Instant::now();
+        let mut prof_vox = std::time::Duration::ZERO;
         for r in self.pool.poll() {
             let pos3 = [r.pos.x, r.pos.y, r.pos.z];
             if r.mesh.is_empty() {
@@ -1758,7 +1959,14 @@ impl WorldView {
             // compute-путь: цельные кубы → Renderer, остаток (и прозрачное) → ванильная арена
             let mut rest = None;
             if let (true, Some(v)) = (self.use_compute, self.vox.as_mut()) {
-                let (conv, left) = split_mesh(&r.mesh, &mut self.rects);
+                let prof_t = std::time::Instant::now();
+                let (conv, left) = match r
+                    .extra
+                    .and_then(|e| e.downcast::<(Converted, SectionMesh)>().ok())
+                {
+                    Some(b) => *b,
+                    None => split_mesh(&r.mesh, &self.rects),
+                };
                 if v.upload_section(&gpu.queue, pos3, &conv.verts, &conv.quads) {
                     if conv.quads.is_empty() {
                         self.vox_resident.remove(&r.pos);
@@ -1771,6 +1979,7 @@ impl WorldView {
                     v.remove_section(&gpu.queue, pos3);
                     self.vox_resident.remove(&r.pos);
                 }
+                prof_vox += prof_t.elapsed();
             }
             let mesh = rest.as_ref().unwrap_or(&r.mesh);
             if mesh.is_empty() {
@@ -1803,6 +2012,8 @@ impl WorldView {
                 }
             }
         }
+        crate::mobs::prof_phase(0, "poll: всего", prof_poll.elapsed());
+        crate::mobs::prof_phase(20, "poll: vox split+upload", prof_vox);
         self.sync_atlas(gpu);
         self.update_targets();
     }
@@ -2169,12 +2380,138 @@ impl WorldView {
         self.player.auto_jump = cfg.auto_jump;
     }
 
-    /// VANILLA: GameRenderer#renderLevel — bobView только при options.bobView.
+    /// VANILLA: GameRenderer#bobHurt (всегда) · bobView (только при options.bobView).
+    /// damageTiltStrength в UI опций нет — 1.0 (по умолчанию).
     fn bob(&self, pt: f32) -> Mat4 {
+        let hurt = self.player.hurt_matrix(pt, 1.0);
         if self.cfg.bob_view {
-            self.player.bob_matrix(pt)
+            hurt * self.player.bob_matrix(pt)
         } else {
-            Mat4::IDENTITY
+            hurt
+        }
+    }
+
+    /// Сущности в поле зрения камеры (для MCP `visible`): проекция центра хитбокса по матрице последнего кадра.
+    /// `x`/`y` — доля экрана 0..1 (0,0 — левый верх); `in_view` — центр внутри кадра и впереди камеры.
+    pub fn visible_entities(&self, level: &Level) -> Vec<serde_json::Value> {
+        let (vp, cam, _) = self.nt_view;
+        let mut out = Vec::new();
+        for e in level.entities.iter() {
+            let Some(name) = ezzmc_protocol::generated::r26_3::ENTITY_TYPE.get(e.ty) else {
+                continue;
+            };
+            let (bw, bh) = ezzmc_world::entity_size::size(name)
+                .map_or((0.5, 0.5), |s| (f64::from(s.0), f64::from(s.1)));
+            let h = bh * 0.5;
+            // дистанция до ближайшей точки хитбокса (как ванильный reach), а не до центра
+            let near = (0..3)
+                .map(|i| {
+                    let (lo, hi) = if i == 1 {
+                        (e.pos[1], e.pos[1] + bh)
+                    } else {
+                        (e.pos[i] - bw / 2.0, e.pos[i] + bw / 2.0)
+                    };
+                    (cam[i].clamp(lo, hi) - cam[i]).powi(2)
+                })
+                .sum::<f64>()
+                .sqrt();
+            let d = [e.pos[0] - cam[0], e.pos[1] + h - cam[1], e.pos[2] - cam[2]];
+            let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            let c = vp * glam::Vec4::new(d[0] as f32, d[1] as f32, d[2] as f32, 1.0);
+            let (nx, ny) = if c.w > 0.0 {
+                (c.x / c.w, c.y / c.w)
+            } else {
+                (f32::NAN, f32::NAN)
+            };
+            let in_view = c.w > 0.05 && nx.abs() <= 1.0 && ny.abs() <= 1.0;
+            out.push(serde_json::json!({
+                "id": e.id,
+                "type": name,
+                "pos": e.pos,
+                "dist": (dist * 10.0).round() / 10.0,
+                "reach_dist": (near * 10.0).round() / 10.0,
+                "in_reach": near <= 3.0,
+                "in_view": in_view,
+                "behind": c.w <= 0.05,
+                "x": if nx.is_nan() { serde_json::Value::Null } else { serde_json::json!(nx * 0.5 + 0.5) },
+                "y": if ny.is_nan() { serde_json::Value::Null } else { serde_json::json!(0.5 - ny * 0.5) },
+            }));
+        }
+        out.sort_by(|a, b| {
+            a["dist"]
+                .as_f64()
+                .partial_cmp(&b["dist"].as_f64())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        out
+    }
+
+    /// VANILLA: EntityRenderer#submitNameTag — текст 0.025 блока/пиксель шрифта, по центру над якорем,
+    /// подложка 0x40000000 (отступ 1 px). Тусклый see-through слой рисуется всегда, яркий —
+    /// отдельным слоем с depth-тестом по буферу мира (`flush_nametags`).
+    pub fn draw_nametags(&self, t: &mut ezzmc_render::text::TextRenderer, gw: f32, gh: f32) {
+        let (vp, cam, fy) = self.nt_view;
+        let mut tags: Vec<(f32, f32, f32, f32, f32, &str, bool)> = Vec::new();
+        for (p, name, sneak) in &self.nametags {
+            let c = vp
+                * glam::Vec4::new(
+                    (p[0] - cam[0]) as f32,
+                    (p[1] - cam[1]) as f32,
+                    (p[2] - cam[2]) as f32,
+                    1.0,
+                );
+            if c.w <= 0.05 {
+                continue;
+            }
+            let (x, y) = ((c.x / c.w * 0.5 + 0.5) * gw, (0.5 - c.y / c.w * 0.5) * gh);
+            tags.push((
+                x,
+                y,
+                0.025 * fy * (gh / 2.0) / c.w,
+                c.w,
+                c.z / c.w,
+                name,
+                *sneak,
+            ));
+        }
+        tags.sort_by(|a, b| b.3.total_cmp(&a.3));
+        for (x, y, sc, _, z, name, sneak) in tags {
+            let w = t.text_width(name);
+            t.set_transform(Some((x, y, 0.0, sc)));
+            t.set_depth(None);
+            t.fill(-w / 2.0 - 1.0, -1.0, w / 2.0, 8.0, 0x4000_0000);
+            // VANILLA: слой see-through 0x20FFFFFF (виден всегда) + яркий 0xFFFFFFFF с depth-тестом
+            // (у приседающего яркого слоя нет).
+            t.draw_alpha(name, -w / 2.0, 0.0, 0xFFFFFF, 32.0 / 255.0);
+            if !sneak {
+                // Чуть ближе к камере, чтобы не бороться с глубиной самого якоря.
+                t.set_depth(Some((z - 1e-5).max(0.0)));
+                t.draw(name, -w / 2.0, 0.0, 0xFFFFFF, false);
+                t.set_depth(None);
+            }
+        }
+        t.set_transform(None);
+    }
+
+    /// Надписи на табличках (мировая плоскость, слой с depth-тестом; сбрасывается в `flush_nametags`).
+    pub fn draw_signs(&self, t: &mut ezzmc_render::text::TextRenderer, w: u32, h: u32) {
+        let (vp, cam, _) = self.nt_view;
+        self.signs.draw(t, vp, cam, (w as f32, h as f32));
+    }
+
+    /// Яркий слой неймтегов с depth-тестом по мировому буферу кадра (после `render`).
+    pub fn flush_nametags(
+        &self,
+        t: &mut ezzmc_render::text::TextRenderer,
+        gpu: &Gpu,
+        view: &wgpu::TextureView,
+        w: u32,
+        h: u32,
+    ) {
+        if let Some((d, dw, dh)) = &self.depth {
+            if (*dw, *dh) == (w, h) {
+                t.flush_depth(&gpu.device, &gpu.queue, view, d, DEPTH_FORMAT, w, h);
+            }
         }
     }
 
@@ -2227,6 +2564,21 @@ impl WorldView {
             view_formats: &[],
         });
         self.depth = Some((t.create_view(&Default::default()), w, h));
+        let t = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("hand depth"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        self.hand_depth = Some(t.create_view(&Default::default()));
     }
 
     /// Рисует мир в `target`. `clear` — цвет неба (M1.5 заменит настоящим небом).
@@ -2366,6 +2718,17 @@ impl WorldView {
             crate::settings::apply_parts(model, self.cfg.parts);
             setup_anim(model, parts, &state);
             model.bake(root, [255; 4], light, &mut data);
+            if let Some(n) = self
+                .inv
+                .slots
+                .get(crate::inventory::ARMOR_START)
+                .and_then(|s| s.as_ref())
+                .and_then(crate::skull::worn_name)
+            {
+                let head = model.part_matrices(root)[parts.head];
+                self.head_skulls
+                    .push((n, crate::skull::worn_root(head), light));
+            }
             let looks = crate::armor::looks_of_menu(&self.inv.slots);
             self.armor_kit.fall_flying = false;
             self.armor_kit.bake(
@@ -2413,6 +2776,7 @@ impl WorldView {
                 self.entity_item_visible = true;
             }
         }
+        crate::mobs::prof_at(5, "t до bake_remote_players");
         self.bake_remote_players(
             &mut data,
             &mut armor_data,
@@ -2422,19 +2786,98 @@ impl WorldView {
         );
         if let Ok(g) = self.net.level.lock() {
             if let Some(l) = g.as_ref() {
-                self.mobs.bake(l, self.cam, self.sky_darken, &mut shadow);
+                self.mobs.bake(
+                    l,
+                    self.cam,
+                    self.sky_darken,
+                    self.entity_frustum.as_ref(),
+                    &mut shadow,
+                );
+                for fx in std::mem::take(&mut self.mobs.dragon_fx) {
+                    self.particles
+                        .add_dragon_breath_burst(fx.head, fx.look, fx.motion);
+                }
+                let t_chest = std::time::Instant::now();
                 self.chests.bake(
                     l,
                     self.cam,
                     (self.queue.version, self.queue.block_version),
                     &mut self.mobs,
+                    self.entity_frustum.as_ref(),
                 );
+                crate::mobs::prof_phase(16, "chests.bake", t_chest.elapsed());
                 self.bells.bake(
                     l,
                     self.cam,
                     (self.queue.version, self.queue.block_version),
                     &mut self.mobs,
                 );
+                self.tables.bake(
+                    l,
+                    self.cam,
+                    (self.queue.version, self.queue.block_version),
+                    &mut self.mobs,
+                );
+                self.skulls.bake(
+                    l,
+                    self.cam,
+                    (self.queue.version, self.queue.block_version),
+                    &mut self.mobs,
+                );
+                self.shulker_boxes.bake(
+                    l,
+                    self.cam,
+                    (self.queue.version, self.queue.block_version),
+                    &mut self.mobs,
+                );
+                self.banners.bake(
+                    l,
+                    self.cam,
+                    (self.queue.version, self.queue.block_version),
+                    &mut self.mobs,
+                );
+                self.signs.bake(
+                    l,
+                    self.cam,
+                    (self.queue.version, self.queue.block_version),
+                    self.sky_darken,
+                );
+            }
+        }
+        // VANILLA: ItemInHandLayer у мобов — рука + X−90°, Y180°, translate(±1/16, 2/16, −10/16).
+        for (st, hand, light, left) in std::mem::take(&mut self.mobs.held_items) {
+            let Some((name, cx)) = crate::handitem::stack_ctx(&st) else {
+                continue;
+            };
+            let Some(rm) = self.hand_rm.as_ref() else {
+                continue;
+            };
+            let Some(mesh) = self.hand_items.as_mut().and_then(|h| h.get(rm, name, &cx)) else {
+                continue;
+            };
+            let dx = if left { -1.0 } else { 1.0 };
+            let m = hand
+                * Mat4::from_rotation_x((-90.0f32).to_radians())
+                * Mat4::from_rotation_y(180.0f32.to_radians())
+                * Mat4::from_translation(Vec3::new(dx / 16.0, 0.125, -0.625));
+            let view = if left {
+                crate::handitem::View::ThirdPersonLeft
+            } else {
+                crate::handitem::View::ThirdPerson
+            };
+            mesh.bake(
+                m,
+                view,
+                light,
+                foil_of(&st),
+                &mut item_data.0,
+                &mut item_data.1,
+            );
+            self.entity_item_visible = true;
+        }
+        for (name, root, light) in std::mem::take(&mut self.head_skulls) {
+            if let Some((m, tex)) = crate::skull::item_model(name) {
+                m.bake(root, [255; 4], light, self.mobs.out(tex));
             }
         }
         if let Some(rm) = self.hand_rm.as_ref() {
@@ -2459,6 +2902,8 @@ impl WorldView {
                 };
                 let ctor = if mask {
                     ezzmc_render::particledraw::ParticleDraw::new_mask
+                } else if tex == crate::mobs::SWIRL_TEX {
+                    ezzmc_render::particledraw::ParticleDraw::new_additive
                 } else {
                     ezzmc_render::particledraw::ParticleDraw::new
                 };
@@ -2474,14 +2919,20 @@ impl WorldView {
                     Some((rgba.as_slice(), tw, th)),
                 ))
             };
+            let t_prep = std::time::Instant::now();
             self.mobs.prepare(&gpu.device, &gpu.queue, mv, &mut make);
+            crate::mobs::prof_prepare(t_prep.elapsed());
         }
-        self.bake_item_entities(&mut item_data, &mut shadow);
+        crate::mobs::prof_at(6, "t после mobs.prepare");
+        self.bake_item_entities(&mut shadow);
+        crate::mobs::prof_at(11, "t после bake_item_entities");
         let mut arrow_data = Vec::new();
         self.bake_projectiles(&mut item_data, &mut arrow_data);
+        crate::mobs::prof_at(12, "t после bake_projectiles");
         self.arrow_draw
             .prepare_raw(&gpu.device, &gpu.queue, mv, &arrow_data);
         self.bake_flames(&mut item_data.0);
+        crate::mobs::prof_at(9, "t после bake_flames");
         self.entity_draw
             .prepare_raw(&gpu.device, &gpu.queue, mv, &data);
         self.armor_draw
@@ -2503,6 +2954,8 @@ impl WorldView {
                     self.sky_darken,
                     &mut shadow,
                 );
+                self.mobs.bake_mushrooms(&self.models, &mut pdata);
+                self.mobs.bake_antenna(&self.models, &mut pdata);
                 crate::pistonview::bake_falling(
                     l,
                     &self.models,
@@ -2522,13 +2975,64 @@ impl WorldView {
         }
         self.shadow_draw
             .prepare_raw(&gpu.device, &gpu.queue, mv, &shadow);
+        crate::mobs::prof_phase(
+            20,
+            &format!(
+                "item_data блоки {} КБ / предметы {} КБ",
+                item_data.0.len() / 1024,
+                item_data.1.len() / 1024
+            ),
+            std::time::Duration::ZERO,
+        );
+        let t_up = std::time::Instant::now();
         if let Some(d) = self.entity_item_draw.as_mut() {
             d.prepare_split(&gpu.device, &gpu.queue, mv, &item_data.0, &item_data.1);
         }
+        crate::mobs::prof_phase(21, "upload item_draw", t_up.elapsed());
+        let t_up = std::time::Instant::now();
         if let Some(d) = self.entity_glint_draw.as_mut() {
             d.set_texture_mat(crate::armor::glint_matrix(8.0));
             d.prepare_split(&gpu.device, &gpu.queue, mv, &item_data.0, &item_data.1);
         }
+        crate::mobs::prof_phase(22, "upload glint_draw", t_up.elapsed());
+        self.upload_item_inst(gpu, mv);
+    }
+
+    /// Заливает экземпляры дропов (GPU-инстансинг): новые модели — на GPU, матрицы+свет — в storage-буфер.
+    fn upload_item_inst(&mut self, gpu: &Gpu, mv: Mat4) {
+        let t = std::time::Instant::now();
+        let Some(inst) = self.item_inst.as_mut() else {
+            return;
+        };
+        let frame = std::mem::take(&mut self.item_inst_frame);
+        let mut data: Vec<f32> = Vec::new();
+        let mut ranges = Vec::with_capacity(frame.len());
+        for f in &frame {
+            let key = std::rc::Rc::as_ptr(&f.mesh);
+            let mesh = *self.item_inst_map.entry(key).or_insert_with(|| {
+                let (b, i) = f.mesh.static_mesh();
+                self.item_inst_keep.push(f.mesh.clone());
+                inst.add_mesh(&gpu.device, &b, &i)
+            });
+            let first = (data.len() / ezzmc_render::particledraw::ITEM_INST_FLOATS) as u32;
+            data.extend_from_slice(&f.normal);
+            data.extend_from_slice(&f.foil);
+            let n = (f.normal.len() + f.foil.len()) / ezzmc_render::particledraw::ITEM_INST_FLOATS;
+            ranges.push(ezzmc_render::particledraw::ItemInstRange {
+                mesh,
+                first,
+                count: n as u32,
+                foil: (f.foil.len() / ezzmc_render::particledraw::ITEM_INST_FLOATS) as u32,
+            });
+        }
+        inst.prepare(&gpu.device, &gpu.queue, bytemuck_cast(&data), &ranges);
+        if let Some(d) = self.entity_item_draw.as_ref() {
+            d.set_model_view(&gpu.queue, mv);
+        }
+        if let Some(d) = self.entity_glint_draw.as_ref() {
+            d.set_model_view(&gpu.queue, mv);
+        }
+        crate::mobs::prof_phase(23, "дропы: upload instancing", t.elapsed());
     }
 
     /// VANILLA: LivingEntityRenderer#submit — R_y(180−bodyRot)·S(−1,−1,1)·S(0.9375)·T(0,−1.501,0),
@@ -2902,7 +3406,7 @@ impl WorldView {
         }
     }
 
-    fn bake_item_entities(&mut self, item_data: &mut (Vec<u8>, Vec<u8>), shadow: &mut Vec<u8>) {
+    fn bake_item_entities(&mut self, shadow: &mut Vec<u8>) {
         use ezzmc_world::noise::LegacyRandom;
         let Some(item_ty) = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
             .iter()
@@ -2917,6 +3421,7 @@ impl WorldView {
             light: (u8, u8),
             stack: ezzmc_protocol::item::ItemStack,
         }
+        let t_collect = std::time::Instant::now();
         let mut drops = Vec::new();
         {
             let Ok(guard) = self.net.level.lock() else {
@@ -2941,6 +3446,14 @@ impl WorldView {
                     + (pos[2] - self.cam[2]).powi(2);
                 if d2 > 64.0 * 64.0 {
                     continue;
+                }
+                // VANILLA: EntityRenderer#shouldRender — AABB (0.25×0.25) .inflate(0.5) против Frustum.
+                if let Some(fr) = self.entity_frustum.as_ref() {
+                    let lo = [pos[0] - 0.625, pos[1] - 0.5, pos[2] - 0.625];
+                    let hi = [pos[0] + 0.625, pos[1] + 0.75, pos[2] + 0.625];
+                    if !fr.is_visible(lo, hi) {
+                        continue;
+                    }
                 }
                 crate::entityshadow::bake(
                     level,
@@ -2992,6 +3505,16 @@ impl WorldView {
                 });
             }
         }
+        crate::mobs::prof_phase(17, "дропы: сбор (тень+свет)", t_collect.elapsed());
+        let t_bake = std::time::Instant::now();
+        let n_drops = drops.len();
+        let _prof_bake = ProfDrop(t_bake, n_drops);
+        // Фаза 1 (последовательно): меши и матрицы всех копий каждого дропа.
+        self.item_inst_frame.clear();
+        let mut mesh_ix: std::collections::HashMap<*const crate::handitem::HandMesh, usize> =
+            std::collections::HashMap::new();
+        let mut bounds: Vec<(f32, f32)> = Vec::new();
+        let mut frame: Vec<ItemInstFrame> = Vec::new();
         for d in drops {
             let Some(rm) = self.hand_rm.as_ref() else {
                 return;
@@ -3004,7 +3527,18 @@ impl WorldView {
             };
             self.entity_item_visible = true;
             let foil = foil_of(&d.stack);
-            let (min_y, depth) = mesh.ground_bounds();
+            let mi = *mesh_ix
+                .entry(std::rc::Rc::as_ptr(&mesh))
+                .or_insert_with(|| {
+                    bounds.push(mesh.ground_bounds());
+                    frame.push(ItemInstFrame {
+                        mesh: mesh.clone(),
+                        normal: Vec::new(),
+                        foil: Vec::new(),
+                    });
+                    frame.len() - 1
+                });
+            let (min_y, depth) = bounds[mi];
             let bob_offs =
                 LegacyRandom::new(i64::from(d.id)).next_float() * std::f32::consts::PI * 2.0;
             let bob = (d.age / 10.0 + bob_offs).sin() * 0.1 + 0.1;
@@ -3023,30 +3557,22 @@ impl WorldView {
                 _ => 1,
             };
             let mut rng = LegacyRandom::new(i64::from(d.stack.item));
-            let view = crate::handitem::View::Ground;
+            let ground = frame[mi].mesh.ground_matrix();
+            let mut push = |m: Mat4| {
+                let f = &mut frame[mi];
+                let v = if foil { &mut f.foil } else { &mut f.normal };
+                v.extend_from_slice(&(m * ground).to_cols_array());
+                v.extend_from_slice(&[f32::from(d.light.0), f32::from(d.light.1), 0.0, 0.0]);
+            };
             if depth > 0.0625 {
-                mesh.bake(
-                    base,
-                    view,
-                    d.light,
-                    foil,
-                    &mut item_data.0,
-                    &mut item_data.1,
-                );
+                push(base);
                 for _ in 1..count {
                     let o = Vec3::new(
                         (rng.next_float() * 2.0 - 1.0) * 0.15,
                         (rng.next_float() * 2.0 - 1.0) * 0.15,
                         (rng.next_float() * 2.0 - 1.0) * 0.15,
                     );
-                    mesh.bake(
-                        base * Mat4::from_translation(o),
-                        view,
-                        d.light,
-                        foil,
-                        &mut item_data.0,
-                        &mut item_data.1,
-                    );
+                    push(base * Mat4::from_translation(o));
                 }
             } else {
                 let off_z = depth * 1.5;
@@ -3056,7 +3582,7 @@ impl WorldView {
                         0.0,
                         -(off_z * (count - 1) as f32 / 2.0),
                     ));
-                mesh.bake(m, view, d.light, foil, &mut item_data.0, &mut item_data.1);
+                push(m);
                 m *= Mat4::from_translation(Vec3::new(0.0, 0.0, off_z));
                 for _ in 1..count {
                     let o = Vec3::new(
@@ -3064,18 +3590,12 @@ impl WorldView {
                         (rng.next_float() * 2.0 - 1.0) * 0.075,
                         0.0,
                     );
-                    mesh.bake(
-                        m * Mat4::from_translation(o),
-                        view,
-                        d.light,
-                        foil,
-                        &mut item_data.0,
-                        &mut item_data.1,
-                    );
+                    push(m * Mat4::from_translation(o));
                     m *= Mat4::from_translation(Vec3::new(0.0, 0.0, off_z));
                 }
             }
         }
+        self.item_inst_frame = frame;
     }
 
     /// Стрелы и брошенные предметы. VANILLA: ArrowRenderer#submit (Y yRot−90, Z xRot, ArrowModel);
@@ -3208,6 +3728,7 @@ impl WorldView {
         let pt = level.partial_tick();
         self.remote_anims
             .retain(|id, _| level.entities.map.contains_key(id));
+        self.nametags.clear();
         for e in level.entities.iter().filter(|e| e.ty == player_ty) {
             let anim = self.remote_anims.entry(e.id).or_default();
             anim.swimming = e.swimming();
@@ -3255,6 +3776,21 @@ impl WorldView {
                 continue;
             }
             let crouching = e.crouching() && !swimming;
+            // VANILLA: AvatarRenderer#shouldShowName — дальность 64 (присед 32), не у невидимого;
+            // якорь EntityAttachment.NAME_TAG = высота хитбокса + 0.5 (1.8 / присед 1.5).
+            {
+                let d2 = (pos[0] - self.cam[0]).powi(2)
+                    + (pos[1] - self.cam[1]).powi(2)
+                    + (pos[2] - self.cam[2]).powi(2);
+                let range = if crouching { 32.0 } else { 64.0 };
+                if d2 < range * range {
+                    if let Some(name) = self.tab.profiles.get(&e.uuid) {
+                        let h = if crouching { 1.5 } else { 1.8 };
+                        let anchor = [pos[0], pos[1] + h + 0.5, pos[2]];
+                        self.nametags.push((anchor, name.clone(), crouching));
+                    }
+                }
+            }
             let mut state = anim.humanoid_state(pt, crouching);
             if level.riders.vehicle_of.contains_key(&e.id) {
                 state.passenger = true;
@@ -3282,6 +3818,11 @@ impl WorldView {
             crate::settings::apply_parts(model, 0x7F);
             setup_anim(model, parts, &state);
             model.bake(root, [255; 4], light, data);
+            if let Some(n) = e.armor[0].as_ref().and_then(crate::skull::worn_name) {
+                let head = model.part_matrices(root)[parts.head];
+                self.head_skulls
+                    .push((n, crate::skull::worn_root(head), light));
+            }
             let looks = crate::armor::looks_of_entity(&e.armor);
             self.armor_kit.fall_flying = e.fall_flying();
             self.armor_kit.bake(
@@ -3329,6 +3870,7 @@ impl WorldView {
         h: u32,
         clear: [f64; 3],
     ) {
+        let t_rv = std::time::Instant::now();
         // TODO-149: цвет неба по времени суток и погоде (sky_state); пока без диска/светил,
         // поэтому он же служит фоном и цветом тумана.
         // Цвет фона/тумана теперь даёт compute_fog (FogRenderer); тут — небо и lightmap.
@@ -3462,6 +4004,12 @@ impl WorldView {
         // glam perspective_rh: глубина клипа 0..1 (wgpu).
         let proj = Mat4::perspective_rh(self.fov_deg().to_radians(), aspect, NEAR, far);
         let mv = look_matrix(self.yaw, self.pitch);
+        // VANILLA: bobHurt/bobView входят в проекцию мира — надписи/неймтеги обязаны их разделять.
+        self.nt_view = (
+            proj * self.bob((self.tick_acc / 0.05) as f32) * mv,
+            self.cam,
+            proj.y_axis.y,
+        );
         // VANILLA: CloudRenderer#prepare (cloudHeight 192.33, cloudRange 64 (GraphicsPreset fancy), FANCY).
         if let Ok(Some(l)) = self.net.level.lock().as_deref() {
             let cc = ezzmc_render::sky::cloud_color(l.day_time, l.rain_level, l.thunder());
@@ -3545,8 +4093,12 @@ impl WorldView {
             self.lightning
                 .prepare(&gpu.device, &gpu.queue, mv, self.cam, &bolts);
         }
+        crate::mobs::prof_at(7, "t до prepare_hand");
         self.prepare_hand(gpu, aspect, far);
         // VANILLA: AvatarRenderer — игрок виден только от 3-го лица (в 1-м лице камера в голове).
+        let mut fr = Frustum::new(proj, mv, true);
+        fr.prepare(self.cam[0], self.cam[1], self.cam[2]);
+        self.entity_frustum = Some(fr);
         self.prepare_player_model(gpu, mv);
         let q = &gpu.queue;
         q.write_buffer(
@@ -3623,6 +4175,7 @@ impl WorldView {
         let Some(depth) = self.depth.as_ref().map(|d| d.0.clone()) else {
             return;
         };
+        crate::mobs::prof_at(10, "t до encoder");
         let compute = self.use_compute && self.vox.is_some();
         let view_proj = proj * mv;
         let mut enc = gpu
@@ -3643,7 +4196,7 @@ impl WorldView {
                 prev_view_proj: pvp,
                 prev_pos: ppos,
             };
-            let hiz = if self.hiz_valid {
+            let hiz = if self.hiz_valid && std::env::var("EZZMC_NOHIZ").is_err() {
                 self.hiz.as_ref()
             } else {
                 None
@@ -3717,21 +4270,7 @@ impl WorldView {
             // глубину, скрывает предметы под ней).
             for &layer in first_layers {
                 if !compute && layer == RenderLayer::Translucent {
-                    self.entity_draw.draw(&mut pass);
-                    self.armor_draw.draw(&mut pass);
-                    self.glint_draw.draw(&mut pass);
-                    self.mobs.draw(&mut pass);
-                    self.arrow_draw.draw(&mut pass);
-                    self.piston_draw.draw(&mut pass);
-                    self.shadow_draw.draw(&mut pass);
-                    if let (true, Some(d)) = (self.entity_item_visible, &self.entity_item_draw) {
-                        d.draw(&mut pass);
-                        if let Some(g) = &self.entity_glint_draw {
-                            g.draw(&mut pass);
-                        }
-                    }
-                    pass.set_bind_group(0, &self.group0, &[]);
-                    pass.set_bind_group(1, &self.group1, &[]);
+                    self.draw_entities(&mut pass);
                 }
                 if self.arena.draw_count(layer) == 0 {
                     continue;
@@ -3739,23 +4278,20 @@ impl WorldView {
                 pass.set_pipeline(self.pipes.pipeline(layer));
                 self.arena.draw(&mut pass, layer);
             }
-            if !compute {
-                // VANILLA: облака рисуются после прозрачного слоя террейна.
-                self.lightning.draw(&mut pass);
-                self.clouds.draw(&mut pass);
-                self.weather.draw(&mut pass);
-                self.particle_draw.draw(&mut pass);
-                // VANILLA: Hud#extractVignette (опция vignette:true) — поверх мира.
-                self.vignette.prepare(&gpu.queue, self.vignette_b);
-                self.vignette.draw(&mut pass);
+            if compute {
+                // Compute: Solid/Cutout уже нарисованы — сущности и частицы тут же (до воды).
+                self.draw_entities(&mut pass);
+            } else {
+                self.draw_post_world(&gpu.queue, &mut pass);
             }
         }
+        let nohiz = std::env::var("EZZMC_NOHIZ").is_ok();
         if compute {
-            if let Some(z) = &self.hiz {
+            if let Some(z) = self.hiz.as_ref().filter(|_| !nohiz) {
                 z.build(&gpu.device, &mut enc, &depth);
             }
             let rest = [RenderLayer::Translucent, RenderLayer::Tripwire];
-            if rest.iter().any(|l| self.arena.draw_count(*l) > 0) {
+            {
                 let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("world translucent"),
                     color_attachments: &[Some(color_att(wgpu::LoadOp::Load))],
@@ -3771,6 +4307,7 @@ impl WorldView {
                     pass.set_pipeline(self.pipes.pipeline(layer));
                     self.arena.draw(&mut pass, layer);
                 }
+                self.draw_post_world(&gpu.queue, &mut pass);
             }
             self.prev = Some((view_proj, self.cam));
             self.hiz_valid = true;
@@ -3821,6 +4358,44 @@ impl WorldView {
         } else {
             self.lines.clear();
         }
+        if self.show_hitboxes {
+            // VANILLA: EntityHitboxDebugRenderer#showHitboxes — белый бокс, красный слой на высоте глаз
+            // (LivingEntity), зелёные части дракона, синий вектор взгляда длиной 2.
+            let segs = self.hitbox_segments();
+            let colors = [
+                [1.0, 1.0, 1.0, 1.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0, 1.0],
+                [0.25, 1.0, 0.0, 1.0],
+            ];
+            let width = (w as f32 / 1920.0 * 2.5).max(2.5);
+            for i in 0..4 {
+                self.hit_lines[i].set(
+                    &gpu.queue,
+                    view_proj,
+                    [w as f32, h as f32],
+                    colors[i],
+                    width,
+                    &segs[i],
+                );
+            }
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hitboxes"),
+                color_attachments: &[Some(color_att(wgpu::LoadOp::Load))],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            for l in &self.hit_lines {
+                l.draw(&mut pass);
+            }
+        }
         if let (Some(gs), 0) = (self.debug_crosshair, self.perspective) {
             // VANILLA: DebugCrosshairRenderer#render — оси мира на расстоянии 1 перед глазами,
             // длина 0.01·guiScale; чёрная обводка (ширина 4) под цветными осями (ширина 2).
@@ -3860,7 +4435,7 @@ impl WorldView {
                     view: &depth,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Discard,
+                        store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
                 }),
@@ -3872,10 +4447,18 @@ impl WorldView {
         }
         if (self.hand_visible || self.hand_item_visible) && !self.hud_hidden {
             // VANILLA: рука рисуется после мира с очищенной глубиной.
+            let hand_depth = self.hand_depth.as_ref().unwrap_or(&depth);
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hand"),
                 color_attachments: &[Some(color_att(wgpu::LoadOp::Load))],
-                depth_stencil_attachment: Some(depth_att(wgpu::LoadOp::Clear(1.0))),
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: hand_depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
                 ..Default::default()
             });
             pass.set_bind_group(0, &self.group0, &[]);
@@ -3890,11 +4473,162 @@ impl WorldView {
                 }
             }
         }
+        crate::mobs::prof_at(8, "t до submit");
+        let t_sub = std::time::Instant::now();
         gpu.queue.submit([enc.finish()]);
+        crate::mobs::prof_phase(2, "submit", t_sub.elapsed());
+        crate::mobs::prof_phase(1, "render_view всего", t_rv.elapsed());
         let _ = &self.lightmap;
     }
 
+    /// VANILLA: KeyboardHandler (F3+B) — переключить хитбоксы и написать в чат «[Debug]: Hitboxes: shown/hidden».
+    pub fn toggle_hitboxes(&mut self) {
+        self.show_hitboxes = !self.show_hitboxes;
+        let mut c = ezzmc_protocol::text::Component::text("[Debug]:");
+        c.style.color = Some(0xFFFF55);
+        c.style.bold = Some(true);
+        c.siblings.push(ezzmc_protocol::text::Component::text(
+            if self.show_hitboxes {
+                " Hitboxes: shown"
+            } else {
+                " Hitboxes: hidden"
+            },
+        ));
+        self.chat_in.push((c, Some(crate::chat::Tag::System)));
+    }
+
+    /// VANILLA: EntityHitboxDebugRenderer — отрезки (относительно камеры) по цветам:
+    /// [бокс, глаза, взгляд, части дракона]; ближайшие сущности в пределах 64 блоков.
+    fn hitbox_segments(&self) -> [Vec<([f32; 3], [f32; 3])>; 4] {
+        let mut out: [Vec<([f32; 3], [f32; 3])>; 4] = Default::default();
+        let Ok(g) = self.net.level.lock() else {
+            return out;
+        };
+        let Some(l) = g.as_ref() else {
+            return out;
+        };
+        let pt = f64::from(l.partial_tick());
+        let rel = |p: [f64; 3]| {
+            [
+                (p[0] - self.cam[0]) as f32,
+                (p[1] - self.cam[1]) as f32,
+                (p[2] - self.cam[2]) as f32,
+            ]
+        };
+        let mut ents: Vec<_> = l
+            .entities
+            .map
+            .values()
+            .map(|e| {
+                let d = [
+                    e.pos[0] - self.cam[0],
+                    e.pos[1] - self.cam[1],
+                    e.pos[2] - self.cam[2],
+                ];
+                (d[0] * d[0] + d[1] * d[1] + d[2] * d[2], e)
+            })
+            .filter(|(d, _)| *d < 64.0 * 64.0)
+            .collect();
+        ents.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, e) in ents.into_iter().take(60) {
+            let Some((lo, hi)) = e.hitbox() else { continue };
+            let Some(name) = ezzmc_protocol::generated::r26_3::ENTITY_TYPE.get(e.ty) else {
+                continue;
+            };
+            let cur = [
+                e.prev_pos[0] + (e.pos[0] - e.prev_pos[0]) * pt,
+                e.prev_pos[1] + (e.pos[1] - e.prev_pos[1]) * pt,
+                e.prev_pos[2] + (e.pos[2] - e.prev_pos[2]) * pt,
+            ];
+            let sh = [cur[0] - e.pos[0], cur[1] - e.pos[1], cur[2] - e.pos[2]];
+            let b = [
+                lo[0] + sh[0],
+                lo[1] + sh[1],
+                lo[2] + sh[2],
+                hi[0] + sh[0],
+                hi[1] + sh[1],
+                hi[2] + sh[2],
+            ];
+            let off = rel([0.0; 3]);
+            out[0].extend(ezzmc_render::lines::box_edges(&b, off));
+            // VANILLA-UNSURE: eyeHeight = 0.85·высота (EntityDimensions#defaultEyeHeight), без точечных
+            // переопределений типов; игрок — по позе.
+            let height = hi[1] - lo[1];
+            let eye = if *name == "player" {
+                if e.flags & 16 != 0 {
+                    0.4
+                } else if e.flags & 1 != 0 {
+                    1.27
+                } else {
+                    1.62
+                }
+            } else {
+                height * 0.85
+            };
+            if is_living_type(name) {
+                let eb = [b[0], b[1] + eye - 0.01, b[2], b[3], b[1] + eye + 0.01, b[5]];
+                out[1].extend(ezzmc_render::lines::box_edges(&eb, off));
+            }
+            if *name == "ender_dragon" {
+                for (_, pb) in self
+                    .mobs
+                    .dragon_parts()
+                    .iter()
+                    .filter(|(id, _)| (e.id + 1..=e.id + 8).contains(id))
+                {
+                    out[3].extend(ezzmc_render::lines::box_edges(pb, off));
+                }
+            }
+            let yaw = if is_living_type(name) {
+                e.head_yaw
+            } else {
+                e.yaw
+            };
+            let d = look_dir(yaw, e.pitch);
+            let eye_pos = [cur[0], b[1] + eye, cur[2]];
+            let a = rel(eye_pos);
+            out[2].push((a, [a[0] + d[0] * 2.0, a[1] + d[1] * 2.0, a[2] + d[2] * 2.0]));
+        }
+        out
+    }
+
     /// VANILLA: FogRenderer#setupFog — тип среды по камере, атрибуты биома, цвет/дистанции.
+    /// Сущности/частицы слоя OPAQUE — до прозрачного террейна (общий код ванильного и compute-пути).
+    fn draw_entities(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.entity_draw.draw(pass);
+        self.armor_draw.draw(pass);
+        self.glint_draw.draw(pass);
+        self.mobs.draw(pass);
+        self.arrow_draw.draw(pass);
+        self.piston_draw.draw(pass);
+        self.shadow_draw.draw(pass);
+        if let (true, Some(d)) = (self.entity_item_visible, &self.entity_item_draw) {
+            if let (Some(i), Some(g)) = (&self.item_inst, &self.entity_glint_draw) {
+                i.draw(pass, d, g);
+            }
+            d.draw(pass);
+            if let Some(g) = &self.entity_glint_draw {
+                g.draw(pass);
+            }
+        }
+        // VANILLA: частицы слоя OPAQUE (почти все) рисуются ДО прозрачного террейна —
+        // вода просвечивает над ними (glow кальмара под водой).
+        self.particle_draw.draw(pass);
+        pass.set_bind_group(0, &self.group0, &[]);
+        pass.set_bind_group(1, &self.group1, &[]);
+    }
+
+    /// Молнии, облака, погода, виньетка — после прозрачного слоя террейна.
+    fn draw_post_world(&mut self, queue: &wgpu::Queue, pass: &mut wgpu::RenderPass<'_>) {
+        // VANILLA: облака рисуются после прозрачного слоя террейна.
+        self.lightning.draw(pass);
+        self.clouds.draw(pass);
+        self.weather.draw(pass);
+        // VANILLA: Hud#extractVignette (опция vignette:true) — поверх мира.
+        self.vignette.prepare(queue, self.vignette_b);
+        self.vignette.draw(pass);
+    }
+
     fn compute_fog(&mut self, aspect: f32, clear: [f64; 3]) -> FogUniform {
         use ezzmc_render::fog::{setup_fog, FogAttrs, FogInput};
         let now = std::time::Instant::now();
@@ -4027,6 +4761,25 @@ impl WorldView {
         if let Some(id) = self.entity_target {
             // VANILLA: Minecraft#startAttack — ATTACK_RANGE предмета: вне [min, max] удара нет.
             if self.attack_range_ok() {
+                // VANILLA: Player#attack → RemotePlayer#hurtClient = true → causeExtraKnockback:
+                // удар спринтом (knockbackAttack: sprinting && attackStrengthScale(0.5) > 0.9) гасит свою
+                // скорость ×0.6 по XZ и сбрасывает спринт. Для остальных сущностей hurtClient = false.
+                // VANILLA-UNSURE: чары Knockback/оружие (getKnockback) не учтены, как и baseDamage > 0.
+                let remote_player = self.with_level(|l| {
+                    l.entities.iter().find(|e| e.id == id).is_some_and(|e| {
+                        ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+                            .get(e.ty)
+                            .is_some_and(|n| *n == "player")
+                    })
+                });
+                if remote_player == Some(true)
+                    && self.player.sprinting
+                    && self.attack_strength(0.5) > 0.9
+                {
+                    self.player.vel[0] *= 0.6;
+                    self.player.vel[2] *= 0.6;
+                    self.player.sprinting = false;
+                }
                 let _ = self
                     .net
                     .cmd
@@ -4289,6 +5042,16 @@ impl WorldView {
         self.inv.predict_quick_craft(slots, ty);
         let changed = self.changed_since(&before);
         self.send_click_claims(state_id, OUTSIDE, t | 2, QUICK_CRAFT, changed);
+    }
+
+    /// VANILLA: AnvilScreen#onNameChanged → ServerboundRenameItemPacket.
+    pub fn send_rename_item(&self, name: String) {
+        self.send(crate::netthread::NetCmd::RenameItem(name));
+    }
+
+    /// VANILLA: BundleMouseActions#toggleSelectedBundleItem.
+    pub fn send_select_bundle(&self, slot: i32, index: i32) {
+        self.send(crate::netthread::NetCmd::SelectBundle(slot, index));
     }
 
     pub fn send_container_close(&self) {
@@ -4933,7 +5696,26 @@ impl WorldView {
 
     fn dig_aim(&self) -> (Option<crate::dig::Aim>, crate::dig::Body) {
         use crate::dig::{Aim, Body};
-        let aim = self.target.filter(|_| self.have_pos).map(|t| Aim {
+        // VANILLA: Minecraft#tick → pick(1.0F) в конце тика; handleKeybinds следующего тика ломает по этому hitResult
+        // (глаза и поворот последнего отправленного пакета движения). Кадровый `self.target` (интерполированная
+        // камера, свежий yaw/pitch) расходится с лучом сервера → Grim RotationBreak при махании камерой.
+        let tick_hit = if self.entity_target.is_some() {
+            None
+        } else {
+            self.place_target
+        };
+        // VANILLA: startAttack/continueDestroyBlock смотрят на ТЕКУЩЕЕ состояние блока: уже сломанный (предсказание
+        // клиента) — воздух, цели нет (иначе START_DESTROY по воздуху → Grim AirLiquidBreak).
+        let tick_hit = tick_hit.and_then(|mut t| {
+            let g = self.net.level.lock().ok()?;
+            let st = g.as_ref()?.chunks.block(t.pos[0], t.pos[1], t.pos[2]);
+            if st.is_air() {
+                return None;
+            }
+            t.state = st;
+            Some(t)
+        });
+        let aim = tick_hit.filter(|_| self.have_pos).map(|t| Aim {
             pos: t.pos,
             face: t.face,
             state: t.state,
@@ -5028,8 +5810,10 @@ impl WorldView {
                 crate::blocksound::hit(a.state.name(), a.pos[0], a.pos[1], a.pos[2]);
             }
         }
-        // VANILLA: continueAttack → player.swing(MAIN_HAND) каждый тик удержания (пакет Punch здесь не реализован).
-        if std::mem::take(&mut self.digger.swing) {
+        // VANILLA: continueAttack → player.swing(MAIN_HAND) каждый тик удержания (+ ServerboundSwingPacket
+        // ПОСЛЕ PlayerAction этого тика; без него Grim NoSwingBreak на STOP_DESTROY_BLOCK).
+        let swung = std::mem::take(&mut self.digger.swing);
+        if swung {
             self.player.swing();
             // VANILLA: continueDestroyBlock → ParticleEngine#crack каждый тик.
             let guard = self.net.level.lock().unwrap_or_else(|e| e.into_inner());
@@ -5044,6 +5828,9 @@ impl WorldView {
             }
         }
         self.apply_dig(r);
+        if swung {
+            let _ = self.net.cmd.send(crate::netthread::NetCmd::Swing);
+        }
     }
 
     /// VANILLA: Minecraft#startAttack по блоку — каждый клик = startDestroyBlock (без destroyDelay).
@@ -5064,7 +5851,13 @@ impl WorldView {
             if let Some(l) = g.as_mut() {
                 for (i, c) in cmds.into_iter().enumerate() {
                     // VANILLA: startPrediction на каждую команду; ломаемый блок — под sequence последней.
-                    let seq = l.start_prediction();
+                    // VANILLA: MultiPlayerGameMode — ABORT_DESTROY_BLOCK шлётся без startPrediction (sequence 0);
+                    // prediction только у START/STOP (иначе Grim BadPacketsH: expected=0).
+                    let seq = if c.action == crate::dig::ABORT_DESTROY_BLOCK {
+                        0
+                    } else {
+                        l.start_prediction()
+                    };
                     if i + 1 == n {
                         for p in &broken {
                             // VANILLA: MultiPlayerGameMode#destroyBlock → Level#levelEvent(2001) (эффект ломания у самого игрока)
@@ -5108,8 +5901,7 @@ impl WorldView {
             }
         }
         if !broken.is_empty() {
-            let _ = self.net.cmd.send(crate::netthread::NetCmd::Swing);
-            self.player.swing();
+            // Свинг не здесь: его шлют startAttack (клик) и continueAttack (удержание), по одному на вызов.
             for p in broken {
                 self.queue.mark_block(p[0], p[1], p[2]);
             }
@@ -5143,9 +5935,10 @@ impl WorldView {
         let mut ent = None;
         if self.have_pos && self.game_mode != 3 {
             let reach = self.entity_reach();
+            let parts = self.mobs.dragon_parts();
             if let Ok(g) = self.net.level.lock() {
                 if let Some(l) = g.as_ref() {
-                    if let Some((id, dist)) = crate::pick::raycast_entity(l, o, d, reach) {
+                    if let Some((id, dist)) = crate::pick::raycast_entity(l, o, d, reach, &parts) {
                         let block_d = t.map_or(f64::INFINITY, |b| {
                             let v = [b.hit[0] - o[0], b.hit[1] - o[1], b.hit[2] - o[2]];
                             (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
@@ -5586,5 +6379,26 @@ mod block_use_tests {
         assert!(block_use_kind("potted_oak_sapling") == Some(BlockUse::Click));
         assert!(block_use_kind("iron_door").is_none());
         assert!(block_use_kind("stone").is_none());
+    }
+}
+
+/// PROF: время запекания дропов и их число (по Drop).
+/// Экземпляры одной модели за кадр (20 f32: матрица + свет): обычные, затем с блеском.
+struct ItemInstFrame {
+    mesh: std::rc::Rc<crate::handitem::HandMesh>,
+    normal: Vec<f32>,
+    foil: Vec<f32>,
+}
+
+fn bytemuck_cast(v: &[f32]) -> &[u8] {
+    // SAFETY: f32 → u8 того же буфера, длина ×4, выравнивание 1.
+    unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), std::mem::size_of_val(v)) }
+}
+
+struct ProfDrop(std::time::Instant, usize);
+impl Drop for ProfDrop {
+    fn drop(&mut self) {
+        crate::mobs::prof_phase(18, "дропы: запекание мешей", self.0.elapsed());
+        crate::mobs::prof_phase(19, &format!("дропов {}", self.1), std::time::Duration::ZERO);
     }
 }

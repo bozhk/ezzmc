@@ -90,10 +90,20 @@ pub const VIDEO: &[Def] = &[
     d("entityShadows", "options.entityShadows", Toggle, "true"),
     // VANILLA: Options#cutoutLeaves («See-Through Leaves»).
     d("cutoutLeaves", "options.cutoutLeaves", Toggle, "true"),
+    // Не ваниль: путь отрисовки кубов (compute: куллинг/Hi-Z на GPU + MDI; выкл — ванильный Packed).
+    d(
+        "computeRenderer",
+        "options.ezzmc.computeRenderer",
+        Toggle,
+        "true",
+    ),
 ];
 
+/// Индекс «Compute Renderer» в [`VIDEO`].
+pub const COMPUTE_RENDERER: usize = 12;
+
 /// Индекс «See-Through Leaves» в [`VIDEO`].
-pub const CUTOUT_LEAVES: usize = 10;
+pub const CUTOUT_LEAVES: usize = 11;
 
 pub const SOUND: &[Def] = &[
     d(
@@ -437,5 +447,15 @@ mod tests {
         assert_eq!(o2.get(&VIDEO[0]), "8");
         assert_eq!(o2.kv[0].0, "foo");
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn compute_renderer_index() {
+        assert_eq!(VIDEO[COMPUTE_RENDERER].key, "computeRenderer");
+    }
+
+    #[test]
+    fn cutout_leaves_index() {
+        assert_eq!(VIDEO[CUTOUT_LEAVES].key, "cutoutLeaves");
     }
 }

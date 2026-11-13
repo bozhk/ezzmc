@@ -4,26 +4,35 @@ mod armor;
 mod atlasanim;
 mod audio;
 mod avatar;
+mod banner;
+mod beaconscreen;
 mod bell;
+mod berscan;
 mod blocksound;
 mod boat;
+mod bookview;
+mod bossbar;
 mod charpreview;
 mod chat;
 mod chatnet;
 mod chest;
 mod clipboard;
 mod control;
+mod control_world;
 mod cooldown;
 #[allow(dead_code)] // 230: модель готова, в netthread/WorldView ещё не подключена
 mod creative_data;
 mod creativescreen;
 mod cursor;
 mod debugscreen;
+mod dialog;
 mod dig;
 mod display;
 mod editbox;
 mod effects;
 mod effectshud;
+mod enchbook;
+mod enchtable;
 mod entityshadow;
 mod flammable;
 mod focus;
@@ -42,6 +51,8 @@ mod itemphys;
 mod keymap;
 mod levelsound;
 mod log;
+mod loomscreen;
+mod merchantscreen;
 mod mobs;
 mod music;
 mod netthread;
@@ -56,7 +67,11 @@ mod playersound;
 mod sandbox;
 mod screenshot;
 mod settings;
+mod shulkerbox;
+mod sign;
+mod skull;
 mod support;
+mod tablist;
 mod threads;
 mod timer;
 mod toolspeed;
@@ -82,6 +97,7 @@ struct App {
     /// Последние применённые настройки (vsync, fullscreen, ClientInformation).
     applied_vsync: Option<bool>,
     applied_fs: Option<bool>,
+    applied_compute: Option<bool>,
     /// VANILLA: Window#quitShortcuts (Options#quitShortcuts) + состояние Alt/F4 для onQuitRequested.
     quit_shortcuts: bool,
     allow_cursor: bool,
@@ -143,11 +159,15 @@ struct App {
     /// Курсор уже захвачен после входа в мир.
     was_joined: bool,
     char_preview: Option<charpreview::CharPreview>,
+    ench_book: Option<enchbook::EnchBook>,
+    anvil: invscreen::AnvilName,
     /// Показан креатив-экран (а не InventoryMenu/контейнер).
     inv_creative: bool,
     creative: creativescreen::State,
     /// Сообщение над хотбаром (VANILLA: Gui#setOverlayMessage, 60 тиков): текст и срок.
     overlay: Option<(String, std::time::Instant)>,
+    /// Hud#animateOverlayMessageColor (радужный цвет «Now Playing»).
+    overlay_anim: bool,
     chat: chat::Chat,
     chat_cfg: chat::Cfg,
     chat_colors: bool,
@@ -175,6 +195,7 @@ struct App {
     /// `--control`: сокет управления для агента (см. `control.rs`).
     control: Option<control::Control>,
     control_pending: Vec<control::Pending>,
+    control_task: Option<control_world::Task>,
     shot_reply: Option<std::sync::mpsc::Sender<serde_json::Value>>,
 }
 
@@ -194,6 +215,18 @@ impl App {
     }
 
     /// Центр слота в физических пикселях окна (для управления агентом).
+    /// Точка меню (GUI-px от левого верхнего угла) → пиксели окна.
+    pub fn menu_px(&self, x: f32, y: f32) -> Option<(f64, f64)> {
+        let v = self.view.as_ref()?;
+        let (gw, gh, _, _) = self.gui_cursor()?;
+        let lay = invscreen::layout(&v.inv);
+        let k = f64::from(self.text.as_ref()?.scale());
+        Some((
+            f64::from(lay.left(gw) + x) * k,
+            f64::from(lay.top(gh) + y) * k,
+        ))
+    }
+
     pub fn slot_px(&self, slot: usize) -> Option<(f64, f64)> {
         let v = self.view.as_ref()?;
         let (gw, gh, _, _) = self.gui_cursor()?;
@@ -207,6 +240,24 @@ impl App {
     }
 
     pub fn inv_cursor_moved(&mut self) {
+        // VANILLA: LoomScreen#mouseDragged — перетаскивание скроллбара.
+        if self.inv_open && !self.inv_creative {
+            if let (Some((_, gh, _, my)), Some(v)) = (self.gui_cursor(), &mut self.view) {
+                if v.inv.open.as_ref().is_some_and(|o| o.scrolling) {
+                    let lay = invscreen::layout(&v.inv);
+                    loomscreen::drag(&mut v.inv, lay.top(gh), my);
+                }
+                if v.inv
+                    .open
+                    .as_ref()
+                    .and_then(|o| o.trades.as_ref())
+                    .is_some_and(|t| t.dragging)
+                {
+                    let lay = invscreen::layout(&v.inv);
+                    merchantscreen::drag(&mut v.inv, lay.top(gh), my);
+                }
+            }
+        }
         if self.inv_creative && self.inv_open {
             if let Some((gw, gh, mx, my)) = self.gui_cursor() {
                 if self.creative.scrolling {
@@ -415,12 +466,105 @@ impl App {
         true
     }
 
+    /// Ввод в поле имени наковальни. `true` — событие поглощено.
+    /// VANILLA: AnvilScreen#keyPressed (EditBox получает всё, кроме Esc; E не закрывает экран).
+    fn anvil_input(&mut self, event: &winit::event::KeyEvent) -> bool {
+        let Some(v) = self.view.as_mut() else {
+            return false;
+        };
+        if !invscreen::layout(&v.inv).is_anvil() {
+            return false;
+        }
+        let Some(o) = v.inv.open.as_ref() else {
+            return false;
+        };
+        if !invscreen::AnvilName::editable(o) {
+            return false;
+        }
+        let PhysicalKey::Code(k) = event.physical_key else {
+            return false;
+        };
+        if k == KeyCode::Escape {
+            return false;
+        }
+        use editbox::Move;
+        let ctrl =
+            self.input.key_down(KeyCode::ControlLeft) || self.input.key_down(KeyCode::ControlRight);
+        let shift =
+            self.input.key_down(KeyCode::ShiftLeft) || self.input.key_down(KeyCode::ShiftRight);
+        let e = &mut self.anvil.edit;
+        let mut changed = false;
+        match k {
+            KeyCode::Backspace => changed = e.erase(-1, ctrl),
+            KeyCode::Delete => changed = e.erase(1, ctrl),
+            KeyCode::ArrowLeft => e.move_cursor(Move::Left, ctrl, shift),
+            KeyCode::ArrowRight => e.move_cursor(Move::Right, ctrl, shift),
+            KeyCode::Home => e.move_cursor(Move::Home, false, shift),
+            KeyCode::End => e.move_cursor(Move::End, false, shift),
+            KeyCode::KeyA if ctrl => e.select_all(),
+            KeyCode::KeyC if ctrl => {
+                let t = e.selected_text();
+                self.clipboard.set(&t);
+            }
+            KeyCode::KeyX if ctrl => {
+                let t = e.cut();
+                self.clipboard.set(&t);
+                changed = true;
+            }
+            KeyCode::KeyV if ctrl => {
+                let t = self.clipboard.get();
+                changed = e.type_text(&t);
+            }
+            _ if ctrl => {}
+            _ => {
+                if let Some(t) = &event.text {
+                    changed = e.type_text(t.as_str());
+                }
+            }
+        }
+        if changed {
+            if let Some(n) = self.anvil.changed(&self.item_lang, o) {
+                v.send_rename_item(n);
+            }
+        }
+        true
+    }
+
     pub fn inv_mouse(&mut self, pressed: bool, right: bool, left: bool, middle: bool) {
         if self.inv_creative {
             self.creative_mouse(pressed, right, left, middle);
             return;
         }
+        // VANILLA: BookViewScreen#mouseClicked — кнопки книги и ПКМ по тексту (кафедра).
+        if let (Some((gw, _, mx, my)), Some(v), Some(t)) =
+            (self.gui_cursor(), &self.view, self.text.as_ref())
+        {
+            if invscreen::layout(&v.inv).is_lectern() {
+                if pressed && (right || left) {
+                    if let Some(o) = &v.inv.open {
+                        let may_build = v.game_mode < 2;
+                        match bookview::click(t, &self.item_lang, o, gw, mx, my, right, may_build) {
+                            bookview::Act::Pass => {}
+                            bookview::Act::Send(c) => v.send(c),
+                            bookview::Act::Close(cmd) => {
+                                if let Some(c) = cmd {
+                                    v.send(netthread::NetCmd::Command(
+                                        c.strip_prefix('/').unwrap_or(&c).to_owned(),
+                                    ));
+                                }
+                                self.close_inv(true);
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+        }
         if !pressed {
+            if let Some(v) = &mut self.view {
+                loomscreen::release(&mut v.inv);
+                merchantscreen::release(&mut v.inv);
+            }
             // VANILLA: AbstractContainerScreen#mouseReleased — конец перетаскивания или отложенный клик.
             let gc = self.gui_cursor();
             if let (Some((ty, slots, active)), Some(v)) = (self.drag.take(), &mut self.view) {
@@ -454,6 +598,50 @@ impl App {
                 let double = matches!((slot, self.last_slot_click), (Some(a), Some((b, t)))
                             if a == b && now.duration_since(t).as_millis() < 250);
                 self.last_slot_click = if double { None } else { slot.map(|s| (s, now)) };
+                // VANILLA: LoomScreen#mouseClicked — выбор узора, захват скроллбара.
+                if lay.is_loom() && !right {
+                    let mut out = Vec::new();
+                    let act =
+                        loomscreen::click(&mut v.inv, &mut out, lay.left(gw), lay.top(gh), mx, my);
+                    for c in out {
+                        v.send(c);
+                    }
+                    if matches!(act, loomscreen::Act::Handled) {
+                        return;
+                    }
+                }
+                // VANILLA: MerchantScreen — строки предложений (SelectTrade) и скроллбар.
+                if lay.is_merchant() && !right {
+                    let mut out = Vec::new();
+                    let act = merchantscreen::click(
+                        &mut v.inv,
+                        &mut out,
+                        lay.left(gw),
+                        lay.top(gh),
+                        mx,
+                        my,
+                    );
+                    for c in out {
+                        v.send(c);
+                    }
+                    if matches!(act, merchantscreen::Act::Handled) {
+                        return;
+                    }
+                }
+                // VANILLA: BeaconScreen — кнопки эффектов/подтверждения/отмены (левая кнопка).
+                if lay.is_beacon() && !right {
+                    match beaconscreen::click(&mut v.inv, lay.left(gw), lay.top(gh), mx, my) {
+                        beaconscreen::Act::Pass => {}
+                        beaconscreen::Act::Handled => return,
+                        beaconscreen::Act::Close(c) => {
+                            if let Some(c) = c {
+                                v.send(c);
+                            }
+                            self.close_inv(true);
+                            return;
+                        }
+                    }
+                }
                 if let Some(c) =
                     invscreen::on_click(&v.inv, &lay, gw, gh, mx, my, right, shift, double)
                 {
@@ -520,40 +708,34 @@ impl App {
                 self.mouse.maintain(w);
             }
         }
-        if dead && !self.dead_screen {
+        // VANILLA: handlePlayerCombatKill → DeathScreen; handleRespawn → закрыть.
+        let (hardcore, score) = (v.hardcore, v.score);
+        let opened = self.view.as_mut().and_then(|v| v.death_in.take());
+        let respawned = self
+            .view
+            .as_mut()
+            .is_some_and(|v| std::mem::take(&mut v.respawn_in));
+        if let (Some(cause), Some(g)) = (opened, &mut self.gui) {
+            g.open_death(cause.as_ref(), hardcore, score);
             self.dead_screen = true;
+            self.menu_active = true;
             if self.inv_open {
                 self.close_inv(true);
             }
+            self.chat.open = false;
             self.input.release_all();
             self.keys.release_all();
             if let Some(w) = &self.window {
                 self.mouse.release(w);
             }
-        } else if !dead && self.dead_screen {
+        } else if respawned && self.dead_screen {
+            if let Some(g) = &mut self.gui {
+                g.close_death();
+            }
             self.dead_screen = false;
+            self.menu_active = false;
             if let Some(w) = &self.window {
                 self.mouse.grab(w);
-            }
-        }
-    }
-
-    /// Кнопка «Respawn» экрана смерти (GUI-координаты): 200×20 по центру, y = 72.
-    fn respawn_button(&self) -> Option<(f32, f32, f32, f32)> {
-        let (gw, _, _, _) = self.gui_cursor()?;
-        let x = gw / 2.0 - 100.0;
-        Some((x, 72.0, x + 200.0, 92.0))
-    }
-
-    fn dead_click(&mut self) {
-        let (Some((x0, y0, x1, y1)), Some((_, _, mx, my))) =
-            (self.respawn_button(), self.gui_cursor())
-        else {
-            return;
-        };
-        if mx >= x0 && mx < x1 && my >= y0 && my < y1 {
-            if let Some(v) = &self.view {
-                v.send(netthread::NetCmd::Respawn);
             }
         }
     }
@@ -781,6 +963,7 @@ impl App {
                 msg,
                 std::time::Instant::now() + std::time::Duration::from_secs(3),
             ));
+            self.overlay_anim = false;
         }
     }
 
@@ -929,6 +1112,17 @@ impl App {
                 self.applied_vsync = Some(vsync);
             }
         }
+        // Не ваниль: опция computeRenderer ↔ путь отрисовки (живое переключение).
+        let want = o.get(&ui::options::VIDEO[ui::options::COMPUTE_RENDERER]) == "true";
+        if self.applied_compute != Some(want) {
+            if let (Some(v), Some(g)) = (&mut self.view, &self.gpu) {
+                if v.compute_renderer_enabled() != want {
+                    v.set_compute_renderer(g, want);
+                    tracing::info!("{}", v.render_label());
+                }
+                self.applied_compute = Some(want);
+            }
+        }
         // VANILLA: Options#fullscreen ↔ окно (F11 пишет опцию обратно).
         let fs = o.get(&ui::options::VIDEO[5]) == "true";
         if self.applied_fs != Some(fs) {
@@ -1036,6 +1230,54 @@ fn load_text_renderer(
         let ascent = p.get("ascent").and_then(|h| h.as_f64()).unwrap_or(7.0) as f32;
         images.push((img.to_rgba8(), img.width, img.height, rows, height, ascent));
     }
+    // VANILLA: font/alt.json (шрифт зачарований «Standard Galactic Alphabet», ascii_sga.png).
+    // Символы переносятся в область частного использования U+E000+c (`invscreen::alt`).
+    if let Some(alt) = rm
+        .read("assets/minecraft/font/alt.json")
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+    {
+        for p in alt
+            .get("providers")
+            .and_then(|p| p.as_array())
+            .into_iter()
+            .flatten()
+        {
+            if p.get("type").and_then(|t| t.as_str()) != Some("bitmap") {
+                continue;
+            }
+            let Some(file) = p.get("file").and_then(|f| f.as_str()) else {
+                continue;
+            };
+            let file = file.trim_start_matches("minecraft:");
+            let Some(img) = rm
+                .read(&format!("assets/minecraft/textures/{file}"))
+                .and_then(|b| ezzmc_assets::texture::Image::decode_png(&b).ok())
+            else {
+                continue;
+            };
+            let rows: Vec<Vec<char>> = p
+                .get("chars")
+                .and_then(|c| c.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|r| r.as_str())
+                .map(|s| {
+                    s.chars()
+                        .map(|c| {
+                            if c == '\0' {
+                                c
+                            } else {
+                                crate::invscreen::alt_char(c)
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            let height = p.get("height").and_then(|h| h.as_f64()).unwrap_or(8.0) as f32;
+            let ascent = p.get("ascent").and_then(|h| h.as_f64()).unwrap_or(7.0) as f32;
+            images.push((img.to_rgba8(), img.width, img.height, rows, height, ascent));
+        }
+    }
     let sheets: Vec<_> = images
         .iter()
         .map(
@@ -1079,6 +1321,8 @@ impl App {
             .chain(hud::SPRITES)
             .chain(hudbars::SPRITES)
             .chain(effectshud::SPRITES)
+            .chain(tablist::SPRITES)
+            .chain(bossbar::SPRITES)
         {
             let full = format!("assets/minecraft/textures/gui/{path}.png");
             let from_store = if name.starts_with("panorama") {
@@ -1103,6 +1347,24 @@ impl App {
                     name.starts_with("panorama"),
                 ),
                 None => tracing::warn!("текстура GUI не найдена: {full}"),
+            }
+        }
+        // Текстуры флага баннера (превью/кнопки ткацкого станка): textures/entity/banner/<имя>.png.
+        for n in loomscreen::texture_names() {
+            let full = format!("assets/minecraft/textures/entity/banner/{n}.png");
+            if let Some(i) = rm
+                .read(&full)
+                .and_then(|d| ezzmc_assets::texture::Image::decode_png(&d).ok())
+            {
+                p.add_texture(
+                    &g.device,
+                    &g.queue,
+                    &format!("lmb_{n}"),
+                    &i.to_rgba8(),
+                    i.width,
+                    i.height,
+                    false,
+                );
             }
         }
         // Иконки эффектов лежат вне gui/: textures/mob_effect/*.png.
@@ -1245,6 +1507,8 @@ impl App {
             let mut ro = worldview::RenderOptions::from_env_args();
             let o = ui::options::Options::load(std::path::Path::new("./options.txt"));
             ro.cutout_leaves = o.get(&ui::options::VIDEO[ui::options::CUTOUT_LEAVES]) == "true";
+            ro.use_compute_renderer |=
+                o.get(&ui::options::VIDEO[ui::options::COMPUTE_RENDERER]) == "true";
             ro
         }) {
             Ok(v) => self.view = Some(v),
@@ -1311,20 +1575,6 @@ impl ApplicationHandler for App {
                     el.exit();
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } if self.dead_screen => {
-                if event.state == ElementState::Pressed
-                    && event.physical_key == PhysicalKey::Code(KeyCode::Enter)
-                {
-                    if let Some(v) = &self.view {
-                        v.send(netthread::NetCmd::Respawn);
-                    }
-                }
-            }
-            WindowEvent::MouseInput { state, .. } if self.dead_screen => {
-                if state == ElementState::Pressed {
-                    self.dead_click();
-                }
-            }
             WindowEvent::KeyboardInput { event, .. } if self.chat.open => {
                 if let PhysicalKey::Code(k) = event.physical_key {
                     self.input.on_key(k, event.state);
@@ -1358,8 +1608,8 @@ impl ApplicationHandler for App {
                     self.keys
                         .on_input(keymap::Input::Key(k), event.state == ElementState::Pressed);
                 }
-                let eaten =
-                    event.state == ElementState::Pressed && self.creative_search_input(&event);
+                let eaten = event.state == ElementState::Pressed
+                    && (self.creative_search_input(&event) || self.anvil_input(&event));
                 // VANILLA: Screen#keyPressed приходит и на автоповтор; для остальных клавиш повтор
                 // бессмыслен (обмен хотбара идемпотентен), поэтому повторяем только выброс.
                 let repeat_drop = |a: &Self, k: KeyCode| {
@@ -1371,13 +1621,28 @@ impl ApplicationHandler for App {
                     (event.physical_key, event.state, eaten)
                 {
                     if !event.repeat || repeat_drop(self, k) {
+                        // VANILLA: LecternScreen — не AbstractContainerScreen: E не закрывает, ←/→ листают.
+                        let lectern = self
+                            .view
+                            .as_ref()
+                            .is_some_and(|v| invscreen::layout(&v.inv).is_lectern());
                         let close = k == KeyCode::Escape
-                            || self
-                                .keys
-                                .get("key.inventory")
-                                .is_some_and(|b| b.key == keymap::Input::Key(k));
+                            || (!lectern
+                                && self
+                                    .keys
+                                    .get("key.inventory")
+                                    .is_some_and(|b| b.key == keymap::Input::Key(k)));
                         if close {
                             self.close_inv(true);
+                        } else if lectern {
+                            if let (Some(v), true) = (
+                                &self.view,
+                                matches!(k, KeyCode::ArrowLeft | KeyCode::ArrowRight),
+                            ) {
+                                if let Some(o) = &v.inv.open {
+                                    v.send(bookview::arrow(o, k == KeyCode::ArrowRight));
+                                }
+                            }
                         } else {
                             self.inv_key(k);
                         }
@@ -1391,12 +1656,31 @@ impl ApplicationHandler for App {
                 self.inv_mouse(state == ElementState::Pressed, right, left, middle);
             }
             WindowEvent::MouseWheel { delta, .. } if self.inv_open => {
+                let gc = self.gui_cursor();
                 if self.inv_creative {
                     let y = match delta {
                         winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                         winit::event::MouseScrollDelta::PixelDelta(p) => p.y,
                     };
                     self.creative.scroll(y);
+                } else if let Some(v) = &mut self.view {
+                    let y = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                    };
+                    loomscreen::wheel(&mut v.inv, y);
+                    merchantscreen::wheel(&mut v.inv, y);
+                    // VANILLA: BundleMouseActions#onMouseScrolled — колесо над бандлом выбирает предмет.
+                    if let Some((gw, gh, mx, my)) = gc {
+                        let lay = invscreen::layout(&v.inv);
+                        if let Some(sl) = lay.slot_at(gw, gh, mx, my) {
+                            if let Some(st) = invscreen::slot_stack_pub(&v.inv, sl) {
+                                if let Some((a, b)) = tooltip::bundle_wheel(sl, st, y) {
+                                    v.send_select_bundle(a, b);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if self.menu_active => {
@@ -1416,16 +1700,42 @@ impl ApplicationHandler for App {
                     }
                     if let Some(g) = &mut self.gui {
                         if let PhysicalKey::Code(k) = event.physical_key {
+                            use editbox::Move;
+                            use ui::UiKey;
+                            let ctrl = self.input.key_down(KeyCode::ControlLeft)
+                                || self.input.key_down(KeyCode::ControlRight);
+                            let shift = self.input.key_down(KeyCode::ShiftLeft)
+                                || self.input.key_down(KeyCode::ShiftRight);
+                            // VANILLA: EditBox#keyPressed — Ctrl+A/C/X/V, стрелки, Home/End, Delete, Backspace.
                             match k {
-                                KeyCode::Escape => g.on_key(ui::UiKey::Escape),
-                                KeyCode::Enter | KeyCode::NumpadEnter => g.on_key(ui::UiKey::Enter),
-                                KeyCode::Backspace => g.on_key(ui::UiKey::Backspace),
-                                KeyCode::Tab => g.on_key(ui::UiKey::Tab),
+                                KeyCode::Escape => g.on_key(UiKey::Escape),
+                                KeyCode::Enter | KeyCode::NumpadEnter => g.on_key(UiKey::Enter),
+                                KeyCode::Backspace => g.on_key(UiKey::Erase(-1, ctrl)),
+                                KeyCode::Delete => g.on_key(UiKey::Erase(1, ctrl)),
+                                KeyCode::Tab if shift => g.on_key(UiKey::BackTab),
+                                KeyCode::Tab => g.on_key(UiKey::Tab),
+                                KeyCode::ArrowLeft => {
+                                    g.on_key(UiKey::Move(Move::Left, ctrl, shift))
+                                }
+                                KeyCode::ArrowRight => {
+                                    g.on_key(UiKey::Move(Move::Right, ctrl, shift))
+                                }
+                                KeyCode::Home => g.on_key(UiKey::Move(Move::Home, false, shift)),
+                                KeyCode::End => g.on_key(UiKey::Move(Move::End, false, shift)),
+                                KeyCode::KeyA if ctrl => g.on_key(UiKey::SelectAll),
+                                KeyCode::KeyC if ctrl => g.on_key(UiKey::Copy),
+                                KeyCode::KeyX if ctrl => g.on_key(UiKey::Cut),
+                                KeyCode::KeyV if ctrl => g.on_text(&self.clipboard.get()),
                                 _ => {}
                             }
+                            if !ctrl {
+                                if let Some(t) = &event.text {
+                                    g.on_text(t.as_str());
+                                }
+                            }
                         }
-                        if let Some(t) = &event.text {
-                            g.on_text(t.as_str());
+                        if let Some(t) = g.take_clip() {
+                            self.clipboard.set(&t);
                         }
                     }
                 }
@@ -1457,6 +1767,12 @@ impl ApplicationHandler for App {
                         // VANILLA: KeyboardHandler — F3+H переключает расширенные подсказки (advanced tooltips).
                         if k == KeyCode::KeyH && self.f3_pending && !event.repeat {
                             tooltip::ADVANCED.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        // VANILLA: KeyboardHandler — F3+B переключает хитбоксы сущностей.
+                        if k == KeyCode::KeyB && self.f3_pending && !event.repeat {
+                            if let Some(v) = &mut self.view {
+                                v.toggle_hitboxes();
+                            }
                         }
                         self.f3_pending = false;
                     }
@@ -1521,19 +1837,18 @@ impl ApplicationHandler for App {
                                 v.cycle_perspective();
                             }
                         }
-                        // Отладка (не ваниль): F8 — переключить compute-рендер (сравнение FPS).
-                        if event.state == ElementState::Pressed && k == KeyCode::F8 {
-                            if let (Some(v), Some(g)) = (&mut self.view, &self.gpu) {
+                        // Не ваниль: key.renderMode (F8) — compute ↔ ванильный путь; пишет опцию,
+                        // применяет apply_settings.
+                        if event.state == ElementState::Pressed
+                            && self
+                                .keys
+                                .get("key.renderMode")
+                                .is_some_and(|b| b.key == keymap::Input::Key(k))
+                        {
+                            if let (Some(v), Some(g)) = (&self.view, &mut self.gui) {
                                 let on = !v.compute_renderer_enabled();
-                                v.set_compute_renderer(g, on);
-                                tracing::info!(
-                                    "compute-рендер: {}",
-                                    if v.compute_renderer_enabled() {
-                                        "вкл"
-                                    } else {
-                                        "выкл"
-                                    }
-                                );
+                                g.opts.set("computeRenderer", on.to_string());
+                                g.opts.save();
                             }
                         }
                         if event.state == ElementState::Pressed && !self.menu_active {
@@ -1681,6 +1996,20 @@ impl ApplicationHandler for App {
                         self.init_world();
                     }
                 }
+                // VANILLA: ClientCommonPacketListenerImpl#onDisconnect → DisconnectedScreen.
+                if let Some(why) = self.view.as_ref().and_then(|v| v.status.clone()) {
+                    if let Some(g) = &mut self.gui {
+                        g.open_disconnected(why);
+                        self.view = None;
+                        self.connect = None;
+                        self.menu_active = true;
+                        self.input.release_all();
+                        self.keys.release_all();
+                        if let Some(w) = &self.window {
+                            self.mouse.release(w);
+                        }
+                    }
+                }
                 self.apply_settings();
                 // VANILLA: Window#selectCursor — запрос прошлого кадра, при allowCursorChanges=false стрелка.
                 if let Some(w) = &self.window {
@@ -1763,6 +2092,44 @@ impl ApplicationHandler for App {
                             v.send(netthread::NetCmd::Suggest(id, text));
                         }
                     }
+                    for (p, front) in std::mem::take(&mut v.sign_in) {
+                        let info =
+                            v.net.level.lock().ok().and_then(|g| {
+                                g.as_ref().and_then(|l| sign::edit_info(l, p, front))
+                            });
+                        if let (Some((name, lines, color)), Some(g)) = (info, &mut self.gui) {
+                            g.open_sign(p, front, &name, &lines, color);
+                            self.menu_active = true;
+                            self.input.release_all();
+                            self.keys.release_all();
+                            if let Some(w) = &self.window {
+                                self.mouse.release(w);
+                            }
+                        }
+                    }
+                    for d in std::mem::take(&mut v.dialog_in) {
+                        if let Some(g) = &mut self.gui {
+                            match d {
+                                Some(d) => {
+                                    g.open_dialog(d);
+                                    self.menu_active = true;
+                                    self.input.release_all();
+                                    self.keys.release_all();
+                                    if let Some(w) = &self.window {
+                                        self.mouse.release(w);
+                                    }
+                                }
+                                None => {
+                                    if g.close_dialog() {
+                                        self.menu_active = false;
+                                        if let Some(w) = &self.window {
+                                            self.mouse.grab(w);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     for (c, tag) in std::mem::take(&mut v.chat_in) {
                         match tag {
                             Some(tag) => self.chat.add(
@@ -1783,6 +2150,7 @@ impl ApplicationHandler for App {
                                     std::time::Instant::now()
                                         + std::time::Duration::from_millis(3000),
                                 ));
+                                self.overlay_anim = false;
                             }
                         }
                     }
@@ -1984,13 +2352,24 @@ impl ApplicationHandler for App {
                         }
                     }
                 }
-                match sc.acquire(g) {
+                let t_acq = std::time::Instant::now();
+                let acq = sc.acquire(g);
+                mobs::prof_phase(3, "acquire", t_acq.elapsed());
+                mobs::prof_frame();
+                match acq {
                     Acquire::Frame(f) => {
                         let cap = std::mem::take(&mut self.want_screenshot);
                         let sky = [0.47, 0.65, 1.0];
-                        let shot = if let (Some(v), false) = (&mut self.view, self.menu_active) {
+                        // VANILLA: под DeathScreen Gui рисует хотбар/бары/чат — идём игровой веткой, экран смерти дорисовывает GUI.
+                        let mut death_act = ui::Action::None;
+                        let shot = if let (Some(v), true) =
+                            (&mut self.view, !self.menu_active || self.dead_screen)
+                        {
                             let text = &mut self.text;
                             let chat = &mut self.chat;
+                            let item_lang = &self.item_lang;
+                            let tab_down =
+                                self.keys.get("key.playerlist").is_some_and(|b| b.is_down());
                             let mut hud = self.painter.as_mut().zip(self.hud_rm.as_ref());
                             let inv_open = self.inv_open;
                             let dead = self.dead_screen;
@@ -2067,11 +2446,32 @@ impl ApplicationHandler for App {
                             };
                             let (loc_cam, loc_yaw, loc_pitch, loc_fov) =
                                 (v.cam, v.yaw, v.pitch, v.fov_deg());
+                            // VANILLA: Hud#setNowPlaying — translatable record.nowPlaying, 60 тиков, анимация цвета.
+                            if let Some(id) = v.now_playing.take() {
+                                if let Some(d) = tooltip::song_description(&self.item_lang, id) {
+                                    let msg = self
+                                        .item_lang
+                                        .tr("record.nowPlaying")
+                                        .replacen("%s", &d, 1)
+                                        .replacen("%1$s", &d, 1);
+                                    self.overlay = Some((
+                                        msg,
+                                        std::time::Instant::now()
+                                            + std::time::Duration::from_millis(3000),
+                                    ));
+                                    self.overlay_anim = true;
+                                }
+                            }
+                            let overlay_anim = self.overlay_anim;
                             let overlay = self
                                 .overlay
                                 .as_ref()
                                 .filter(|(_, t)| std::time::Instant::now() < *t)
-                                .map(|(m, _)| m.clone());
+                                .map(|(m, t)| {
+                                    let left =
+                                        t.saturating_duration_since(std::time::Instant::now());
+                                    (m.clone(), left.as_secs_f32() * 20.0)
+                                });
                             let drag_prev = self
                                 .drag
                                 .as_ref()
@@ -2091,6 +2491,12 @@ impl ApplicationHandler for App {
                                 }
                             }
                             let preview = &mut self.char_preview;
+                            if self.ench_book.is_none() {
+                                self.ench_book =
+                                    hud.as_ref().map(|(_, rm)| enchbook::EnchBook::new(rm));
+                            }
+                            let ench_book = &mut self.ench_book;
+                            let anvil = &mut self.anvil;
                             let lang = &self.item_lang;
                             let cur = self.cursor_px;
                             let fps = self.fps;
@@ -2098,12 +2504,14 @@ impl ApplicationHandler for App {
                                 .gui
                                 .as_ref()
                                 .map(|g| g.opts.f32(&ui::options::VIDEO[3]) as u32);
+                            let dead_now = self.dead_screen;
+                            let mut gui_dead = self.gui.as_mut().filter(|_| dead_now);
                             let debug_on = self.debug_on;
                             let hid = self.hud_hidden;
                             let fps_limit = self.fps_limit.limit();
                             let pitch = self.pitch;
                             let vsync = std::env::var("EZZMC_VSYNC").map_or(true, |v| v != "0");
-                            sc.draw_and_present(g, f, cap, |view, w, h| {
+                            let shot_in = sc.draw_and_present(g, f, cap, |view, w, h| {
                                 // VANILLA: 3D-прицел виден при открытом F3 (DebugScreenEntries#THREE_DIMENSIONAL_CROSSHAIR).
                                 v.hud_hidden = hid;
                                 v.debug_crosshair = (debug_on && !hid).then(|| {
@@ -2159,7 +2567,7 @@ impl ApplicationHandler for App {
                                                 v.cfg.left_handed,
                                             );
                                         }
-                                        if survival && !dead && !hid {
+                                        if survival && !hid {
                                             hudbars::draw_health(p, hs, &stats, gwf, ghf);
                                         }
                                         if !inv_open && !hid {
@@ -2167,28 +2575,52 @@ impl ApplicationHandler for App {
                                             let icons = effectshud::layout(v.effects.iter(), gwf);
                                             effectshud::draw(p, &icons);
                                         }
-                                        if loc_bar && !dead && !hid {
+                                        if loc_bar && !hid {
                                             hudbars::draw_locator(
                                                 p, &loc_wps, loc_cam, loc_yaw, loc_pitch, loc_fov,
                                                 gwf, ghf,
                                             );
-                                        } else if survival && !dead && !hid {
+                                        } else if survival && !hid {
                                             hudbars::draw_xp_bar(p, &stats, gwf, ghf);
                                         }
                                         p.flush(&g.device, &g.queue, view, w, h, None);
-                                        if survival && !dead && !hid {
+                                        if survival && !hid {
                                             hudbars::draw_xp_level(t, stats.xp_level, gwf, ghf);
                                         }
-                                        if let (Some(m), false) = (&overlay, hid) {
-                                            // VANILLA: Gui#extractOverlayMessage — над хотбаром (gh − 68).
-                                            let mw = t.text_width(m);
-                                            t.draw(
-                                                m,
-                                                gwf / 2.0 - mw / 2.0,
-                                                ghf - 68.0,
-                                                0xFFFFFF,
-                                                true,
-                                            );
+                                        if !hid {
+                                            v.draw_nametags(t, gwf, ghf);
+                                            v.draw_signs(t, w, h);
+                                        }
+                                        if let (Some((m, ticks)), false) = (&overlay, hid) {
+                                            // VANILLA: Hud#extractOverlayMessage — над хотбаром (gh − 68),
+                                            // alpha = t·255/20, при animate цвет hsv(t/50, 0.7, 0.6).
+                                            let alpha = ((ticks * 255.0 / 20.0) as i32).min(255);
+                                            if alpha > 0 {
+                                                let rgb = if overlay_anim {
+                                                    hsv_rgb(ticks / 50.0, 0.7, 0.6)
+                                                } else {
+                                                    0xFF_FFFF
+                                                };
+                                                let a = alpha as f32 / 255.0;
+                                                let mw = t.text_width(m);
+                                                let (x, y) =
+                                                    (gwf / 2.0 - mw / 2.0, ghf - 68.0 - 4.0);
+                                                t.fill(
+                                                    x - 2.0,
+                                                    y - 2.0,
+                                                    x + mw + 2.0,
+                                                    y + 11.0,
+                                                    ((alpha / 2) as u32) << 24,
+                                                );
+                                                t.draw_alpha(
+                                                    m,
+                                                    x + 1.0,
+                                                    y + 1.0,
+                                                    (rgb >> 2) & 0x3F_3F3F,
+                                                    a,
+                                                );
+                                                t.draw_alpha(m, x, y, rgb, a);
+                                            }
                                         }
                                         if !hid {
                                             let (ccfg, tick) = (self.chat_cfg, self.tick_count);
@@ -2205,41 +2637,62 @@ impl ApplicationHandler for App {
                                                 {
                                                     cursor::request(cursor::Kind::PointingHand);
                                                 }
+                                                let tip = chat.hover_lines(
+                                                    t,
+                                                    gwf,
+                                                    ghf,
+                                                    mx,
+                                                    my,
+                                                    &ccfg,
+                                                    &self.item_lang,
+                                                );
+                                                tooltip::draw_colored(
+                                                    t,
+                                                    &tip,
+                                                    cur.0 as f32 / t.scale() as f32,
+                                                    cur.1 as f32 / t.scale() as f32,
+                                                    gwf,
+                                                    ghf,
+                                                );
                                             }
                                         }
-                                        if dead {
-                                            // VANILLA: DeathScreen — красное затемнение, «You died!», кнопка Respawn.
-                                            let k = f64::from(t.scale());
-                                            let (mx, my) = ((cur.0 / k) as f32, (cur.1 / k) as f32);
-                                            t.fill(0.0, 0.0, gwf, ghf, 0x6050_0000);
-                                            let bx = gwf / 2.0 - 100.0;
-                                            let hot = mx >= bx
-                                                && mx < bx + 200.0
-                                                && (72.0..92.0).contains(&my);
-                                            t.fill(bx - 1.0, 71.0, bx + 201.0, 93.0, 0xFF00_0000);
-                                            t.fill(
-                                                bx,
-                                                72.0,
-                                                bx + 200.0,
-                                                92.0,
-                                                if hot { 0xFF7080D0 } else { 0xFF6C6C6C },
-                                            );
-                                            let tw = t.text_width("You died!");
-                                            t.draw(
-                                                "You died!",
-                                                gwf / 2.0 - tw / 2.0,
-                                                30.0,
-                                                0xFFFFFF,
-                                                true,
-                                            );
-                                            let rw = t.text_width("Respawn");
-                                            t.draw(
-                                                "Respawn",
-                                                gwf / 2.0 - rw / 2.0,
-                                                78.0,
-                                                0xFFFFFF,
-                                                true,
-                                            );
+                                        // VANILLA: BossHealthOverlay — полосы сверху (текст, затем спрайты).
+                                        if !hid && !v.boss.is_empty() {
+                                            let bars = v.boss.draw(t, item_lang, gwf, ghf);
+                                            t.flush(&g.device, &g.queue, view, w, h);
+                                            t.begin(w, h);
+                                            p.begin(t.scale());
+                                            for (s, x, y, bw) in bars {
+                                                p.blit(
+                                                    s,
+                                                    x,
+                                                    y,
+                                                    bw,
+                                                    5.0,
+                                                    [0.0, 0.0, bw / 182.0, 1.0],
+                                                    0xFFFFFFFF,
+                                                );
+                                            }
+                                            p.flush(&g.device, &g.queue, view, w, h, None);
+                                        }
+                                        // VANILLA: Hud#extractTabList — пока зажат key.playerlist (не при открытом чате/инвентаре).
+                                        if tab_down && !hid && !inv_open && !chat.open && !dead {
+                                            let icons = v.tab.draw(t, item_lang, gwf);
+                                            t.flush(&g.device, &g.queue, view, w, h);
+                                            t.begin(w, h);
+                                            p.begin(t.scale());
+                                            for (x, y, s) in icons {
+                                                p.blit(
+                                                    s,
+                                                    x,
+                                                    y,
+                                                    10.0,
+                                                    8.0,
+                                                    [0.0, 0.0, 1.0, 1.0],
+                                                    0xFFFFFFFF,
+                                                );
+                                            }
+                                            p.flush(&g.device, &g.queue, view, w, h, None);
                                         }
                                         if inv_open {
                                             let k = f64::from(t.scale());
@@ -2302,6 +2755,15 @@ impl ApplicationHandler for App {
                                                         );
                                                     }
                                                 }
+                                            } else if lay.is_lectern() {
+                                                if let Some(o) = &v.inv.open {
+                                                    let mb = v.game_mode < 2;
+                                                    bookview::draw_sprites(
+                                                        p, &*t, lang, o, gwf, mx, my, mb,
+                                                    );
+                                                    p.flush(&g.device, &g.queue, view, w, h, None);
+                                                    bookview::draw_text(t, lang, o, gwf, mb);
+                                                }
                                             } else {
                                                 // VANILLA: во время перетаскивания видно раздачу по слотам.
                                                 let pv;
@@ -2314,9 +2776,16 @@ impl ApplicationHandler for App {
                                                     } else {
                                                         (&v.inv, &[])
                                                     };
+                                                if let (true, Some(o)) =
+                                                    (lay.is_anvil(), &invr.open)
+                                                {
+                                                    if let Some(n) = anvil.sync(lang, o) {
+                                                        v.send_rename_item(n);
+                                                    }
+                                                }
                                                 invscreen::draw_sprites(
                                                     p, &g.device, &g.queue, rm, invr, &lay, gwf,
-                                                    ghf, dsl,
+                                                    ghf, dsl, mx, my,
                                                 );
                                                 if let (true, Some(cp)) =
                                                     (lay.is_player(), preview.as_mut())
@@ -2335,9 +2804,34 @@ impl ApplicationHandler for App {
                                                         charpreview::SIZE,
                                                     );
                                                 }
+                                                if let (Some(b), Some(o), true) = (
+                                                    ench_book.as_mut(),
+                                                    &invr.open,
+                                                    lay.is_enchanting(),
+                                                ) {
+                                                    b.draw(
+                                                        p,
+                                                        &g.device,
+                                                        &g.queue,
+                                                        t.scale(),
+                                                        lay.left(gwf),
+                                                        lay.top(ghf),
+                                                        enchbook::fingerprint(o.slots.first()),
+                                                        o.data[..3].iter().any(|c| *c != 0),
+                                                    );
+                                                }
                                                 p.flush(&g.device, &g.queue, view, w, h, None);
                                                 invscreen::draw_text(
-                                                    t, invr, lang, &lay, gwf, ghf, mx, my,
+                                                    t,
+                                                    invr,
+                                                    lang,
+                                                    &lay,
+                                                    gwf,
+                                                    ghf,
+                                                    mx,
+                                                    my,
+                                                    anvil,
+                                                    (now_ms / 500) % 2 == 0,
                                                 );
                                                 if let Some(c) = &invr.cursor {
                                                     hud::cursor_item(
@@ -2353,6 +2847,64 @@ impl ApplicationHandler for App {
                                                     );
                                                 }
                                                 if v.inv.cursor.is_none() {
+                                                    if let (true, Some(o)) =
+                                                        (lay.is_loom(), &invr.open)
+                                                    {
+                                                        if let Some(n) = loomscreen::hover(
+                                                            lang,
+                                                            o,
+                                                            lay.left(gwf),
+                                                            lay.top(ghf),
+                                                            mx,
+                                                            my,
+                                                        ) {
+                                                            tooltip::draw_colored(
+                                                                t, &n, mx, my, gwf, ghf,
+                                                            );
+                                                        }
+                                                    }
+                                                    if let (true, Some(o)) =
+                                                        (lay.is_merchant(), &invr.open)
+                                                    {
+                                                        let (ml, mt) =
+                                                            (lay.left(gwf), lay.top(ghf));
+                                                        if let Some(st) =
+                                                            merchantscreen::hover_stack(
+                                                                o, ml, mt, mx, my,
+                                                            )
+                                                        {
+                                                            let lines = tooltip::stack_lines(
+                                                                lang, &*t, &st,
+                                                            );
+                                                            tooltip::draw_colored(
+                                                                t, &lines, mx, my, gwf, ghf,
+                                                            );
+                                                        } else if let Some(n) =
+                                                            merchantscreen::hover_text(
+                                                                lang, o, ml, mt, mx, my,
+                                                            )
+                                                        {
+                                                            tooltip::draw_colored(
+                                                                t, &n, mx, my, gwf, ghf,
+                                                            );
+                                                        }
+                                                    }
+                                                    if let (true, Some(o)) =
+                                                        (lay.is_beacon(), &invr.open)
+                                                    {
+                                                        if let Some(n) = beaconscreen::hover(
+                                                            lang,
+                                                            o,
+                                                            lay.left(gwf),
+                                                            lay.top(ghf),
+                                                            mx,
+                                                            my,
+                                                        ) {
+                                                            tooltip::draw_colored(
+                                                                t, &n, mx, my, gwf, ghf,
+                                                            );
+                                                        }
+                                                    }
                                                     if let Some(st) = invscreen::hover_item(
                                                         invr, &lay, gwf, ghf, mx, my,
                                                     ) {
@@ -2365,6 +2917,22 @@ impl ApplicationHandler for App {
                                                 }
                                             }
                                         }
+                                    }
+                                    {
+                                        let hov = if inv_open && !inv_creative {
+                                            let k = f64::from(t.scale());
+                                            let (mx, my) = ((cur.0 / k) as f32, (cur.1 / k) as f32);
+                                            invscreen::layout(&v.inv)
+                                                .slot_at(gw as f32, gh as f32, mx, my)
+                                        } else {
+                                            None
+                                        };
+                                        if let Some((a, b)) = tooltip::bundle_unhover(hov) {
+                                            v.send_select_bundle(a, b);
+                                        }
+                                    }
+                                    if let Some((p, rm)) = hud.as_mut() {
+                                        tooltip::draw_block(p, t, item_lang, g, view, (w, h), rm);
                                     }
                                     if debug_on {
                                         let info = g.adapter.get_info();
@@ -2380,18 +2948,37 @@ impl ApplicationHandler for App {
                                         let (l, r) = debugscreen::build(v, &e);
                                         debugscreen::draw(t, &l, &r, gw as f32);
                                     }
-                                    if let Some(st) = &v.status {
-                                        t.draw(
-                                            &format!("Disconnected: {st}"),
-                                            2.0,
-                                            2.0,
-                                            0xFF5555,
-                                            true,
+                                    t.flush(&g.device, &g.queue, view, w, h);
+                                    if !hid {
+                                        v.flush_nametags(t, g, view, w, h);
+                                    }
+                                    if let (Some(gui), Some((p, _))) =
+                                        (gui_dead.as_mut(), hud.as_mut())
+                                    {
+                                        death_act = gui.render(
+                                            &g.device, &g.queue, view, w, h, t, p, dt as f32,
+                                            now_ms,
                                         );
                                     }
-                                    t.flush(&g.device, &g.queue, view, w, h);
                                 }
-                            })
+                            });
+                            match death_act {
+                                ui::Action::Respawn => {
+                                    if let Some(v) = &self.view {
+                                        v.send(netthread::NetCmd::Respawn);
+                                    }
+                                }
+                                ui::Action::Disconnect => {
+                                    if let Some(gui) = &mut self.gui {
+                                        gui.opts.save();
+                                        gui.reset_title();
+                                    }
+                                    self.view = None;
+                                    self.connect = None;
+                                }
+                                _ => {}
+                            }
+                            shot_in
                         } else if let (true, Some(gui), Some(p), Some(t)) = (
                             self.menu_active,
                             &mut self.gui,
@@ -2403,6 +2990,12 @@ impl ApplicationHandler for App {
                             let shot = sc.draw_and_present(g, f, cap, |view, w, h| {
                                 if let Some(v) = world.as_mut() {
                                     v.render(g, view, w, h, sky);
+                                    // Мировой текст (таблички, неймтеги) виден и за меню/редактором.
+                                    if !self.hud_hidden {
+                                        t.begin(w, h);
+                                        v.draw_signs(t, w, h);
+                                        v.flush_nametags(t, g, view, w, h);
+                                    }
                                 }
                                 act = gui.render(
                                     &g.device, &g.queue, view, w, h, t, p, dt as f32, now_ms,
@@ -2410,6 +3003,18 @@ impl ApplicationHandler for App {
                             });
                             self.fps_limit
                                 .set_limit(gui.opts.f32(&ui::options::VIDEO[1]) as u32);
+                            for o in gui.take_dialog_out() {
+                                if let Some(v) = &self.view {
+                                    v.send(match o {
+                                        ui::dialog::Out::Command(c) => {
+                                            netthread::NetCmd::Command(c)
+                                        }
+                                        ui::dialog::Out::Custom(id, p) => {
+                                            netthread::NetCmd::CustomClick(id, p)
+                                        }
+                                    });
+                                }
+                            }
                             match act {
                                 ui::Action::None => {}
                                 ui::Action::Quit => el.exit(),
@@ -2418,6 +3023,24 @@ impl ApplicationHandler for App {
                                     // блоков изменился (пак другого разрешения) — перезапуск процесса.
                                     gui.opts.save();
                                     self.reload_pending = true;
+                                }
+                                ui::Action::CloseSign => {
+                                    if let Some((p, f, l)) = gui.take_sign_out() {
+                                        if let Some(v) = &self.view {
+                                            v.send(netthread::NetCmd::SignUpdate(p, f, l));
+                                        }
+                                    }
+                                    gui.close_sign();
+                                    self.menu_active = false;
+                                    if let Some(w) = &self.window {
+                                        self.mouse.grab(w);
+                                    }
+                                }
+                                ui::Action::CloseDialog => {
+                                    self.menu_active = false;
+                                    if let Some(w) = &self.window {
+                                        self.mouse.grab(w);
+                                    }
                                 }
                                 ui::Action::Resume => {
                                     gui.opts.save();
@@ -2440,6 +3063,11 @@ impl ApplicationHandler for App {
                                             }
                                             Err(e) => tracing::error!("ресурсы игры 26.3: {e}"),
                                         }
+                                    }
+                                }
+                                ui::Action::Respawn => {
+                                    if let Some(v) = &self.view {
+                                        v.send(netthread::NetCmd::Respawn);
                                     }
                                 }
                                 ui::Action::Disconnect => {
@@ -2472,6 +3100,8 @@ impl ApplicationHandler for App {
                                         "path": std::fs::canonicalize(&p).unwrap_or(p),
                                         "width": shot.width,
                                         "height": shot.height,
+                                        "frame": screenshot::analyze(&shot),
+                                        "view": self.ctl_view_report(),
                                     })),
                                     Err(e) => control::err(e),
                                 });
@@ -2582,6 +3212,7 @@ fn main() {
         wstate: window::WindowState::default(),
         applied_vsync: None,
         applied_fs: None,
+        applied_compute: None,
         quit_shortcuts: true,
         allow_cursor: true,
         alt_down: false,
@@ -2644,6 +3275,8 @@ fn main() {
         music: music::MusicManager::new(),
         inv_open: false,
         char_preview: None,
+        ench_book: None,
+        anvil: invscreen::AnvilName::default(),
         inv_container: false,
         inv_creative: false,
         dead_screen: false,
@@ -2653,6 +3286,7 @@ fn main() {
         drag: None,
         creative: creativescreen::State::default(),
         overlay: None,
+        overlay_anim: false,
         chat: chat::Chat::default(),
         chat_cfg: chat::Cfg::default(),
         chat_colors: true,
@@ -2662,9 +3296,27 @@ fn main() {
         reload_pending: false,
         control: start_control(),
         control_pending: Vec::new(),
+        control_task: None,
         shot_reply: None,
     };
     if let Err(e) = el.run_app(&mut app) {
         tracing::error!("event loop: {e}");
     }
+}
+
+/// VANILLA: Mth#hsvToRgb.
+fn hsv_rgb(hue: f32, s: f32, v: f32) -> u32 {
+    let h = (hue * 6.0) as i32 % 6;
+    let f = hue * 6.0 - (hue * 6.0).floor();
+    let (p, q, t) = (v * (1.0 - s), v * (1.0 - f * s), v * (1.0 - (1.0 - f) * s));
+    let (r, g, b) = match h {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    let c = |x: f32| (x * 255.0 + 0.5) as u32;
+    (c(r) << 16) | (c(g) << 8) | c(b)
 }

@@ -181,11 +181,27 @@ pub fn raycast_t(
 }
 
 /// VANILLA: ProjectileUtil#getEntityHitResult (pickRadius 0): ближайшая сущность на луче дальностью `max`.
-pub fn raycast_entity(l: &Level, o: [f64; 3], d: [f32; 3], max: f64) -> Option<(i32, f64)> {
+/// `extra` — части составных сущностей (EnderDragonPart): (id, [minx,miny,minz,maxx,maxy,maxz]).
+pub fn raycast_entity(
+    l: &Level,
+    o: [f64; 3],
+    d: [f32; 3],
+    max: f64,
+    extra: &[(i32, [f64; 6])],
+) -> Option<(i32, f64)> {
     let d = [f64::from(d[0]), f64::from(d[1]), f64::from(d[2])];
     let mut best: Option<(i32, f64)> = None;
-    for e in l.entities.map.values() {
-        let Some((lo, hi)) = e.aabb() else { continue };
+    let boxes = l
+        .entities
+        .map
+        .values()
+        .filter_map(|e| e.aabb().map(|(lo, hi)| (e.id, lo, hi)))
+        .chain(
+            extra
+                .iter()
+                .map(|(id, b)| (*id, [b[0], b[1], b[2]], [b[3], b[4], b[5]])),
+        );
+    for (id, lo, hi) in boxes {
         // Слэб-тест луча с AABB (AABB#clip); начало внутри коробки → расстояние 0.
         let (mut t0, mut t1) = (0.0f64, max);
         let mut hit = true;
@@ -202,7 +218,7 @@ pub fn raycast_entity(l: &Level, o: [f64; 3], d: [f32; 3], max: f64) -> Option<(
             }
         }
         if hit && t0 <= t1 && best.is_none_or(|(_, bt)| t0 < bt) {
-            best = Some((e.id, t0));
+            best = Some((id, t0));
         }
     }
     best
@@ -242,9 +258,9 @@ mod tests {
             0.0,
             0.0,
         ));
-        let h = raycast_entity(&l, [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], 3.0);
+        let h = raycast_entity(&l, [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], 3.0, &[]);
         assert_eq!(h, None);
-        let h = raycast_entity(&l, [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], 6.0)
+        let h = raycast_entity(&l, [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], 6.0, &[])
             .map(|(i, t)| (i, (t * 10.0).round()));
         assert_eq!(h, Some((7, 47.0)));
     }

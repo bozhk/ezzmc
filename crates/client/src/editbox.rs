@@ -15,6 +15,10 @@ pub struct EditBox {
     pub cursor: usize,
     pub sel: usize,
     pub max: usize,
+    /// Первый видимый символ (VANILLA: EditBox#displayPos) — только для отрисовки.
+    pub scroll: usize,
+    /// Идёт выделение мышью (ЛКМ зажата после клика по полю).
+    pub dragging: bool,
 }
 
 impl EditBox {

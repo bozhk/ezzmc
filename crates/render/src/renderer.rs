@@ -175,7 +175,11 @@ impl Renderer {
                 compilation_options: Default::default(),
                 targets: &[Some(color_format.into())],
             }),
-            primitive: wgpu::PrimitiveState::default(),
+            // VANILLA: terrain-пайплайны — cull BACK (иначе задние грани листвы видны сквозь дыры).
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
@@ -186,7 +190,7 @@ impl Renderer {
                 // к кубам, без смещения глубины мерцают (Z-fighting).
                 bias: wgpu::DepthBiasState {
                     constant: -2,
-                    slope_scale: -1.0,
+                    slope_scale: 0.0, // как в terrain.rs: наклонный сдвиг давал тёмные линии на листве
                     clamp: 0.0,
                 },
             }),
@@ -353,12 +357,13 @@ impl Renderer {
         quads: &[QuadMeta],
     ) -> bool {
         assert_eq!(verts.len(), quads.len() * 4, "4 вершины на квад");
-        self.remove_section(queue, pos);
-        if quads.is_empty() {
-            return true;
-        }
-        if quads.len() as u32 > MAX_QUADS_PER_SECTION {
-            return false;
+        // Освобождённый слот перезапишем ниже — запись quad_count=0 нужна, только если нового меша не будет.
+        let freed = self.release_section(pos);
+        if quads.is_empty() || quads.len() as u32 > MAX_QUADS_PER_SECTION {
+            if let Some(slot) = freed {
+                Self::zero_slot(queue, &self.sections, slot);
+            }
+            return quads.is_empty();
         }
         let n = verts.len() as u32;
         let slot = match self.free_slots.pop() {
@@ -371,6 +376,10 @@ impl Renderer {
         };
         let Some(first) = self.alloc.alloc(n) else {
             self.free_slots.push(slot);
+            // слот остаётся занятым старым содержимым — гасим (если освобождали его только что)
+            if freed == Some(slot) {
+                Self::zero_slot(queue, &self.sections, slot);
+            }
             return false;
         };
         queue.write_buffer(&self.vertices, u64::from(first) * 4, as_bytes(verts));
@@ -389,16 +398,26 @@ impl Renderer {
         true
     }
 
+    /// Освобождает слот и вершины секции без записи в GPU; возвращает слот.
+    fn release_section(&mut self, pos: [i32; 3]) -> Option<u32> {
+        let p = self.placed.remove(&pos)?;
+        self.alloc.free(p.first_vertex, p.vertex_count);
+        self.free_slots.push(p.slot);
+        Some(p.slot)
+    }
+
+    /// quad_count = 0 → cull пропускает слот.
+    fn zero_slot(queue: &wgpu::Queue, sections: &wgpu::Buffer, slot: u32) {
+        queue.write_buffer(
+            sections,
+            u64::from(slot) * SECTION_SIZE + 16,
+            &0u32.to_le_bytes(),
+        );
+    }
+
     pub fn remove_section(&mut self, queue: &wgpu::Queue, pos: [i32; 3]) {
-        if let Some(p) = self.placed.remove(&pos) {
-            self.alloc.free(p.first_vertex, p.vertex_count);
-            // quad_count = 0 → cull пропускает слот
-            queue.write_buffer(
-                &self.sections,
-                u64::from(p.slot) * SECTION_SIZE + 16,
-                &0u32.to_le_bytes(),
-            );
-            self.free_slots.push(p.slot);
+        if let Some(slot) = self.release_section(pos) {
+            Self::zero_slot(queue, &self.sections, slot);
         }
     }
 

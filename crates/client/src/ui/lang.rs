@@ -10,6 +10,11 @@ impl Lang {
         // Не ванильная клавиша зума: названия нет в en_us.json.
         m.entry("key.zoom".to_owned())
             .or_insert_with(|| "Zoom".to_owned());
+        // Не ванильные строки: переключатель режима рендера.
+        m.entry("key.renderMode".to_owned())
+            .or_insert_with(|| "Toggle Render Mode".to_owned());
+        m.entry("options.ezzmc.computeRenderer".to_owned())
+            .or_insert_with(|| "Compute Renderer".to_owned());
         Self(m)
     }
 
@@ -37,6 +42,18 @@ impl Lang {
                 Some('s' | 'd') => {
                     out.push_str(args.get(n).copied().unwrap_or(""));
                     n += 1;
+                }
+                Some(d) if d.is_ascii_digit() => {
+                    // VANILLA: String.format — позиционный аргумент `%N$s`.
+                    let mut idx = d.to_digit(10).unwrap_or(1) as usize;
+                    while let Some(x) = it.next_if(char::is_ascii_digit) {
+                        idx = idx * 10 + x.to_digit(10).unwrap_or(0) as usize;
+                    }
+                    if it.next_if_eq(&'$').is_some()
+                        && it.next_if(|c| matches!(c, 's' | 'd')).is_some()
+                    {
+                        out.push_str(args.get(idx.wrapping_sub(1)).copied().unwrap_or(""));
+                    }
                 }
                 Some(o) => {
                     out.push('%');

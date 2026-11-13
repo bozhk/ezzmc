@@ -248,6 +248,16 @@ pub(crate) fn eval(v: &Value, cx: &Ctx, dc: &str, out: &mut Vec<Layer>) {
             let tex = chest_texture(obj).unwrap_or_default();
             out.push((format!("{CHEST_MARK}{tex}"), Vec::new(), [0.0; 3]));
         }
+        // VANILLA: SpecialModelWrapper + SkullSpecialRenderer (head / player_head).
+        "special" if head_special(obj) => {
+            let base = obj.get("base").and_then(Value::as_str).unwrap_or("");
+            out.push((format!("{SKULL_MARK}{base}"), Vec::new(), [0.0; 3]));
+        }
+        // VANILLA: SpecialModelWrapper + ShulkerBoxSpecialRenderer.
+        "special" if shulker_special(obj) => {
+            let base = obj.get("base").and_then(Value::as_str).unwrap_or("");
+            out.push((format!("{SHULKER_MARK}{base}"), Vec::new(), [0.0; 3]));
+        }
         _ => {
             if let Some(m) = obj
                 .get("model")
@@ -267,6 +277,26 @@ pub(crate) fn eval(v: &Value, cx: &Ctx, dc: &str, out: &mut Vec<Layer>) {
 
 /// Метка слоя «модель сундука» вместо id модели (`Layer.0`).
 pub(crate) const CHEST_MARK: &str = "\u{1}chest:";
+
+/// Метка слоя «голова» (`SKULL_MARK` + id базовой модели с gui-трансформом).
+pub(crate) const SKULL_MARK: &str = "\u{2}skull:";
+
+/// Метка слоя «шалкер-коробка» (`SHULKER_MARK` + id базовой модели с display-трансформами).
+pub(crate) const SHULKER_MARK: &str = "\u{3}shulker:";
+
+fn shulker_special(obj: &serde_json::Map<String, Value>) -> bool {
+    obj.get("model")
+        .and_then(|m| m.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(|t| t.trim_start_matches("minecraft:") == "shulker_box")
+}
+
+fn head_special(obj: &serde_json::Map<String, Value>) -> bool {
+    obj.get("model")
+        .and_then(|m| m.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(|t| matches!(t.trim_start_matches("minecraft:"), "head" | "player_head"))
+}
 
 /// `special`-модель типа `chest` → имя текстуры под `entity/chest/` (`normal`, `ender`, ...).
 fn chest_texture(obj: &serde_json::Map<String, Value>) -> Option<String> {
@@ -341,7 +371,7 @@ pub fn bake(rm: &ResourceManager, name: &str, cx: &Ctx) -> Option<Icon> {
     let mut group_cfg: Option<GroupCfg> = None;
     let mut out: Option<Icon> = None;
     for (model, tints, off) in layers {
-        if !model.starts_with(CHEST_MARK) {
+        if !model.starts_with(CHEST_MARK) && !model.starts_with(SKULL_MARK) {
             if let Some((qs, t, lit)) = element_quads(rm, name, &model, off) {
                 group.extend(qs);
                 group_cfg.get_or_insert((t, lit, tints));
@@ -440,6 +470,12 @@ fn bake_one(rm: &ResourceManager, name: &str, model: &str, tints: &[u32]) -> Opt
     if let Some(tex) = model.strip_prefix(CHEST_MARK) {
         return chest_icon(rm, tex);
     }
+    if let Some(base) = model.strip_prefix(SKULL_MARK) {
+        return skull_icon(rm, name, base);
+    }
+    if let Some(base) = model.strip_prefix(SHULKER_MARK) {
+        return shulker_icon(rm, name, base);
+    }
     let mid = Identifier::parse(model);
     let mut loader = ModelLoader::new(rm);
     let (resolved, builtin) = loader.resolve(&mid)?;
@@ -530,6 +566,66 @@ fn chest_icon(rm: &ResourceManager, tex_name: &str) -> Option<Icon> {
             sprite: Identifier {
                 namespace: "minecraft".into(),
                 path: format!("entity/chest/{tex_name}"),
+            },
+        })
+        .collect();
+    let mut tex = HashMap::new();
+    Some(raster(
+        rm,
+        &mut tex,
+        &qs,
+        (t.rotation, t.translation, t.scale),
+        true,
+        &[],
+    ))
+}
+
+/// Иконка шалкер-коробки. VANILLA: ShulkerBoxSpecialRenderer + gui-трансформ базовой модели.
+fn shulker_icon(rm: &ResourceManager, item: &str, base: &str) -> Option<Icon> {
+    let (model, tex) = crate::shulkerbox::item_model(item)?;
+    let mut loader = ModelLoader::new(rm);
+    let (resolved, _) = loader.resolve(&Identifier::parse(base))?;
+    let t = resolved.transform(DisplayContext::Gui);
+    let qs: Vec<Q> = model
+        .quads(crate::shulkerbox::item_root())
+        .into_iter()
+        .map(|q| Q {
+            pos: q.pos.map(|v| v.to_array()),
+            uv: q.uv,
+            tint_index: -1,
+            sprite: Identifier {
+                namespace: "minecraft".into(),
+                path: format!("entity/{tex}"),
+            },
+        })
+        .collect();
+    let mut tex = HashMap::new();
+    Some(raster(
+        rm,
+        &mut tex,
+        &qs,
+        (t.rotation, t.translation, t.scale),
+        true,
+        &[],
+    ))
+}
+
+/// Иконка головы. VANILLA: SkullSpecialRenderer + gui-трансформ базовой модели.
+fn skull_icon(rm: &ResourceManager, item: &str, base: &str) -> Option<Icon> {
+    let (model, tex) = crate::skull::item_model(item)?;
+    let mut loader = ModelLoader::new(rm);
+    let (resolved, _) = loader.resolve(&Identifier::parse(base))?;
+    let t = resolved.transform(DisplayContext::Gui);
+    let qs: Vec<Q> = model
+        .quads(crate::skull::item_root())
+        .into_iter()
+        .map(|q| Q {
+            pos: q.pos.map(|v| v.to_array()),
+            uv: q.uv,
+            tint_index: -1,
+            sprite: Identifier {
+                namespace: "minecraft".into(),
+                path: format!("entity/{tex}"),
             },
         })
         .collect();

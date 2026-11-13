@@ -22,6 +22,9 @@ impl PacketIds {
     pub fn v26_3() -> Self {
         Self::new(ezzmc_protocol::generated::v26_3::PACKETS)
     }
+    pub fn for_version(v: &ezzmc_protocol::version::Version) -> Self {
+        Self::new(v.packets)
+    }
     pub fn get(&self, state: State, dir: Direction, name: &str) -> NetResult<i32> {
         self.table
             .iter()

@@ -32,10 +32,14 @@ pub enum Shader {
     Particle,
     /// `rendertype_lightning.vsh/fsh`
     Lightning,
+    /// GPU-скиннинг мобов (entity.vsh + матрицы частей на экземпляр)
+    Skinned,
+    /// GPU-инстансинг предметов-сущностей (дропы)
+    ItemInst,
 }
 
 impl Shader {
-    pub const ALL: [Shader; 10] = [
+    pub const ALL: [Shader; 12] = [
         Shader::Terrain,
         Shader::Sky,
         Shader::Stars,
@@ -46,6 +50,8 @@ impl Shader {
         Shader::PositionTex,
         Shader::Particle,
         Shader::Lightning,
+        Shader::Skinned,
+        Shader::ItemInst,
     ];
 
     fn body(self) -> &'static str {
@@ -60,6 +66,8 @@ impl Shader {
             Shader::PositionTex => include_str!("shaders/position_tex.wgsl"),
             Shader::Particle => include_str!("shaders/particle.wgsl"),
             Shader::Lightning => include_str!("shaders/lightning.wgsl"),
+            Shader::Skinned => include_str!("shaders/skinned.wgsl"),
+            Shader::ItemInst => include_str!("shaders/itemlit.wgsl"),
         }
     }
 

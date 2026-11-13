@@ -4,7 +4,7 @@
 //! wgpu не умеет `lineWidth`, поэтому отрезок рисуется квадом в экранном пространстве.
 use glam::Mat4;
 
-const MAX_SEGMENTS: usize = 256;
+const MAX_SEGMENTS: usize = 2048;
 
 pub struct LineDraw {
     pipeline: wgpu::RenderPipeline,

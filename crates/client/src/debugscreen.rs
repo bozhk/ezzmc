@@ -282,6 +282,7 @@ pub fn build(v: &WorldView, e: &Env) -> (Vec<String>, Vec<String>) {
         right.extend(state_lines("Targeted Fluid", t.pos, n, p));
         right.push(String::new());
     }
+    right.push(v.render_label().to_owned());
     right.push(format!("Mem: {} MiB (RSS)", rss_mib()));
     if let Some((used, total, watts)) = gpu_stats() {
         right.push(format!(

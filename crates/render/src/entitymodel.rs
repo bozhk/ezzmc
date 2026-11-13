@@ -200,6 +200,16 @@ pub struct RasterQuad {
     pub normal: Vec3,
 }
 
+/// Размер вершины `SkinMesh`: pos(3f) uv(2f) normal(3f) part(u32).
+pub const SKIN_VERTEX_SIZE: usize = 36;
+
+/// Статическая сетка модели для GPU-скиннинга (см. `Model::skin_mesh`).
+pub struct SkinMesh {
+    pub verts: Vec<u8>,
+    pub indices: Vec<u16>,
+    pub parts: usize,
+}
+
 /// Описание куба для билдера (VANILLA: CubeListBuilder#addBox).
 #[derive(Clone, Copy, Debug)]
 pub struct BoxDef {
@@ -286,7 +296,14 @@ impl Model {
 
     /// Матрицы частей относительно `root` (VANILLA: ModelPart#render, стек поз).
     pub fn part_matrices(&self, root: Mat4) -> Vec<Mat4> {
-        let mut m: Vec<Mat4> = Vec::with_capacity(self.parts.len());
+        let mut m = Vec::with_capacity(self.parts.len());
+        self.part_matrices_into(root, &mut m);
+        m
+    }
+
+    /// То же, что `part_matrices`, но в переиспользуемый буфер (без аллокации на каждого моба).
+    pub fn part_matrices_into(&self, root: Mat4, m: &mut Vec<Mat4>) {
+        m.clear();
         for p in &self.parts {
             let base = p.parent.map_or(root, |i| m[i]);
             let mut local = p.pose.matrix();
@@ -295,7 +312,6 @@ impl Model {
             }
             m.push(base * local);
         }
-        m
     }
 
     /// Видимые грани в пространстве `root` для программной растеризации (превью в GUI).
@@ -332,10 +348,95 @@ impl Model {
     /// `light` — (block, sky) 0..15. Освещение граней: VANILLA minecraft_mix_light (LEVEL).
     /// Возвращает число квадов.
     pub fn bake(&self, root: Mat4, color: [u8; 4], light: (u8, u8), out: &mut Vec<u8>) -> u32 {
+        self.bake_shaded(root, color, light, out, true, &|_| true)
+    }
+
+    /// Слой с моделью-подмножеством (retainExactParts) с обычным освещением граней и цветом `color`.
+    pub fn bake_parts(
+        &self,
+        root: Mat4,
+        color: [u8; 4],
+        light: (u8, u8),
+        out: &mut Vec<u8>,
+        keep: &dyn Fn(&str) -> bool,
+    ) -> u32 {
+        self.bake_shaded(root, color, light, out, true, keep)
+    }
+
+    /// Слой с моделью-подмножеством (retainExactParts): рисуются кубы только частей, чьё имя проходит `keep`.
+    /// Эмиссивно (полная яркость, без направленной тени), `alpha` — альфа цвета вершин.
+    pub fn bake_emissive_parts(
+        &self,
+        root: Mat4,
+        alpha: u8,
+        out: &mut Vec<u8>,
+        keep: &dyn Fn(&str) -> bool,
+    ) -> u32 {
+        self.bake_shaded(root, [255, 255, 255, alpha], (15, 15), out, false, keep)
+    }
+
+    /// VANILLA: RenderPipelines#EYES (EMISSIVE + NO_CARDINAL_LIGHTING) — слой глаз без направленной тени.
+    pub fn bake_emissive(&self, root: Mat4, out: &mut Vec<u8>) -> u32 {
+        self.bake_shaded(root, [255; 4], (15, 15), out, false, &|_| true)
+    }
+
+    /// Статическая сетка для GPU-скиннинга: видимые грани (как `bake`) в локальном пространстве части
+    /// (позиции в блоках = пиксели/16, нормаль модели), у вершины — индекс части. Позу на каждый кадр
+    /// несут матрицы `part_matrices(root)`. Видимость частей берётся с модели на момент вызова.
+    pub fn skin_mesh(&self) -> SkinMesh {
+        let mut verts = Vec::new();
+        let mut indices: Vec<u16> = Vec::new();
+        let mut n_verts: u16 = 0;
+        for (i, part) in self.parts.iter().enumerate() {
+            let mut shown = part.visible;
+            let mut cur = part.parent;
+            while let (true, Some(p)) = (shown, cur) {
+                shown = self.parts[p].visible;
+                cur = self.parts[p].parent;
+            }
+            if !shown {
+                continue;
+            }
+            for poly in part.cubes.iter().flat_map(|c| c.visible_polys()) {
+                for v in &poly.v {
+                    let p = Vec3::from(v.pos) / 16.0;
+                    for f in [p.x, p.y, p.z, v.uv[0], v.uv[1]]
+                        .into_iter()
+                        .chain(poly.normal)
+                    {
+                        verts.extend_from_slice(&f.to_le_bytes());
+                    }
+                    verts.extend_from_slice(&(i as u32).to_le_bytes());
+                }
+                for k in [0u16, 1, 2, 2, 3, 0] {
+                    indices.push(n_verts + k);
+                }
+                n_verts += 4;
+            }
+        }
+        SkinMesh {
+            verts,
+            indices,
+            parts: self.parts.len(),
+        }
+    }
+
+    fn bake_shaded(
+        &self,
+        root: Mat4,
+        color: [u8; 4],
+        light: (u8, u8),
+        out: &mut Vec<u8>,
+        cardinal: bool,
+        keep: &dyn Fn(&str) -> bool,
+    ) -> u32 {
         let mats = self.part_matrices(root);
+        let (l0, l1) = light_dirs();
+        // Позиции в пикселях/16: масштаб 1/16 (степень двойки — точный) вшит в матрицу части.
+        let to_blocks = Mat4::from_scale(Vec3::splat(1.0 / 16.0));
         let mut quads = 0;
         for (i, part) in self.parts.iter().enumerate() {
-            if !part.visible {
+            if !part.visible || !keep(part.name) {
                 continue;
             }
             // Невидимый родитель скрывает и детей (VANILLA: ModelPart#render).
@@ -352,12 +453,17 @@ impl Model {
                 continue;
             }
             let m = mats[i];
+            let mp = m * to_blocks;
             for cube in &part.cubes {
                 for poly in cube.visible_polys() {
-                    let n = m
-                        .transform_vector3(Vec3::from(poly.normal))
-                        .normalize_or_zero();
-                    let shade = mix_light(n);
+                    let shade = if cardinal {
+                        let n = m
+                            .transform_vector3(Vec3::from(poly.normal))
+                            .normalize_or_zero();
+                        mix_light_with(l0, l1, n)
+                    } else {
+                        1.0
+                    };
                     let c = [
                         (f32::from(color[0]) * shade) as u8,
                         (f32::from(color[1]) * shade) as u8,
@@ -365,7 +471,7 @@ impl Model {
                         color[3],
                     ];
                     for v in &poly.v {
-                        let p = m.transform_point3(Vec3::from(v.pos) / 16.0);
+                        let p = mp.transform_point3(Vec3::from(v.pos));
                         push_vertex(out, p.to_array(), v.uv, c, light);
                     }
                     quads += 1;
@@ -378,8 +484,23 @@ impl Model {
 
 /// VANILLA: Lighting (Entry.LEVEL) — направления света и minecraft_mix_light.
 pub fn mix_light(n: Vec3) -> f32 {
-    let l0 = Vec3::new(0.2, 1.0, -0.7).normalize();
-    let l1 = Vec3::new(-0.2, 1.0, 0.7).normalize();
+    let (l0, l1) = light_dirs();
+    mix_light_with(l0, l1, n)
+}
+
+/// Нормированные направления света (константы считаются один раз, а не на каждый полигон).
+fn light_dirs() -> (Vec3, Vec3) {
+    static DIRS: std::sync::OnceLock<(Vec3, Vec3)> = std::sync::OnceLock::new();
+    *DIRS.get_or_init(|| {
+        (
+            Vec3::new(0.2, 1.0, -0.7).normalize(),
+            Vec3::new(-0.2, 1.0, 0.7).normalize(),
+        )
+    })
+}
+
+#[inline]
+fn mix_light_with(l0: Vec3, l1: Vec3, n: Vec3) -> f32 {
     let (a, b) = (l0.dot(n).max(0.0), l1.dot(n).max(0.0));
     ((a + b) * 0.6 + 0.4).min(1.0)
 }

@@ -178,6 +178,8 @@ pub struct DefaultSpawn {
 /// Событие Play для клиентского кода. Пакеты вне списка → `Other` (разберут другие модули).
 #[derive(Debug)]
 pub enum PlayEvent {
+    /// ClientboundPing: тело для pong (шлёт главный поток через `NetCmd::Pong`).
+    Ping(Vec<u8>),
     Login(Box<LoginInfo>),
     Respawn {
         spawn: Box<SpawnInfo>,
@@ -421,17 +423,7 @@ impl PlayHandler {
             Some("player_position") => {
                 let pp = PlayerPosition::read(&mut r)?;
                 self.player = pp.absolute(&self.player);
-                // VANILLA: ClientPacketListener#handleMovePlayer (26.3): accept_teleportation(id, x, y, z, yRot, xRot),
-
-                let mut w = Writer::new();
-                w.var_int(pp.teleport_id)
-                    .f64(self.player.pos.x)
-                    .f64(self.player.pos.y)
-                    .f64(self.player.pos.z)
-                    .f32(self.player.yaw)
-                    .f32(self.player.pitch);
-                conn.send(self.sid("accept_teleportation")?, &w.buf)?;
-                // 26.3: сервер применяет позицию из accept_teleportation сам; второй пакет позиции в тот же тик = kick.
+                // accept_teleportation шлёт главный поток (`NetCmd::AcceptTeleport`) в порядке с pong (Grim BadPacketsN).
                 PlayEvent::Teleport {
                     teleport_id: pp.teleport_id,
                     state: self.player,
@@ -441,10 +433,9 @@ impl PlayHandler {
                 conn.send(self.sid("keep_alive")?, &p.body)?;
                 PlayEvent::Other(p)
             }
-            Some("ping") => {
-                conn.send(self.sid("pong")?, &p.body)?;
-                PlayEvent::Other(p)
-            }
+            // VANILLA: ClientPacketListener#handlePing — pong уходит с главного потока в порядке пакетов
+            // (после применения предыдущих motion/explode). Здесь только событие: клиент шлёт pong сам.
+            Some("ping") => PlayEvent::Ping(p.body.clone()),
             Some("disconnect") => {
                 let comp = nbt::read_network(&mut r)
                     .ok()
@@ -457,6 +448,31 @@ impl PlayHandler {
             }
             _ => PlayEvent::Other(p),
         })
+    }
+
+    /// VANILLA: ClientPacketListener#handleMovePlayer (26.3): accept_teleportation(id, x, y, z, yRot, xRot);
+    /// до 26.3 — accept_teleportation(id) + PosRot(on_ground=false). Вызывается с главного потока по порядку событий.
+    pub fn accept_teleport(
+        &mut self,
+        conn: &mut Connection,
+        id: i32,
+        st: &PlayerState,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        if ezzmc_protocol::version::current().is_canon() {
+            w.var_int(id)
+                .f64(st.pos.x)
+                .f64(st.pos.y)
+                .f64(st.pos.z)
+                .f32(st.yaw)
+                .f32(st.pitch);
+            conn.send(self.sid("accept_teleportation")?, &w.buf)?;
+        } else {
+            w.var_int(id);
+            conn.send(self.sid("accept_teleportation")?, &w.buf)?;
+            self.send_move(conn, MoveKind::PosRot, false, false)?;
+        }
+        Ok(())
     }
 
     /// VANILLA: ServerboundMovePlayerPacket.{PosRot,Pos,Rot,StatusOnly}; флаги: бит0 on_ground, бит1 hcol.
@@ -610,6 +626,17 @@ impl PlayHandler {
         loc: [f64; 3],
         secondary: bool,
     ) -> NetResult<()> {
+        if !ezzmc_protocol::version::current().is_canon() {
+            // VANILLA (1.21.11): MultiPlayerGameMode#interactAt → INTERACT_AT(float x,y,z, hand), затем INTERACT(hand).
+            let mut w = Writer::new();
+            w.var_int(entity_id).var_int(2);
+            w.f32(loc[0] as f32).f32(loc[1] as f32).f32(loc[2] as f32);
+            w.var_int(0).bool(secondary);
+            conn.send(self.sid("interact")?, &w.buf)?;
+            let mut w = Writer::new();
+            w.var_int(entity_id).var_int(0).var_int(0).bool(secondary);
+            return conn.send(self.sid("interact")?, &w.buf);
+        }
         let mut w = Writer::new();
         w.var_int(entity_id).var_int(0);
         write_lp_vec3(&mut w, loc);
@@ -620,6 +647,11 @@ impl PlayHandler {
     /// VANILLA: ServerboundAttackPacket(entityId).
     pub fn send_attack(&self, conn: &mut Connection, entity_id: i32) -> NetResult<()> {
         let mut w = Writer::new();
+        if !ezzmc_protocol::version::current().is_canon() {
+            // VANILLA (1.21.11): ServerboundInteractPacket.createAttackPacket: ActionType.ATTACK, secondary=false.
+            w.var_int(entity_id).var_int(1).bool(false);
+            return conn.send(self.sid("interact")?, &w.buf);
+        }
         w.var_int(entity_id);
         conn.send(self.sid("attack")?, &w.buf)
     }
@@ -689,11 +721,93 @@ impl PlayHandler {
         conn.send(self.sid("set_creative_mode_slot")?, &w.buf)
     }
 
+    /// VANILLA: ServerboundContainerButtonClickPacket(containerId, buttonId).
+    pub fn send_container_button(
+        &self,
+        conn: &mut Connection,
+        container: i32,
+        button: i32,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.var_int(container);
+        w.var_int(button);
+        conn.send(self.sid("container_button_click")?, &w.buf)
+    }
+
+    /// VANILLA: ServerboundSetBeaconPacket(Optional<Holder<MobEffect>> primary, secondary).
+    /// `0` — пусто, иначе id реестра mob_effect + 1 (BeaconMenu#encodeEffect).
+    pub fn send_set_beacon(
+        &self,
+        conn: &mut Connection,
+        primary: i32,
+        secondary: i32,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        for e in [primary, secondary] {
+            w.bool(e > 0);
+            if e > 0 {
+                w.var_int(e - 1);
+            }
+        }
+        conn.send(self.sid("set_beacon")?, &w.buf)
+    }
+
+    /// VANILLA: ServerboundSelectTradePacket(int item).
+    pub fn send_select_trade(&self, conn: &mut Connection, item: i32) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.var_int(item);
+        conn.send(self.sid("select_trade")?, &w.buf)
+    }
+
+    /// VANILLA: ServerboundSelectBundleItemPacket(int slotId, int selectedItemIndex).
+    pub fn send_select_bundle_item(
+        &self,
+        conn: &mut Connection,
+        slot: i32,
+        index: i32,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.var_int(slot);
+        w.var_int(index);
+        conn.send(self.sid("bundle_item_selected")?, &w.buf)
+    }
+
     /// VANILLA: ServerboundContainerClosePacket(container id).
     pub fn send_container_close(&self, conn: &mut Connection, container: i32) -> NetResult<()> {
         let mut w = Writer::new();
         w.var_int(container);
         conn.send(self.sid("container_close")?, &w.buf)
+    }
+
+    /// VANILLA: ServerboundRenameItemPacket(String name).
+    pub fn send_rename_item(&self, conn: &mut Connection, name: &str) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.string(name);
+        conn.send(self.sid("rename_item")?, &w.buf)
+    }
+
+    /// VANILLA: ServerboundSignUpdatePacket(pos, 4 строки, slot). Слот — VarInt (26.x: BACK=0, FRONT=1);
+    /// у 1.20–1.21 то же как bool, байт совпадает.
+    pub fn send_sign_update(
+        &self,
+        conn: &mut Connection,
+        pos: [i32; 3],
+        front: bool,
+        lines: &[String; 4],
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        ezzmc_protocol::types::BlockPos::new(pos[0], pos[1], pos[2]).write(&mut w);
+        let canon = ezzmc_protocol::version::current().is_canon();
+        if !canon {
+            w.bool(front);
+        }
+        for l in lines {
+            w.string(l);
+        }
+        if canon {
+            w.var_int(i32::from(front));
+        }
+        conn.send(self.sid("sign_update")?, &w.buf)
     }
 
     /// VANILLA: ServerboundClientCommandPacket(PERFORM_RESPAWN = 0).
@@ -714,6 +828,11 @@ impl PlayHandler {
         let mut w = Writer::new();
         info.write(&mut w);
         conn.send(self.sid("client_information")?, &w.buf)
+    }
+
+    /// VANILLA: ServerboundPongPacket (ответ на ClientboundPingPacket, тело — то же 4-байтное id).
+    pub fn send_pong(&self, conn: &mut Connection, body: &[u8]) -> NetResult<()> {
+        conn.send(self.sid("pong")?, body)
     }
 
     pub fn send_swing(&self, conn: &mut Connection) -> NetResult<()> {
@@ -742,6 +861,20 @@ impl PlayHandler {
         w.string(cmd).i64(ms).i64(0).var_int(0);
         w.var_int(0).bytes(&[0, 0, 0]).u8(0);
         conn.send(self.sid("chat_command_signed")?, &w.buf)
+    }
+
+    /// VANILLA: ServerboundCustomClickActionPacket — Identifier + Optional<Tag> с префиксом длины.
+    pub fn send_custom_click(
+        &self,
+        conn: &mut Connection,
+        id: &str,
+        payload: Option<&nbt::Tag>,
+    ) -> NetResult<()> {
+        let mut nb = Vec::new();
+        nbt::write_network(&mut nb, payload)?;
+        let mut w = Writer::new();
+        w.string(id).var_int(nb.len() as i32).bytes(&nb);
+        conn.send(self.sid("custom_click_action")?, &w.buf)
     }
 
     /// VANILLA: ServerboundCommandSuggestionPacket — id запроса и вся строка ввода (с `/`).

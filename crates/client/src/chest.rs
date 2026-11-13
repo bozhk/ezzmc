@@ -3,10 +3,12 @@
 //! ChestBlockEntity#triggerEvent (событие 1: число зрителей), DoubleBlockCombiner/BrightnessCombiner.
 //! Блок сундука в мешере без граней (модель `block/chest` только с частицей), всё рисуем здесь.
 
+use crate::mobs::SkinKey;
 use ezzmc_render::entitymodel::{BoxDef, Model, Pose};
 use ezzmc_world::block::BlockState;
 use ezzmc_world::level::Level;
 use glam::{Mat4, Vec3};
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 // Маски граней (порядок Cube: DOWN, UP, WEST, NORTH, EAST, SOUTH).
@@ -235,6 +237,7 @@ impl Chests {
         cam: [f64; 3],
         (world_version, block_version): (u64, u64),
         mobs: &mut crate::mobs::Mobs,
+        frustum: Option<&ezzmc_mesh::frustum::Frustum>,
     ) {
         let now = level.game_time;
         let ticks = match self.last_tick.replace(now) {
@@ -271,48 +274,91 @@ impl Chests {
         // Закрытые и неактуальные крышки не храним.
         self.lids.retain(|_, l| l.should_open || l.open > 0.0);
         let pt = level.partial_tick();
-        for c in &self.list {
-            // VANILLA: BlockEntityRenderer#getViewDistance = 64; BlockEntityRenderDispatcher не рисует
-            // сундуки дальше (distSqr от центра блока до камеры).
-            let d = |i: usize| f64::from(c.pos[i]) + 0.5 - cam[i];
-            if d(0) * d(0) + d(1) * d(1) + d(2) * d(2) > 64.0 * 64.0 {
-                continue;
-            }
-            let open_at = |p: [i32; 3]| self.lids.get(&p).map_or(0.0, |l| l.get(pt));
-            let mut open = open_at(c.pos);
-            let mut light = block_light(level, c.pos);
-            if let Some(o) = c.other {
-                // VANILLA: opennessCombiner = max; BrightnessCombiner = max по компонентам.
-                open = open.max(open_at(o));
-                let l2 = block_light(level, o);
-                light = (light.0.max(l2.0), light.1.max(l2.1));
-            }
-            // VANILLA: ChestRenderer#submit — open = 1 − (1 − open)³ … 1 − open·open·open.
-            let t = 1.0 - open;
-            let open = 1.0 - t * t * t;
+        // VANILLA: BlockEntityRenderDispatcher — getRenderBoundingBox против Frustum; getViewDistance = 64.
+        let vis: Vec<&Inst> = self
+            .list
+            .iter()
+            .filter(|c| {
+                let d = |i: usize| f64::from(c.pos[i]) + 0.5 - cam[i];
+                if d(0) * d(0) + d(1) * d(1) + d(2) * d(2) > 64.0 * 64.0 {
+                    return false;
+                }
+                frustum.is_none_or(|fr| {
+                    let lo = [
+                        f64::from(c.pos[0]),
+                        f64::from(c.pos[1]),
+                        f64::from(c.pos[2]),
+                    ];
+                    fr.is_visible(lo, [lo[0] + 1.0, lo[1] + 1.0, lo[2] + 1.0])
+                })
+            })
+            .collect();
+        let lids = &self.lids;
+        let models = &self.models;
+        // GPU-скиннинг: группы (тип модели, текстура); экземпляр = матрицы частей + свет.
+        let mut groups: HashMap<(u8, &'static str), Vec<&Inst>> = HashMap::new();
+        for c in vis {
             let idx = match c.ty {
                 Ty::Single => 0,
                 Ty::Left => 1,
                 Ty::Right => 2,
             };
-            let m = &mut self.models[idx];
-            m.reset_pose();
-            // VANILLA: ChestModel#setupAnim — lid.xRot = −open·π/2; замок вместе с крышкой.
-            let rot = -(open * std::f32::consts::FRAC_PI_2);
-            for name in ["lid", "lock"] {
-                if let Some(i) = m.index(name) {
-                    m.parts[i].pose.x_rot = rot;
-                }
-            }
-            // VANILLA: ChestRenderer#createModelTransformation — вращение вокруг (0.5, 0, 0.5).
-            let root = Mat4::from_translation(Vec3::new(
-                (f64::from(c.pos[0]) - cam[0]) as f32,
-                (f64::from(c.pos[1]) - cam[1]) as f32,
-                (f64::from(c.pos[2]) - cam[2]) as f32,
-            )) * Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
-                * Mat4::from_rotation_y((-c.yrot).to_radians())
-                * Mat4::from_translation(Vec3::new(-0.5, 0.0, -0.5));
-            m.bake(root, [255; 4], light, mobs.out(c.tex));
+            groups.entry((idx, c.tex)).or_default().push(c);
+        }
+        const CHUNK: usize = 256;
+        for ((idx, tex), list) in groups {
+            let base = &models[usize::from(idx)];
+            let (stride, out) = mobs.skin_out(SkinKey::Chest(idx), tex, || base.skin_mesh());
+            let start = out.len();
+            out.resize(start + list.len() * stride, 0);
+            out[start..]
+                .par_chunks_mut(CHUNK * stride)
+                .zip(list.par_chunks(CHUNK))
+                .for_each_init(
+                    || (base.clone(), Vec::<Mat4>::with_capacity(base.parts.len())),
+                    |(m, mats), (dst, cs)| {
+                        for (slot, c) in dst.chunks_exact_mut(stride).zip(cs) {
+                            let open_at = |p: [i32; 3]| lids.get(&p).map_or(0.0, |l| l.get(pt));
+                            let mut open = open_at(c.pos);
+                            let mut light = block_light(level, c.pos);
+                            if let Some(o) = c.other {
+                                // VANILLA: opennessCombiner = max; BrightnessCombiner = max по компонентам.
+                                open = open.max(open_at(o));
+                                let l2 = block_light(level, o);
+                                light = (light.0.max(l2.0), light.1.max(l2.1));
+                            }
+                            // VANILLA: ChestRenderer#submit — open = 1 − (1 − open)³ … 1 − open·open·open.
+                            let t = 1.0 - open;
+                            let open = 1.0 - t * t * t;
+                            m.reset_pose();
+                            // VANILLA: ChestModel#setupAnim — lid.xRot = −open·π/2; замок вместе с крышкой.
+                            let rot = -(open * std::f32::consts::FRAC_PI_2);
+                            for name in ["lid", "lock"] {
+                                if let Some(i) = m.index(name) {
+                                    m.parts[i].pose.x_rot = rot;
+                                }
+                            }
+                            // VANILLA: ChestRenderer#createModelTransformation — вращение вокруг (0.5, 0, 0.5).
+                            let root = Mat4::from_translation(Vec3::new(
+                                (f64::from(c.pos[0]) - cam[0]) as f32,
+                                (f64::from(c.pos[1]) - cam[1]) as f32,
+                                (f64::from(c.pos[2]) - cam[2]) as f32,
+                            )) * Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
+                                * Mat4::from_rotation_y((-c.yrot).to_radians())
+                                * Mat4::from_translation(Vec3::new(-0.5, 0.0, -0.5));
+                            m.part_matrices_into(root, mats);
+                            let mut o = 0;
+                            for x in mats.iter() {
+                                for f in x.to_cols_array() {
+                                    slot[o..o + 4].copy_from_slice(&f.to_le_bytes());
+                                    o += 4;
+                                }
+                            }
+                            slot[o..o + 4].copy_from_slice(&f32::from(light.0).to_le_bytes());
+                            slot[o + 4..o + 8].copy_from_slice(&f32::from(light.1).to_le_bytes());
+                        }
+                    },
+                );
         }
     }
 

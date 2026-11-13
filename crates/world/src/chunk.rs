@@ -47,8 +47,13 @@ impl Section {
     /// VANILLA: LevelChunkSection#read (26.3) — short blockCount, short fluidCount, states, biomes.
     pub fn read(f: &ChunkFormat, r: &mut Reader<'_>) -> ProtocolResult<Self> {
         let non_empty_block_count = r.i16()?;
-        let fluid_count = r.i16()?;
-        let states = PalettedContainer::read(Kind::BlockStates, f.block_global_bits, r)?;
+        // VANILLA (1.21.11): LevelChunkSection#write без fluidCount; id состояний → канон.
+        let legacy = crate::legacy::is_legacy();
+        let fluid_count = if legacy { 1 } else { r.i16()? };
+        let mut states = PalettedContainer::read(Kind::BlockStates, f.block_global_bits, r)?;
+        if legacy {
+            states.map_values(crate::legacy::state_to_canon);
+        }
         let biomes = PalettedContainer::read(Kind::Biomes, f.biome_global_bits, r)?;
         Ok(Section {
             non_empty_block_count,

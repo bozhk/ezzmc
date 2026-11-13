@@ -1657,6 +1657,7 @@ name = "ezzmc-world"
 version = "0.1.0"
 dependencies = [
  "ezzmc-protocol",
+ "rustc-hash 1.1.0",
  "tracing",
 ]
 

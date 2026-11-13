@@ -291,6 +291,203 @@ pub fn skeleton_mesh(grow: f32) -> (Model, HumanoidParts) {
     )
 }
 
+/// VANILLA: HumanoidModel#createMesh(grow) (64×32) — внешний слой SkeletonClothingLayer
+/// (stray 0.25, bogged 0.2): обычные руки/ноги 4×12×4 + шляпа (grow+0.5).
+pub fn skeleton_overlay_mesh(grow: f32) -> (Model, HumanoidParts) {
+    let mut m = Model::new([64.0, 32.0]);
+    let head = m.add(
+        "head",
+        None,
+        Pose::default(),
+        &[BoxDef::new([0.0, 0.0], [-4.0, -8.0, -4.0], [8.0, 8.0, 8.0]).grow(grow)],
+    );
+    m.add(
+        "hat",
+        Some(head),
+        Pose::default(),
+        &[BoxDef::new([32.0, 0.0], [-4.0, -8.0, -4.0], [8.0, 8.0, 8.0]).grow(grow + 0.5)],
+    );
+    let body = m.add(
+        "body",
+        None,
+        Pose::default(),
+        &[BoxDef::new([16.0, 16.0], [-4.0, 0.0, -2.0], [8.0, 12.0, 4.0]).grow(grow)],
+    );
+    let limb = |tex: [f32; 2], ox: f32, mirror: bool, oy: f32| {
+        let b = BoxDef::new(tex, [ox, oy, -2.0], [4.0, 12.0, 4.0]).grow(grow);
+        if mirror {
+            b.mirror()
+        } else {
+            b
+        }
+    };
+    let right_arm = m.add(
+        "right_arm",
+        None,
+        Pose::offset(-5.0, 2.0, 0.0),
+        &[limb([40.0, 16.0], -3.0, false, -2.0)],
+    );
+    let left_arm = m.add(
+        "left_arm",
+        None,
+        Pose::offset(5.0, 2.0, 0.0),
+        &[limb([40.0, 16.0], -1.0, true, -2.0)],
+    );
+    let right_leg = m.add(
+        "right_leg",
+        None,
+        Pose::offset(-1.9, 12.0, 0.0),
+        &[limb([0.0, 16.0], -2.0, false, 0.0)],
+    );
+    let left_leg = m.add(
+        "left_leg",
+        None,
+        Pose::offset(1.9, 12.0, 0.0),
+        &[limb([0.0, 16.0], -2.0, true, 0.0)],
+    );
+    (
+        m,
+        HumanoidParts {
+            head,
+            body,
+            right_arm,
+            left_arm,
+            right_leg,
+            left_leg,
+        },
+    )
+}
+
+/// VANILLA: BoggedModel#createBodyLayer — скелет + грибы на голове (6 плоскостей); `mushrooms`
+/// скрывается у остриженного (BoggedModel#setupAnim).
+pub fn bogged_mesh() -> (Model, HumanoidParts) {
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+    let (mut m, p) = skeleton_mesh(0.0);
+    let mush = m.add("mushrooms", Some(p.head), Pose::default(), &[]);
+    let rot = |x: f32, y: f32, z: f32, xr: f32, yr: f32, zr: f32| Pose {
+        x,
+        y,
+        z,
+        x_rot: xr,
+        y_rot: yr,
+        z_rot: zr,
+    };
+    let quad = |tex: [f32; 2], oy: f32| BoxDef::new(tex, [-3.0, oy, 0.0], [6.0, 4.0, 0.0]);
+    let planes: [(&'static str, [f32; 2], f32, Pose); 6] = [
+        (
+            "red_mushroom_1",
+            [50.0, 16.0],
+            -3.0,
+            rot(3.0, -8.0, 3.0, 0.0, FRAC_PI_4, 0.0),
+        ),
+        (
+            "red_mushroom_2",
+            [50.0, 16.0],
+            -3.0,
+            rot(3.0, -8.0, 3.0, 0.0, PI * 0.75, 0.0),
+        ),
+        (
+            "brown_mushroom_1",
+            [50.0, 22.0],
+            -3.0,
+            rot(-3.0, -8.0, -3.0, 0.0, FRAC_PI_4, 0.0),
+        ),
+        (
+            "brown_mushroom_2",
+            [50.0, 22.0],
+            -3.0,
+            rot(-3.0, -8.0, -3.0, 0.0, PI * 0.75, 0.0),
+        ),
+        (
+            "brown_mushroom_3",
+            [50.0, 28.0],
+            -4.0,
+            rot(-2.0, -1.0, 4.0, -FRAC_PI_2, 0.0, FRAC_PI_4),
+        ),
+        (
+            "brown_mushroom_4",
+            [50.0, 28.0],
+            -4.0,
+            rot(-2.0, -1.0, 4.0, -FRAC_PI_2, 0.0, PI * 0.75),
+        ),
+    ];
+    for (name, tex, oy, pose) in planes {
+        m.add(name, Some(mush), pose, &[quad(tex, oy)]);
+    }
+    (m, p)
+}
+
+/// VANILLA: SkeletonModel#createSingleModelDualBodyLayer (64×64) — parched: кость + второй слой в одной модели.
+pub fn parched_mesh() -> (Model, HumanoidParts) {
+    let mut m = Model::new([64.0, 64.0]);
+    let head = m.add(
+        "head",
+        None,
+        Pose::default(),
+        &[
+            BoxDef::new([0.0, 0.0], [-4.0, -8.0, -4.0], [8.0, 8.0, 8.0]),
+            BoxDef::new([0.0, 32.0], [-4.0, -8.0, -4.0], [8.0, 8.0, 8.0]).grow(0.2),
+        ],
+    );
+    let body = m.add(
+        "body",
+        None,
+        Pose::default(),
+        &[
+            BoxDef::new([16.0, 16.0], [-4.0, 0.0, -2.0], [8.0, 12.0, 4.0]),
+            BoxDef::new([28.0, 0.0], [-4.0, 10.0, -2.0], [8.0, 1.0, 4.0]),
+            BoxDef::new([16.0, 48.0], [-4.0, 0.0, -2.0], [8.0, 12.0, 4.0]).grow(0.025),
+        ],
+    );
+    let right_arm = m.add(
+        "right_arm",
+        None,
+        Pose::offset(-5.5, 2.0, 0.0),
+        &[
+            BoxDef::new([40.0, 16.0], [-1.0, -2.0, -1.0], [2.0, 12.0, 2.0]),
+            BoxDef::new([42.0, 33.0], [-1.55, -2.025, -1.5], [3.0, 12.0, 3.0]),
+        ],
+    );
+    let left_arm = m.add(
+        "left_arm",
+        None,
+        Pose::offset(5.5, 2.0, 0.0),
+        &[
+            BoxDef::new([56.0, 16.0], [-1.0, -2.0, -1.0], [2.0, 12.0, 2.0]),
+            BoxDef::new([40.0, 48.0], [-1.45, -2.025, -1.5], [3.0, 12.0, 3.0]),
+        ],
+    );
+    let right_leg = m.add(
+        "right_leg",
+        None,
+        Pose::offset(-2.0, 12.0, 0.0),
+        &[
+            BoxDef::new([0.0, 16.0], [-1.0, 0.0, -1.0], [2.0, 12.0, 2.0]),
+            BoxDef::new([0.0, 49.0], [-1.5, 0.0, -1.5], [3.0, 12.0, 3.0]),
+        ],
+    );
+    let left_leg = m.add(
+        "left_leg",
+        None,
+        Pose::offset(2.0, 12.0, 0.0),
+        &[
+            BoxDef::new([0.0, 16.0], [-1.0, 0.0, -1.0], [2.0, 12.0, 2.0]),
+            BoxDef::new([4.0, 49.0], [-1.5, 0.0, -1.5], [3.0, 12.0, 3.0]),
+        ],
+    );
+    (
+        m,
+        HumanoidParts {
+            head,
+            body,
+            right_arm,
+            left_arm,
+            right_leg,
+            left_leg,
+        },
+    )
+}
+
 /// VANILLA: AnimationUtils#animateZombieArms (без копья/трезубца).
 pub fn zombie_arms(m: &mut Model, p: &HumanoidParts, aggressive: bool, attack: f32) {
     let arm_drop = -PI / if aggressive { 1.5 } else { 2.25 };

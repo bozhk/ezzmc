@@ -2,7 +2,7 @@
 //! VANILLA: ChatComponent, ChatScreen, GuiMessage, ComponentRenderUtils#wrapComponents.
 use crate::editbox::{EditBox, History};
 use crate::ui::lang::Lang;
-use ezzmc_protocol::text::{ClickEvent, Component, Content, Style};
+use ezzmc_protocol::text::{ClickEvent, Component, Content, HoverEvent, Style};
 use ezzmc_render::text::{Fmt, TextRenderer};
 use std::collections::VecDeque;
 
@@ -35,6 +35,8 @@ pub struct Span {
     pub obf: bool,
     pub click: Option<ClickEvent>,
     pub insertion: Option<String>,
+    /// VANILLA: HoverEvent.ShowText — подсказка при наведении (чат открыт).
+    pub hover: Option<Box<Component>>,
 }
 
 impl Span {
@@ -49,6 +51,7 @@ impl Span {
             obf: false,
             click: None,
             insertion: None,
+            hover: None,
         }
     }
 
@@ -75,6 +78,10 @@ fn merge(p: &Span, s: &Style) -> Span {
         obf: s.obfuscated.unwrap_or(p.obf),
         click: s.click.clone().or_else(|| p.click.clone()),
         insertion: s.insertion.clone().or_else(|| p.insertion.clone()),
+        hover: match &s.hover {
+            Some(HoverEvent::ShowText(c)) => Some(c.clone()),
+            _ => p.hover.clone(),
+        },
     }
 }
 
@@ -207,6 +214,7 @@ pub fn flatten(c: &Component, lang: &Lang, colors: bool) -> Vec<Span> {
                 text: std::mem::take(&mut s.text),
                 click: s.click.take(),
                 insertion: s.insertion.take(),
+                hover: s.hover.take(),
                 ..Span::plain(String::new())
             };
         }
@@ -912,6 +920,34 @@ impl Chat {
             }
         }
         None
+    }
+
+    /// VANILLA: ChatScreen#extractRenderState → renderComponentHoverEffect (ShowText): подсказка под курсором,
+    /// перенос по max(gw/2, 200) GUI-пикселей. Строки — (текст с § кодами, цвет по умолчанию).
+    #[allow(clippy::too_many_arguments)]
+    pub fn hover_lines(
+        &mut self,
+        t: &TextRenderer,
+        gw: f32,
+        gh: f32,
+        mx: f32,
+        my: f32,
+        cfg: &Cfg,
+        lang: &Lang,
+    ) -> Vec<(String, u32)> {
+        let Some(h) = self.span_at(t, gh, mx, my, cfg).and_then(|s| s.hover) else {
+            return Vec::new();
+        };
+        let spans = flatten(&h, lang, true);
+        let max_w = (gw / 2.0).max(200.0);
+        Self::wrap(t, &spans, max_w)
+            .into_iter()
+            .enumerate()
+            .map(|(i, segs)| {
+                let it = segs.into_iter().skip(usize::from(i > 0)).map(|g| g.span);
+                (spans_to_legacy(&it.collect::<Vec<_>>(), 0xFFFFFF), 0xFFFFFF)
+            })
+            .collect()
     }
 
     /// Поле ввода ChatScreen (над ним уже нарисован чат).

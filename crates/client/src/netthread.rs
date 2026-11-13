@@ -26,6 +26,10 @@ pub const PROTOCOL: i32 = 777;
 
 /// Команды главного потока сетевому.
 pub enum NetCmd {
+    /// Pong на ClientboundPing (VANILLA: handlePing на главном потоке, после motion/explode).
+    Pong(Vec<u8>),
+    /// Подтверждение телепорта (порядок с Pong сохраняется: один канал).
+    AcceptTeleport(i32, ezzmc_net::play::PlayerState),
     PlayerAction {
         action: i32,
         pos: [i32; 3],
@@ -65,9 +69,23 @@ pub enum NetCmd {
         carried: Option<(u32, i32)>,
     },
     ContainerClose(i32),
+    /// ServerboundRenameItemPacket (поле имени наковальни).
+    RenameItem(String),
+    /// Правка таблички (экран закрыт): позиция, передняя сторона, 4 строки.
+    SignUpdate([i32; 3], bool, [String; 4]),
+    /// Кнопка меню (зачарование, камнерез, ткацкий станок, маяк): (id контейнера, кнопка).
+    ContainerButton(i32, i32),
+    /// ServerboundSetBeaconPacket (id реестра +1, 0 — пусто).
+    SetBeacon(i32, i32),
+    /// ServerboundSelectTradePacket (индекс предложения).
+    SelectTrade(i32),
+    /// ServerboundSelectBundleItemPacket (слот меню, индекс выбранного предмета бандла или -1).
+    SelectBundle(i32, i32),
     /// Реплика чата / команда (без `/`).
     Chat(String),
     Command(String),
+    /// VANILLA: ServerboundCustomClickActionPacket (кнопка диалога custom).
+    CustomClick(String, Option<ezzmc_protocol::nbt::Tag>),
     /// Запрос подсказок (id, вся строка ввода).
     Suggest(i32, String),
     /// 232g: слот креатива (-1 — выбросить).
@@ -120,8 +138,16 @@ pub enum NetEvt {
     /// Чат: оформленный текст и индикатор; overlay=true — action bar.
     Chat(ezzmc_protocol::text::Component, crate::chat::Tag),
     Overlay(ezzmc_protocol::text::Component),
+    /// Список игроков (Tab): player_info_update/remove, tab_list.
+    Tab(Box<crate::tablist::TabEvt>),
+    /// boss_event: (uuid, операция).
+    Boss(u128, Box<crate::bossbar::BossOp>),
     /// ClientboundCommandSuggestionsPacket: id, start, length, варианты.
     Suggestions(i32, i32, i32, Vec<String>),
+    /// show_dialog (Some) / clear_dialog (None).
+    Dialog(Option<Box<crate::dialog::Dialog>>),
+    /// open_sign_editor: позиция, передняя сторона.
+    OpenSign([i32; 3], bool),
     /// Пакет инвентаря/контейнера (230c).
     Inventory(crate::inventory::InvEvent),
     /// GameType локального игрока (Login/Respawn/game_event 3).
@@ -137,6 +163,14 @@ pub enum NetEvt {
     /// UpdateAttributes локального игрока: (имя атрибута без minecraft:, значение).
     Attribute(&'static str, f32),
     Hardcore(bool),
+    /// VANILLA: LocalPlayer#setShowDeathScreen (Login / game_event IMMEDIATE_RESPAWN).
+    ShowDeathScreen(bool),
+    /// Пакет Respawn (VANILLA: handleRespawn закрывает DeathScreen).
+    Respawned,
+    /// VANILLA: handlePlayerCombatKill для локального игрока: причина смерти.
+    CombatKill(Option<ezzmc_protocol::text::Component>),
+    /// VANILLA: Player#getScore (метаданные #18 локального игрока).
+    Score(i32),
     /// ClientboundTrackedWaypointPacket: операция (0 TRACK, 1 UNTRACK, 2 UPDATE).
     Waypoint(u32, crate::hudbars::Wp),
     Joined {
@@ -154,6 +188,8 @@ pub enum NetEvt {
         pitch: f32,
         /// Поколение телепорта (см. `NetHandle::tp_gen`).
         gen: u64,
+        id: i32,
+        state: ezzmc_net::play::PlayerState,
     },
     /// ClientboundExplodePacket (звук играет сетевой поток).
     Explosion(Box<ExplosionEvt>),
@@ -167,6 +203,8 @@ pub enum NetEvt {
     },
     /// Set Entity Motion для локального игрока.
     Motion([f64; 3]),
+    /// ClientboundPing → главный поток отвечает `NetCmd::Pong` (порядок с motion/тиками как в ванили).
+    Ping(Vec<u8>),
     Level(LevelEvent),
     Disconnected(String),
 }
@@ -283,6 +321,20 @@ fn send_tick_action(h: &mut PlayHandler, c: &mut Connection, cmd: NetCmd) -> Res
     }
 }
 
+/// Protocol number из `version.protocol` ответа Status → известная версия, иначе канон.
+fn detect_version(addr: &str) -> ezzmc_protocol::version::Version {
+    use ezzmc_protocol::version::{by_protocol, CANON};
+    let Ok(r) = ezzmc_net::status::ping_server(addr, CANON.protocol) else {
+        return CANON;
+    };
+    serde_json::from_str::<serde_json::Value>(&r.json)
+        .ok()
+        .and_then(|v| v["version"]["protocol"].as_i64())
+        .and_then(|p| i32::try_from(p).ok())
+        .and_then(by_protocol)
+        .unwrap_or(CANON)
+}
+
 fn run(
     addr: &str,
     name: &str,
@@ -293,10 +345,14 @@ fn run(
     cmds: &Receiver<NetCmd>,
 ) -> Result<(), String> {
     let e = |x: &dyn std::fmt::Display| x.to_string();
-    let ids = PacketIds::v26_3();
+    // DEC (CLAUDE.md): версия сервера — автодетект по Status, молча; неизвестная → канон.
+    let ver = detect_version(addr);
+    ezzmc_protocol::version::set_current(ver);
+    tracing::info!("версия сервера: {} (protocol {})", ver.name, ver.protocol);
+    let ids = PacketIds::for_version(&ver);
     let (host, port) = ezzmc_net::srv::parse_address(addr);
     let mut c = Connection::connect(addr).map_err(|x| e(&x))?;
-    c.handshake(PROTOCOL, &host, port, Intent::Login)
+    c.handshake(ver.protocol, &host, port, Intent::Login)
         .map_err(|x| e(&x))?;
     // DEC-016: сессия лаунчера (Microsoft) → онлайн-вход, иначе offline.
     match session() {
@@ -330,6 +386,9 @@ fn run(
             .collect();
     }
     let chat_types = crate::chatnet::chat_types(reg("minecraft:chat_type"));
+    if let Ok(mut g) = crate::dialog::DIALOG_REG.lock() {
+        *g = reg("minecraft:dialog").map_or_else(Vec::new, |r| r.entries.clone());
+    }
     let (Some(dims), Some(biomes)) = (
         reg("minecraft:dimension_type"),
         reg("minecraft:worldgen/biome"),
@@ -357,6 +416,13 @@ fn run(
                 (n.clone(), max.unwrap_or(1) as i32)
             })
             .collect();
+    }
+    // Узоры баннеров (holder id = индекс) для превью ткацкого станка.
+    if let (Some(r), Ok(mut g)) = (
+        reg("minecraft:banner_pattern"),
+        crate::loomscreen::REG.lock(),
+    ) {
+        *g = r.entries.iter().map(|(n, _)| n.clone()).collect();
     }
     // Атрибуты для attribute_modifiers подсказки: короткие имена, порядок = holder id.
     if let (Some(r), Ok(mut g)) = (
@@ -429,6 +495,9 @@ fn run(
     });
     let mut h = PlayHandler::new(ids);
     let mut loaded_sent = false;
+    let mut cur_dim = String::new();
+    // Локальный игрок мёртв (set_health ≤ 0 до Respawn): сервер шлёт forget_level_chunk, ваниль мир не сносит.
+    let mut player_dead = false;
     let mut batch_size = ezzmc_net::chunkbatch::ChunkBatchSize::default();
     // VANILLA: LocalPlayer#sendChanges каждый клиентский тик: player_input при изменении, команда спринта,
     // затем один из MovePlayer (PosRot/Pos/Rot/StatusOnly) по порогу 2e-4 и heartbeat раз в 20 тиков.
@@ -448,6 +517,7 @@ fn run(
     let tick_len = std::time::Duration::from_millis(50);
     let mut next_tick = std::time::Instant::now() + tick_len;
     let mut last_abs = 0.0f32;
+    let mut last_score = 0i32;
     loop {
         let wait = next_tick.saturating_duration_since(std::time::Instant::now());
         let t_poll = std::time::Instant::now();
@@ -536,7 +606,9 @@ fn run(
                         } else {
                             tracker.step(p3, [yaw, pitch], ground, hcol)
                         };
-                        if let Some(kind) = kind {
+                        // Мёртвому игроку позицию не шлём: сервер откатывает его к своей (на 0.078 в блоке),
+                        // клиент проваливается → прыжки по вертикали.
+                        if let Some(kind) = kind.filter(|_| !player_dead) {
                             // Догон тиков после задержки кадра (несколько PhysTick подряд) шлём
                             // не чаще одного пакета на 50 мс: сервер считает пакеты по своим тикам,
                             // два подряд в один тик дают TickTimer и откат. Тики не теряем, только растягиваем.
@@ -582,6 +654,10 @@ fn run(
                         h.send_client_tick_end(&mut c).map_err(|x| e(&x))?;
                     }
                 }
+                NetCmd::Pong(b) => h.send_pong(&mut c, &b).map_err(|x| e(&x))?,
+                NetCmd::AcceptTeleport(id, st) => {
+                    h.accept_teleport(&mut c, id, &st).map_err(|x| e(&x))?
+                }
                 NetCmd::PickBlock(bp, data) => {
                     // Версии до 1.21.5 пакета не знают — молча игнорируем.
                     let _ = h.send_pick_item_from_block(&mut c, bp, data);
@@ -607,9 +683,24 @@ fn run(
                 NetCmd::Command(m) => h
                     .send_chat_command(&mut c, &m, unix_ms())
                     .map_err(|x| e(&x))?,
+                NetCmd::CustomClick(id, payload) => h
+                    .send_custom_click(&mut c, &id, payload.as_ref())
+                    .map_err(|x| e(&x))?,
                 NetCmd::Suggest(id, t) => h
                     .send_command_suggestion(&mut c, id, &t)
                     .map_err(|x| e(&x))?,
+                NetCmd::ContainerButton(id, b) => {
+                    h.send_container_button(&mut c, id, b).map_err(|x| e(&x))?
+                }
+                NetCmd::SetBeacon(a, b) => h.send_set_beacon(&mut c, a, b).map_err(|x| e(&x))?,
+                NetCmd::SelectBundle(sl, i) => h
+                    .send_select_bundle_item(&mut c, sl, i)
+                    .map_err(|x| e(&x))?,
+                NetCmd::SelectTrade(i) => h.send_select_trade(&mut c, i).map_err(|x| e(&x))?,
+                NetCmd::SignUpdate(p, front, lines) => h
+                    .send_sign_update(&mut c, p, front, &lines)
+                    .map_err(|x| e(&x))?,
+                NetCmd::RenameItem(name) => h.send_rename_item(&mut c, &name).map_err(|x| e(&x))?,
                 NetCmd::ContainerClose(id) => {
                     h.send_container_close(&mut c, id).map_err(|x| e(&x))?
                 }
@@ -670,6 +761,11 @@ fn run(
                     }
                     // VANILLA: Player#getAbsorptionAmount (метаданные #15 игрока).
                     let abs = l.float15.get(&h.player_id).copied().unwrap_or(0.0);
+                    let score = l.player_score.get(&h.player_id).copied().unwrap_or(0);
+                    if score != last_score {
+                        last_score = score;
+                        let _ = tx.send(NetEvt::Score(score));
+                    }
                     if abs != last_abs {
                         last_abs = abs;
                         let _ = tx.send(NetEvt::Attribute("absorption", abs));
@@ -702,6 +798,21 @@ fn run(
             };
             let pid = p.id;
             let pname = ids.name_of(State::Play, Direction::Clientbound, p.id);
+            // Сервер старой версии: тело → формат канона (глава 18).
+            let mut p = p;
+            p.body = match ezzmc_net::legacy::to_canon(pname, std::mem::take(&mut p.body)) {
+                Ok(Some(b)) => b,
+                Ok(None) => continue,
+                Err(err) => {
+                    tracing::warn!("{pname:?}: трансляция версии: {err}");
+                    continue;
+                }
+            };
+            // VANILLA: рендер ClientLevel держит секции чанков после forget_level_chunk (сервер шлёт их
+            // при смерти), поэтому под экраном смерти виден мир; новые чанки придут после Respawn.
+            if player_dead && pname == Some("forget_level_chunk") {
+                continue;
+            }
             // Лог входящих игровых пакетов (`--log-packets`, цель `packets`).
             tracing::trace!(target: "packets", "in play {pname:?} id={pid} len={}", p.body.len());
             let body = p.body.clone();
@@ -715,6 +826,7 @@ fn run(
                     // VANILLA: handleLogin / handleRespawn — новый ClientLevel (смена измерения).
                     let (dim_type, radius, is_flat) = match &ev {
                         PlayEvent::Login(l) => {
+                            cur_dim = l.spawn.dimension.clone();
                             crate::itemdyn::set_dimension(&l.spawn.dimension);
                             crate::itemdyn::set_death(
                                 l.spawn
@@ -724,10 +836,15 @@ fn run(
                             );
                             let _ = tx.send(NetEvt::GameMode(l.spawn.game_type));
                             let _ = tx.send(NetEvt::Hardcore(l.hardcore));
+                            let _ = tx.send(NetEvt::ShowDeathScreen(l.show_death_screen));
                             view_radius = l.chunk_radius;
                             (l.spawn.dimension_type, l.chunk_radius, l.spawn.is_flat)
                         }
                         PlayEvent::Respawn { spawn, .. } => {
+                            // VANILLA: handleRespawn — новый ClientLevel только при смене измерения
+                            // (смерть в том же измерении оставляет мир и чанки).
+                            let changed = spawn.dimension != cur_dim;
+                            cur_dim = spawn.dimension.clone();
                             crate::itemdyn::set_dimension(&spawn.dimension);
                             crate::itemdyn::set_death(
                                 spawn
@@ -737,7 +854,12 @@ fn run(
                             );
                             // После экрана загрузки ваниль снова шлёт Player Loaded.
                             loaded_sent = false;
+                            player_dead = false;
+                            let _ = tx.send(NetEvt::Respawned);
                             let _ = tx.send(NetEvt::GameMode(spawn.game_type));
+                            if !changed {
+                                continue;
+                            }
                             (spawn.dimension_type, view_radius, spawn.is_flat)
                         }
                         _ => continue,
@@ -782,10 +904,13 @@ fn run(
                 PlayEvent::OpLevel(l) => {
                     let _ = tx.send(NetEvt::OpLevel(l));
                 }
+                PlayEvent::Ping(b) => {
+                    let _ = tx.send(NetEvt::Ping(b));
+                }
                 PlayEvent::Motion(v) => {
                     let _ = tx.send(NetEvt::Motion(v));
                 }
-                PlayEvent::Teleport { state, .. } => {
+                PlayEvent::Teleport { state, teleport_id } => {
                     // Позиция и событие уходят под одним локом `pos`: главный поток берёт лок до разбора
                     // событий, поэтому старая камера не затрёт телепорт (иначе «moved too quickly» и откат).
                     if let Ok(mut g) = pos.lock() {
@@ -810,6 +935,8 @@ fn run(
                             yaw: state.yaw,
                             pitch: state.pitch,
                             gen,
+                            id: teleport_id,
+                            state,
                         });
                     }
                 }
@@ -818,6 +945,10 @@ fn run(
                     tracing::trace!("game_event {event} {param}");
                     if event == ezzmc_net::play::game_event::CHANGE_GAME_MODE {
                         let _ = tx.send(NetEvt::GameMode(param as i8));
+                    }
+                    // VANILLA: handleGameEvent IMMEDIATE_RESPAWN (11) → setShowDeathScreen(param == 0).
+                    if event == 11 {
+                        let _ = tx.send(NetEvt::ShowDeathScreen(param == 0.0));
                     }
                     // Погодные события (дождь/гроза) разбирает Level по сырому телу пакета.
                     if let Ok(mut g) = shared.lock() {
@@ -843,7 +974,25 @@ fn run(
                         // VANILLA: ClientPacketListener#handleSetHealth (float health, varint food, float saturation).
                         let mut rd = ezzmc_protocol::wire::Reader::new(&body);
                         if let (Ok(hp), Ok(food), Ok(sat)) = (rd.f32(), rd.var_int(), rd.f32()) {
+                            player_dead = hp <= 0.0;
                             let _ = tx.send(NetEvt::Health(hp, food, sat));
+                        }
+                        continue;
+                    }
+                    if pname == "player_combat_kill" {
+                        // VANILLA: ClientboundPlayerCombatKillPacket (varint playerId, Component message).
+                        let mut rd = ezzmc_protocol::wire::Reader::new(&body);
+                        if let Ok(id) = rd.var_int() {
+                            if id == h.player_id {
+                                let msg = ezzmc_protocol::nbt::read_network(&mut rd)
+                                    .ok()
+                                    .flatten()
+                                    .and_then(|t| {
+                                        ezzmc_protocol::text::Component::from_nbt(&t).ok()
+                                    });
+                                player_dead = true;
+                                let _ = tx.send(NetEvt::CombatKill(msg));
+                            }
                         }
                         continue;
                     }
@@ -908,6 +1057,59 @@ fn run(
                             }
                             Err(x) => tracing::warn!("{pname}: {x}"),
                         }
+                        continue;
+                    }
+                    if matches!(
+                        pname,
+                        "player_info_update" | "player_info_remove" | "tab_list"
+                    ) {
+                        use crate::tablist::{self as tl, TabEvt};
+                        let r = match pname {
+                            "player_info_update" => tl::parse_update(&body).map(TabEvt::Update),
+                            "player_info_remove" => tl::parse_remove(&body).map(TabEvt::Remove),
+                            _ => tl::parse_header_footer(&body)
+                                .map(|(h, f)| TabEvt::HeaderFooter(Box::new((h, f)))),
+                        };
+                        match r {
+                            Ok(ev) => {
+                                let _ = tx.send(NetEvt::Tab(Box::new(ev)));
+                            }
+                            Err(x) => tracing::warn!("{pname}: {x}"),
+                        }
+                        continue;
+                    }
+                    if pname == "boss_event" {
+                        match crate::bossbar::parse(&body) {
+                            Ok((id, op)) => {
+                                let _ = tx.send(NetEvt::Boss(id, Box::new(op)));
+                            }
+                            Err(x) => tracing::warn!("boss_event: {x}"),
+                        }
+                        continue;
+                    }
+                    if pname == "show_dialog" {
+                        // VANILLA: ClientCommonPacketListenerImpl#handleShowDialog.
+                        match crate::dialog::parse_packet(&body) {
+                            Some(d) => {
+                                let _ = tx.send(NetEvt::Dialog(Some(Box::new(d))));
+                            }
+                            None => tracing::warn!("show_dialog: не разобран [len={}]", body.len()),
+                        }
+                        continue;
+                    }
+                    if pname == "open_sign_editor" {
+                        // VANILLA: ClientPacketListener#handleOpenSignEditor — pos + slot (VarInt/bool, 1 = front).
+                        let mut r = ezzmc_protocol::wire::Reader::new(&body);
+                        match (ezzmc_protocol::types::BlockPos::read(&mut r), r.u8()) {
+                            (Ok(p), Ok(f)) => {
+                                let _ = tx.send(NetEvt::OpenSign([p.x, p.y, p.z], f == 1));
+                            }
+                            _ => tracing::warn!("open_sign_editor: не разобран"),
+                        }
+                        continue;
+                    }
+                    if pname == "clear_dialog" {
+                        let _ = tx.send(NetEvt::Dialog(None));
                         continue;
                     }
                     if pname == "command_suggestions" {

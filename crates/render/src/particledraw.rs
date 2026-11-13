@@ -2,6 +2,7 @@
 //! Частицы приходят уже с позицией относительно камеры; квад строится по правой/верхней оси камеры
 //! (LOOKAT_XYZ: поворот камеры, углы (1,−1),(1,1),(−1,1),(−1,−1) × quad_size).
 
+use crate::entitymodel::{SkinMesh, SKIN_VERTEX_SIZE};
 use crate::shaders::Shader;
 use crate::uniforms::DynamicTransformsUniform;
 use crate::weatherdraw::make_texture;
@@ -31,6 +32,7 @@ pub struct ParticleQuad {
 
 const VERTEX_SIZE: usize = 32;
 
+#[inline(always)]
 pub fn push_vertex(out: &mut Vec<u8>, p: [f32; 3], uv: [f32; 2], c: [u8; 4], light: (u8, u8)) {
     push_vertex_raw(
         out,
@@ -42,6 +44,7 @@ pub fn push_vertex(out: &mut Vec<u8>, p: [f32; 3], uv: [f32; 2], c: [u8; 4], lig
 }
 
 /// То же, свет уже в 0..240.
+#[inline(always)]
 pub fn push_vertex_raw(
     out: &mut Vec<u8>,
     p: [f32; 3],
@@ -92,6 +95,11 @@ pub struct ParticleDraw {
     alpha: f32,
     /// Блеск предметов: берутся только квады с битом FOIL_FLAG в свете.
     foil_only: bool,
+    /// Для `new_skinned`: те же layouts групп 0/1 и форматы целей.
+    l0: wgpu::BindGroupLayout,
+    l1: wgpu::BindGroupLayout,
+    color_format: wgpu::TextureFormat,
+    depth_format: wgpu::TextureFormat,
 }
 
 /// Бит в `uv2.x` вершины: у предмета есть блеск (шейдер его маскирует `& 4095`).
@@ -124,7 +132,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, particles, false,
-            false, false, None, false,
+            false, false, None, false, false,
         )
     }
 
@@ -144,7 +152,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, true, false,
-            false, None, false,
+            false, None, false, false,
         )
     }
 
@@ -163,7 +171,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, true,
-            false, None, false,
+            false, None, false, false,
         )
     }
 
@@ -182,7 +190,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, false,
-            false, None, true,
+            false, None, true, false,
         )
     }
 
@@ -202,7 +210,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, false,
-            true, None, false,
+            true, None, false, false,
         )
     }
 
@@ -239,6 +247,26 @@ impl ParticleDraw {
             true,
             Some(g),
             false,
+            false,
+        )
+    }
+
+    /// Энергетическое свечение (заряженный крипер). VANILLA: RenderTypes#energySwirl — ADDITIVE.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_additive(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color: wgpu::TextureFormat,
+        depth: wgpu::TextureFormat,
+        projection: &wgpu::Buffer,
+        fog: &wgpu::Buffer,
+        lightmap: &wgpu::TextureView,
+        blocks: &wgpu::TextureView,
+        texture: Option<(&[u8], u32, u32)>,
+    ) -> Self {
+        Self::new_ex(
+            device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, false,
+            false, None, false, true,
         )
     }
 
@@ -262,6 +290,7 @@ impl ParticleDraw {
         glint: bool,
         item_glint: Option<(&[u8], u32, u32)>,
         mask: bool,
+        additive: bool,
     ) -> Self {
         let vf = wgpu::ShaderStages::VERTEX_FRAGMENT;
         let uni = |binding| wgpu::BindGroupLayoutEntry {
@@ -444,7 +473,21 @@ impl ParticleDraw {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: color,
-                    blend: Some(if glint {
+                    blend: Some(if additive {
+                        // VANILLA: BlendFunction.ADDITIVE (RenderPipelines#ENERGY_SWIRL): SRC_ALPHA, ONE.
+                        wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::SrcAlpha,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Zero,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }
+                    } else if glint {
                         wgpu::BlendState {
                             color: wgpu::BlendComponent {
                                 src_factor: wgpu::BlendFactor::Src,
@@ -510,6 +553,171 @@ impl ParticleDraw {
             texture_mat: Mat4::IDENTITY,
             alpha: if glint { 0.75 } else { 1.0 },
             foil_only: item_mode,
+            l0,
+            l1,
+            color_format: color,
+            depth_format: depth,
+        }
+    }
+
+    /// Записывает `model_view` (поворот камеры) — для `SkinnedDraw`: `prepare_raw` при пустых данных его не пишет.
+    pub fn set_model_view(&self, queue: &wgpu::Queue, model_view: Mat4) {
+        queue.write_buffer(
+            &self.dyn_buf,
+            0,
+            &DynamicTransformsUniform {
+                model_view_mat: model_view,
+                color_modulator: [1.0, 1.0, 1.0, self.alpha],
+                model_offset: [0.0; 3],
+                texture_mat: self.texture_mat,
+            }
+            .to_bytes(),
+        );
+    }
+
+    /// GPU-скиннинг: статическая сетка `mesh` + матрицы частей на экземпляр. Рисуется с группами
+    /// 0/1 (проекция, туман, текстура) этой `ParticleDraw`.
+    pub fn new_skinned(&self, device: &wgpu::Device, mesh: &SkinMesh) -> SkinnedDraw {
+        let vs = wgpu::ShaderStages::VERTEX;
+        let l2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("skinned.group2"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: vs,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: vs,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("skinned.pl"),
+            bind_group_layouts: &[&self.l0, &self.l1, &l2],
+            immediate_size: 0,
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("skinned"),
+            source: wgpu::ShaderSource::Wgsl(Shader::Skinned.source().into()),
+        });
+        let attrs = [
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: 12,
+                shader_location: 1,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 20,
+                shader_location: 2,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Uint32,
+                offset: 32,
+                shader_location: 3,
+            },
+        ];
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("skinned"),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: SKIN_VERTEX_SIZE as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &attrs,
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: self.color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                // Эксперимент (не ваниль: entityCutoutNoCull): EZZMC_SKIN_CULL=1 отсекает задние грани.
+                cull_mode: std::env::var_os("EZZMC_SKIN_CULL").map(|_| wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: self.depth_format,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let vb = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("skinned.vb"),
+            size: mesh.verts.len() as u64,
+            usage: wgpu::BufferUsages::VERTEX,
+            mapped_at_creation: true,
+        });
+        vb.slice(..)
+            .get_mapped_range_mut()
+            .copy_from_slice(&mesh.verts);
+        vb.unmap();
+        // Размер индексов выравниваем до 4 байт (требование write/mapping).
+        let mut idx: Vec<u8> = mesh.indices.iter().flat_map(|i| i.to_le_bytes()).collect();
+        idx.resize(idx.len().next_multiple_of(4), 0);
+        let ib = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("skinned.ib"),
+            size: idx.len() as u64,
+            usage: wgpu::BufferUsages::INDEX,
+            mapped_at_creation: true,
+        });
+        ib.slice(..).get_mapped_range_mut().copy_from_slice(&idx);
+        ib.unmap();
+        // stride экземпляра в vec4: матрицы частей + свет.
+        let stride = mesh.parts as u32 * 4 + 1;
+        let cfg = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("skinned.cfg"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: true,
+        });
+        cfg.slice(..)
+            .get_mapped_range_mut()
+            .copy_from_slice(&[stride, 0, 0, 0].map(u32::to_le_bytes).concat());
+        cfg.unmap();
+        SkinnedDraw {
+            pipeline,
+            l2,
+            vb,
+            ib,
+            index_count: mesh.indices.len() as u32,
+            cfg,
+            inst: None,
+            bind: None,
+            count: 0,
+            stride_bytes: u64::from(stride) * 16,
         }
     }
 
@@ -621,10 +829,16 @@ impl ParticleDraw {
         if n == 0 {
             return;
         }
-        let mut data = Vec::with_capacity(blocks.len() + particles.len());
-        data.extend_from_slice(blocks);
-        data.extend_from_slice(particles);
-        let data = &data[..];
+        // Одна из групп пуста (мобы: только `particles`) — без копии всего буфера за кадр.
+        let joined;
+        let data: &[u8] = if blocks.is_empty() {
+            particles
+        } else if particles.is_empty() {
+            blocks
+        } else {
+            joined = [blocks, particles].concat();
+            &joined
+        };
         if self
             .vb
             .as_ref()
@@ -693,6 +907,335 @@ impl ParticleDraw {
                 0..1,
             );
         }
+    }
+}
+
+/// Рисовальщик мобов со скиннингом на GPU (см. `ParticleDraw::new_skinned`).
+pub struct SkinnedDraw {
+    pipeline: wgpu::RenderPipeline,
+    l2: wgpu::BindGroupLayout,
+    vb: wgpu::Buffer,
+    ib: wgpu::Buffer,
+    index_count: u32,
+    cfg: wgpu::Buffer,
+    inst: Option<wgpu::Buffer>,
+    bind: Option<wgpu::BindGroup>,
+    count: u32,
+    stride_bytes: u64,
+}
+
+impl SkinnedDraw {
+    /// Заливает экземпляры (`stride_bytes` на моба: матрицы частей + свет) в storage-буфер.
+    pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, data: &[u8]) {
+        self.count = (data.len() as u64 / self.stride_bytes) as u32;
+        if self.count == 0 {
+            return;
+        }
+        if self
+            .inst
+            .as_ref()
+            .is_none_or(|b| b.size() < data.len() as u64)
+        {
+            let b = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("skinned.inst"),
+                size: (data.len() as u64).next_power_of_two(),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("skinned.group2"),
+                layout: &self.l2,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: b.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.cfg.as_entire_binding(),
+                    },
+                ],
+            }));
+            self.inst = Some(b);
+        }
+        if let Some(b) = &self.inst {
+            queue.write_buffer(b, 0, data);
+        }
+    }
+
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, base: &ParticleDraw) {
+        let Some(bind) = &self.bind else { return };
+        if self.count == 0 {
+            return;
+        }
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &base.group0, &[]);
+        pass.set_bind_group(1, &base.group_particles, &[]);
+        pass.set_bind_group(2, bind, &[]);
+        pass.set_vertex_buffer(0, self.vb.slice(..));
+        pass.set_index_buffer(self.ib.slice(..), wgpu::IndexFormat::Uint16);
+        pass.draw_indexed(0..self.index_count, 0, 0..self.count);
+    }
+}
+
+/// Диапазон экземпляров одной модели в буфере `ItemInstDraw`: сначала обычные, затем с блеском.
+#[derive(Clone, Copy)]
+pub struct ItemInstRange {
+    pub mesh: usize,
+    pub first: u32,
+    pub count: u32,
+    pub foil: u32,
+}
+
+struct ItemInstMesh {
+    vb: wgpu::Buffer,
+    ib: wgpu::Buffer,
+    blocks_idx: u32,
+    items_idx: u32,
+}
+
+/// Размер экземпляра: матрица (4 vec4) + свет (vec4).
+pub const ITEM_INST_FLOATS: usize = 20;
+
+/// GPU-инстансинг предметов-сущностей: модели лежат на GPU, на экземпляр уходит матрица и свет.
+pub struct ItemInstDraw {
+    pipe: wgpu::RenderPipeline,
+    pipe_glint: wgpu::RenderPipeline,
+    l2: wgpu::BindGroupLayout,
+    meshes: Vec<ItemInstMesh>,
+    inst: Option<wgpu::Buffer>,
+    bind: Option<wgpu::BindGroup>,
+    ranges: Vec<ItemInstRange>,
+}
+
+impl ItemInstDraw {
+    /// `main` — базовый ParticleDraw предметов (обычный проход), `glint` — базовый с текстурой блеска.
+    pub fn new(device: &wgpu::Device, main: &ParticleDraw, glint: &ParticleDraw) -> Self {
+        let l2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("iteminst.group2"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("iteminst"),
+            source: wgpu::ShaderSource::Wgsl(Shader::ItemInst.source().into()),
+        });
+        let attrs = [
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: 12,
+                shader_location: 1,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 20,
+                shader_location: 2,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Uint8x4,
+                offset: 32,
+                shader_location: 3,
+            },
+        ];
+        let make = |base: &ParticleDraw, is_glint: bool| {
+            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("iteminst.pl"),
+                bind_group_layouts: &[&base.l0, &base.l1, &l2],
+                immediate_size: 0,
+            });
+            let add = wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            };
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("iteminst"),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: SKIN_VERTEX_SIZE as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &attrs,
+                    }],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(if is_glint { "fs_glint_item" } else { "fs_main" }),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: base.color_format,
+                        // Как в `new_ex`: блеск — SRC_COLOR, ONE; иначе альфа-смешение.
+                        blend: Some(if is_glint {
+                            wgpu::BlendState {
+                                color: wgpu::BlendComponent {
+                                    src_factor: wgpu::BlendFactor::Src,
+                                    dst_factor: wgpu::BlendFactor::One,
+                                    operation: wgpu::BlendOperation::Add,
+                                },
+                                alpha: add,
+                            }
+                        } else {
+                            wgpu::BlendState::ALPHA_BLENDING
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: base.depth_format,
+                    depth_write_enabled: !is_glint,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        ItemInstDraw {
+            pipe: make(main, false),
+            pipe_glint: make(glint, true),
+            l2,
+            meshes: Vec::new(),
+            inst: None,
+            bind: None,
+            ranges: Vec::new(),
+        }
+    }
+
+    /// Добавляет модель: вершины квадов атласа блоков и атласа предметов (`HandMesh::static_mesh`).
+    /// Возвращает номер модели.
+    pub fn add_mesh(&mut self, device: &wgpu::Device, blocks: &[u8], items: &[u8]) -> usize {
+        let mut verts = blocks.to_vec();
+        verts.extend_from_slice(items);
+        let nb = (blocks.len() / (SKIN_VERTEX_SIZE * 4)) as u32;
+        let ni = (items.len() / (SKIN_VERTEX_SIZE * 4)) as u32;
+        let mut idx: Vec<u32> = Vec::with_capacity(((nb + ni) * 6) as usize);
+        for q in 0..nb + ni {
+            let b = q * 4;
+            idx.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
+        }
+        let vb = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("iteminst.vb"),
+            size: (verts.len() as u64).next_multiple_of(4).max(4),
+            usage: wgpu::BufferUsages::VERTEX,
+            mapped_at_creation: true,
+        });
+        vb.slice(..).get_mapped_range_mut()[..verts.len()].copy_from_slice(&verts);
+        vb.unmap();
+        let bytes: Vec<u8> = idx.iter().flat_map(|i| i.to_le_bytes()).collect();
+        let ib = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("iteminst.ib"),
+            size: (bytes.len() as u64).max(4),
+            usage: wgpu::BufferUsages::INDEX,
+            mapped_at_creation: true,
+        });
+        ib.slice(..).get_mapped_range_mut()[..bytes.len()].copy_from_slice(&bytes);
+        ib.unmap();
+        self.meshes.push(ItemInstMesh {
+            vb,
+            ib,
+            blocks_idx: nb * 6,
+            items_idx: ni * 6,
+        });
+        self.meshes.len() - 1
+    }
+
+    /// Заливает экземпляры (`ITEM_INST_FLOATS` f32 на экземпляр) и список диапазонов.
+    pub fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        data: &[u8],
+        ranges: &[ItemInstRange],
+    ) {
+        self.ranges.clear();
+        self.ranges.extend_from_slice(ranges);
+        if data.is_empty() {
+            return;
+        }
+        if self
+            .inst
+            .as_ref()
+            .is_none_or(|b| b.size() < data.len() as u64)
+        {
+            let b = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("iteminst.inst"),
+                size: (data.len() as u64).next_power_of_two(),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("iteminst.group2"),
+                layout: &self.l2,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: b.as_entire_binding(),
+                }],
+            }));
+            self.inst = Some(b);
+        }
+        if let Some(b) = &self.inst {
+            queue.write_buffer(b, 0, data);
+        }
+    }
+
+    fn draw_pass(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        base: &ParticleDraw,
+        pipe: &wgpu::RenderPipeline,
+        glint: bool,
+    ) {
+        let Some(bind) = &self.bind else { return };
+        pass.set_pipeline(pipe);
+        pass.set_bind_group(0, &base.group0, &[]);
+        pass.set_bind_group(2, bind, &[]);
+        for r in &self.ranges {
+            let (first, count) = if glint {
+                (r.first + r.count - r.foil, r.foil)
+            } else {
+                (r.first, r.count)
+            };
+            if count == 0 {
+                continue;
+            }
+            let m = &self.meshes[r.mesh];
+            pass.set_vertex_buffer(0, m.vb.slice(..));
+            pass.set_index_buffer(m.ib.slice(..), wgpu::IndexFormat::Uint32);
+            let inst = first..first + count;
+            if m.blocks_idx > 0 {
+                pass.set_bind_group(1, &base.group_blocks, &[]);
+                pass.draw_indexed(0..m.blocks_idx, 0, inst.clone());
+            }
+            if m.items_idx > 0 {
+                pass.set_bind_group(1, &base.group_particles, &[]);
+                pass.draw_indexed(m.blocks_idx..m.blocks_idx + m.items_idx, 0, inst);
+            }
+        }
+    }
+
+    /// Обычный проход, затем блеск (порядок как у `entity_item_draw` → `entity_glint_draw`).
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, main: &ParticleDraw, glint: &ParticleDraw) {
+        self.draw_pass(pass, main, &self.pipe, false);
+        self.draw_pass(pass, glint, &self.pipe_glint, true);
     }
 }
 

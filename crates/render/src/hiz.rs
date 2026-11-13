@@ -17,6 +17,9 @@ pub struct HiZ {
     mip_views: Vec<wgpu::TextureView>,
     copy: wgpu::ComputePipeline,
     down: wgpu::ComputePipeline,
+    /// bind group'ы downsample (mip m-1 → m) — mip-views неизменны, создаём один раз.
+    down_bgs: Vec<wgpu::BindGroup>,
+    copy_layout: wgpu::BindGroupLayout,
 }
 
 impl HiZ {
@@ -37,7 +40,7 @@ impl HiZ {
             usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let mip_views = (0..mips)
+        let mip_views: Vec<wgpu::TextureView> = (0..mips)
             .map(|m| {
                 tex.create_view(&wgpu::TextureViewDescriptor {
                     base_mip_level: m,
@@ -60,14 +63,37 @@ impl HiZ {
                 cache: None,
             })
         };
+        let copy = pipe("copy_depth");
+        let down = pipe("downsample");
+        let down_layout = down.get_bind_group_layout(0);
+        let down_bgs = (1..mips as usize)
+            .map(|m| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("hiz down"),
+                    layout: &down_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&mip_views[m - 1]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&mip_views[m]),
+                        },
+                    ],
+                })
+            })
+            .collect();
         Self {
             width,
             height,
             mips,
             view: tex.create_view(&Default::default()),
             mip_views,
-            copy: pipe("copy_depth"),
-            down: pipe("downsample"),
+            copy_layout: copy.get_bind_group_layout(0),
+            copy,
+            down,
+            down_bgs,
         }
     }
 
@@ -90,45 +116,30 @@ impl HiZ {
         depth: &wgpu::TextureView,
     ) {
         let groups = |w: u32, h: u32| (w.div_ceil(8), h.div_ceil(8));
-        {
-            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("hiz copy"),
-                layout: &self.copy.get_bind_group_layout(0),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(depth),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&self.mip_views[0]),
-                    },
-                ],
-            });
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.copy);
-            pass.set_bind_group(0, &bg, &[]);
-            let (gx, gy) = groups(self.width, self.height);
-            pass.dispatch_workgroups(gx, gy, 1);
-        }
-        for m in 1..self.mips as usize {
-            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("hiz down"),
-                layout: &self.down.get_bind_group_layout(0),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&self.mip_views[m - 1]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&self.mip_views[m]),
-                    },
-                ],
-            });
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.down);
-            pass.set_bind_group(0, &bg, &[]);
+        // Один compute-проход: wgpu сам ставит барьеры между dispatch'ами (mip m читает m-1).
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("hiz copy"),
+            layout: &self.copy_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.mip_views[0]),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&self.copy);
+        pass.set_bind_group(0, &bg, &[]);
+        let (gx, gy) = groups(self.width, self.height);
+        pass.dispatch_workgroups(gx, gy, 1);
+        pass.set_pipeline(&self.down);
+        for (i, bg) in self.down_bgs.iter().enumerate() {
+            let m = i + 1;
+            pass.set_bind_group(0, bg, &[]);
             let (gx, gy) = groups((self.width >> m).max(1), (self.height >> m).max(1));
             pass.dispatch_workgroups(gx, gy, 1);
         }

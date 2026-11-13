@@ -4,7 +4,7 @@
 import re, sys, math, pathlib
 root = pathlib.Path(__file__).resolve().parent.parent
 D = root / "reference/26.3/client/net/minecraft/client/animation/definitions"
-FILES = ["Armadillo", "Bat", "Breeze", "Camel", "Frog", "Nautilus", "Rabbit", "Sniffer", "Warden"]
+FILES = ["Armadillo", "BabyArmadillo", "BabyAxolotl", "Bat", "Breeze", "Camel", "CopperGolem", "Creaking", "Frog", "Nautilus", "Rabbit", "Sniffer", "Warden"]
 KF = re.compile(
     r"new Keyframe\(\s*(-?[\d.]+)F,\s*KeyframeAnimations\.(\w+)\(([^)]*)\),\s*"
     r"(?:KeyframeAnimations\.(\w+)\(([^)]*)\),\s*)?AnimationChannel\.Interpolations\.(\w+)\s*\)")

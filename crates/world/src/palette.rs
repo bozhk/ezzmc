@@ -312,6 +312,26 @@ impl PalettedContainer {
         }
     }
 
+    /// Заменяет значения через `f` (трансляция id старой версии в канон, TODO-387).
+    pub fn map_values(&mut self, f: impl Fn(u32) -> u32) {
+        match &mut self.repr {
+            Repr::Single(v) => *v = f(*v),
+            Repr::Palette { palette, .. } => {
+                for p in palette.iter_mut() {
+                    *p = f(*p);
+                }
+            }
+            Repr::Global(_) => {
+                let vals = self.unpack();
+                let mut c = PalettedContainer::new(self.kind, self.global_bits, 0);
+                for (i, v) in vals.into_iter().enumerate() {
+                    c.set_index(i, f(v));
+                }
+                *self = c;
+            }
+        }
+    }
+
     /// Контейнер целиком из одного значения (`Single`)?
     pub fn single_value(&self) -> Option<u32> {
         match &self.repr {

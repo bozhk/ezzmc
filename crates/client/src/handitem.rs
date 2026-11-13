@@ -1,6 +1,6 @@
 //! Предмет в руке: `items/<имя>.json` → модель → квады для 1-го лица и F5.
 //! `builtin/generated` экструдируется из пикселей спрайта (толщина 1/16), блочные модели — из элементов.
-use crate::itemicon::{eval, Ctx, CHEST_MARK};
+use crate::itemicon::{eval, Ctx, CHEST_MARK, SHULKER_MARK, SKULL_MARK};
 use ezzmc_assets::atlas::Identifier;
 use ezzmc_assets::bake::{bake_elements, ModelState, SpriteGetter, SpriteUv};
 use ezzmc_assets::block_atlas::BlockAtlas;
@@ -67,6 +67,27 @@ impl HandMesh {
             return (0.0, 0.0);
         }
         (min_y, max_z - min_z)
+    }
+
+    /// Матрица контекста GROUND (для экземпляра GPU-инстансинга: root * ground).
+    pub fn ground_matrix(&self) -> Mat4 {
+        self.ground
+    }
+
+    /// Статическая сетка для GPU-инстансинга: вершины (36 Б: pos, uv, нормаль, tint u8x4) квадов
+    /// атласа блоков и атласа предметов раздельно; индексы 0,1,2,0,2,3 на квад считает рисовальщик.
+    pub fn static_mesh(&self) -> (Vec<u8>, Vec<u8>) {
+        let (mut blocks, mut items) = (Vec::new(), Vec::new());
+        for q in &self.quads {
+            let out = if q.items { &mut items } else { &mut blocks };
+            for i in 0..4 {
+                for v in q.pos[i].iter().chain(q.uv[i].iter()).chain(q.normal.iter()) {
+                    out.extend_from_slice(&v.to_le_bytes());
+                }
+                out.extend_from_slice(&[q.tint[0], q.tint[1], q.tint[2], 255]);
+            }
+        }
+        (blocks, items)
     }
 
     pub fn quad_count(&self) -> usize {
@@ -144,6 +165,50 @@ impl HandMesh {
 }
 
 /// Дописать `extra` под `base` (ширина — максимум), пересчитав UV обоих атласов.
+/// Дописывает картинки стопкой под атлас; UV старых спрайтов пересчитываются.
+fn append_images(base: &mut BlockAtlas, imgs: &[(Identifier, ezzmc_assets::texture::Image)]) {
+    if imgs.is_empty() {
+        return;
+    }
+    let w = imgs.iter().map(|(_, i)| i.width).fold(base.width, u32::max);
+    let h = base.height + imgs.iter().map(|(_, i)| i.height).sum::<u32>();
+    let mut img = ezzmc_assets::texture::Image::new(w, h);
+    for y in 0..base.height {
+        for x in 0..base.width {
+            img.set(x, y, base.mips[0].get(x, y));
+        }
+    }
+    let (wf, hf) = (w as f32, h as f32);
+    let (bw, bh) = (base.width as f32, base.height as f32);
+    for uv in base.sprites.values_mut() {
+        uv.u0 = uv.u0 * bw / wf;
+        uv.u1 = uv.u1 * bw / wf;
+        uv.v0 = uv.v0 * bh / hf;
+        uv.v1 = uv.v1 * bh / hf;
+    }
+    let mut y0 = base.height;
+    for (id, im) in imgs {
+        for y in 0..im.height {
+            for x in 0..im.width {
+                img.set(x, y0 + y, im.get(x, y));
+            }
+        }
+        base.sprites.insert(
+            id.clone(),
+            SpriteUv {
+                u0: 0.0,
+                u1: im.width as f32 / wf,
+                v0: y0 as f32 / hf,
+                v1: (y0 + im.height) as f32 / hf,
+            },
+        );
+        y0 += im.height;
+    }
+    base.width = w;
+    base.height = h;
+    base.mips = vec![img];
+}
+
 fn append_atlas(base: &mut BlockAtlas, extra: &BlockAtlas) {
     let (w, h) = (base.width.max(extra.width), base.height + extra.height);
     let mut img = ezzmc_assets::texture::Image::new(w, h);
@@ -220,6 +285,17 @@ impl HandItems {
         if let Ok(chests) = BlockAtlas::build_named(rm, "chests", 0) {
             append_atlas(&mut items, &chests);
         }
+        // Текстуры голов (SkullModel) — тоже в атлас предметов.
+        let mut skins = Vec::new();
+        for t in crate::skull::item_textures().chain(crate::shulkerbox::item_textures()) {
+            if let Some(img) = rm
+                .read(&format!("assets/minecraft/textures/entity/{t}.png"))
+                .and_then(|d| ezzmc_assets::texture::Image::decode_png(&d).ok())
+            {
+                skins.push((Identifier::new("minecraft", &format!("entity/{t}")), img));
+            }
+        }
+        append_images(&mut items, &skins);
         Some(Self {
             blocks: blocks.clone(),
             items,
@@ -257,10 +333,15 @@ impl HandItems {
             let mut xf = None;
             for (model, tints, off) in layers {
                 let chest = model.strip_prefix(CHEST_MARK).map(str::to_owned);
+                let skull = model.strip_prefix(SKULL_MARK).map(str::to_owned);
+                let shulker = model.strip_prefix(SHULKER_MARK).map(str::to_owned);
                 let mut loader = ModelLoader::new(rm);
-                // Сундук: display-трансформы берутся из `item/chest` (template_chest).
+                // Сундук: display-трансформы берутся из `item/chest` (template_chest);
+                // голова — из базовой модели special-записи.
                 let mid = if chest.is_some() {
                     "minecraft:item/chest"
+                } else if let Some(b) = skull.as_ref().or(shulker.as_ref()) {
+                    b
                 } else {
                     &model
                 };
@@ -288,6 +369,14 @@ impl HandItems {
                 });
                 if let Some(tex) = chest {
                     self.chest_quads(&tex, &mut quads);
+                    continue;
+                }
+                if skull.is_some() {
+                    self.skull_quads(name, &mut quads);
+                    continue;
+                }
+                if shulker.is_some() {
+                    self.shulker_quads(name, &mut quads);
                     continue;
                 }
                 let slots = resolved.texture_slots();
@@ -347,6 +436,51 @@ impl HandItems {
             third_person_left: pick(DisplayContext::ThirdPersonLeftHand),
             ground: pick(DisplayContext::Ground),
         })
+    }
+
+    /// VANILLA: SkullSpecialRenderer — модель головы предмета.
+    fn skull_quads(&self, item: &str, out: &mut Vec<Quad>) {
+        let Some((model, tex)) = crate::skull::item_model(item) else {
+            return;
+        };
+        self.model_quads(&model, tex, crate::skull::item_root(), out);
+    }
+
+    /// VANILLA: ShulkerBoxSpecialRenderer — модель шалкер-коробки предмета (крышка закрыта).
+    fn shulker_quads(&self, item: &str, out: &mut Vec<Quad>) {
+        let Some((model, tex)) = crate::shulkerbox::item_model(item) else {
+            return;
+        };
+        self.model_quads(&model, tex, crate::shulkerbox::item_root(), out);
+    }
+
+    fn model_quads(
+        &self,
+        model: &ezzmc_render::entitymodel::Model,
+        tex: &str,
+        root: Mat4,
+        out: &mut Vec<Quad>,
+    ) {
+        let id = Identifier::new("minecraft", &format!("entity/{tex}"));
+        let Some(uv) = self.items.sprites.get(&id).copied() else {
+            return;
+        };
+        for q in model.quads(root) {
+            let n = q.normal;
+            let l0 = Vec3::new(-0.933, 0.263, -0.244);
+            let l1 = Vec3::new(-0.104, 0.977, 0.188);
+            let shade = ((n.dot(l0).abs().max(n.dot(l1).abs())) * 0.6 + 0.4).min(1.0);
+            out.push(Quad {
+                pos: q.pos.map(|p| p.to_array()),
+                uv: q
+                    .uv
+                    .map(|[u, v]| [uv.u0 + u * (uv.u1 - uv.u0), uv.v0 + v * (uv.v1 - uv.v0)]),
+                color: tint_rgb(0xFF_FFFF, shade),
+                tint: tint_rgb(0xFF_FFFF, 1.0),
+                normal: n.to_array(),
+                items: true,
+            });
+        }
     }
 
     /// VANILLA: ChestSpecialRenderer — модель одиночного сундука (openness 0) из `ChestModel`.

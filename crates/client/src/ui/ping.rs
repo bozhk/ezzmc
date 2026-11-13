@@ -171,7 +171,10 @@ fn parse(
             p.add_texture(dev, queue, &icon_name(ip), &img.to_rgba8(), 64, 64, false);
         }
     }
-    let compatible = protocol == i64::from(crate::netthread::PROTOCOL);
+    let compatible = i32::try_from(protocol)
+        .ok()
+        .and_then(ezzmc_protocol::version::by_protocol)
+        .is_some();
     Info {
         state: if compatible {
             PingState::Successful
