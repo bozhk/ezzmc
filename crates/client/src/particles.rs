@@ -11,7 +11,6 @@ use ezzmc_render::particledraw::{ParticleAtlas, ParticleQuad};
 use ezzmc_world::biome_color::BiomeColors;
 use ezzmc_world::block::{BlockState, FLAG_CAN_OCCLUDE};
 use ezzmc_world::chunk_packet::HeightmapType;
-use ezzmc_world::generated::p26_3::SHAPES;
 use ezzmc_world::level::{Level, ParticlesPacket};
 use ezzmc_world::noise::LegacyRandom;
 use ezzmc_world::precipitation::{precipitation_at, Precipitation};
@@ -151,8 +150,7 @@ struct Particle {
 fn collision_boxes(state: BlockState) -> &'static [[f64; 6]] {
     state
         .props()
-        .and_then(|p| SHAPES.get(usize::from(p.collision_shape)).copied())
-        .unwrap_or(&[])
+        .map_or(&[], |p| ezzmc_world::block::shape(p.collision_shape))
 }
 
 /// VANILLA: VoxelShape#max(axis Y, x, z).

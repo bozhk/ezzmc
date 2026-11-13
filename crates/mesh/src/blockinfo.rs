@@ -3,7 +3,6 @@
 //! emissiveRendering / getShadeBrightness (1.21.11).
 use ezzmc_world::block::{BlockState, FLAG_BLOCKS_MOTION, FLAG_CAN_OCCLUDE};
 use ezzmc_world::generated::b26_3::{BLOCKS, STATE_COUNT};
-use ezzmc_world::generated::p26_3::SHAPES;
 use std::sync::OnceLock;
 
 /// `Block.isShapeFullBlock(collisionShape)`.
@@ -28,7 +27,7 @@ fn is_full(boxes: &[[f64; 6]]) -> bool {
 }
 
 fn shape(i: u16) -> &'static [[f64; 6]] {
-    SHAPES.get(usize::from(i)).copied().unwrap_or(&[])
+    ezzmc_world::block::shape(i)
 }
 
 /// VANILLA: BlockState#getCollisionShape по индексу формы.
@@ -43,7 +42,8 @@ pub fn outline_boxes(state: BlockState) -> &'static [[f64; 6]] {
 
 fn compute(state: BlockState) -> u8 {
     let Some(p) = state.props() else { return 0 };
-    let name = state.name();
+    // Модовые: имя прокси не должно включать ванильные особые случаи.
+    let name = if state.is_modded() { "" } else { state.name() };
     let mut f = 0u8;
     let full = is_full(shape(p.collision_shape));
     if full {
@@ -318,7 +318,26 @@ fn table() -> &'static [u8] {
 }
 
 pub fn flags(state: BlockState) -> u8 {
-    table().get(state.canon().0 as usize).copied().unwrap_or(0)
+    if state.is_modded() {
+        return mod_flags(state);
+    }
+    table().get(state.0 as usize).copied().unwrap_or(0)
+}
+
+/// Флаги модовых состояний (формы/заслонение из дампа, TODO-507); строятся при первом запросе
+/// (дамп ставится до первого чанка).
+fn mod_flags(state: BlockState) -> u8 {
+    static T: OnceLock<Vec<u8>> = OnceLock::new();
+    let t = T.get_or_init(|| {
+        (0..ezzmc_world::modded::count())
+            .map(|i| BlockState::from_id(STATE_COUNT + i).map_or(0, compute))
+            .collect()
+    });
+    let i = state
+        .0
+        .checked_sub(STATE_COUNT)
+        .map_or(usize::MAX, |i| i as usize);
+    t.get(i).copied().unwrap_or(0)
 }
 
 pub fn has(state: BlockState, flag: u8) -> bool {

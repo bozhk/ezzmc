@@ -5,7 +5,6 @@
 //! не сняты в данных — используется контур; на результат отсечения (не полный куб в обе стороны) не влияет.
 use ezzmc_assets::model::Direction;
 use ezzmc_world::block::{BlockState, FLAG_CAN_OCCLUDE};
-use ezzmc_world::generated::p26_3::SHAPES;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -16,10 +15,7 @@ const EPS: f64 = 1e-7;
 
 fn outline(state: BlockState) -> &'static [[f64; 6]] {
     match state.props() {
-        Some(p) if p.has(FLAG_CAN_OCCLUDE) => SHAPES
-            .get(usize::from(p.outline_shape))
-            .copied()
-            .unwrap_or(&[]),
+        Some(p) if p.has(FLAG_CAN_OCCLUDE) => ezzmc_world::block::shape(p.outline_shape),
         _ => &[],
     }
 }

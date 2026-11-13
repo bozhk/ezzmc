@@ -5,12 +5,18 @@
 //! (снимок FML `S2CRegistry minecraft:block`), внутри блока — порядок `StateDefinition`
 //! (VANILLA: Forge GameData$BlockCallbacks#onBake). Карта «id сервера → канон» строится при входе.
 //!
-//! Для игровой логики (физика, свет, отсечение) у каждого модового состояния есть канонический
-//! «прокси» (`BlockState::canon`): пока грубый, по флагам дампа (TODO-507 — точные формы/свет).
+//! Для игровой логики у каждого модового состояния есть канонический «прокси» (`BlockState::canon`,
+//! имя, прочность, трение). Формы коллизии/контура, свет и заслонение — свои, из дампа
+//! (`ModTable::set_physics`, TODO-507): `BlockState::props` отдаёт их, формы дампа продолжают `SHAPES`.
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
+use crate::block::{
+    StateProps, FLAG_AIR, FLAG_BLOCKS_MOTION, FLAG_CAN_OCCLUDE, FLAG_PROPAGATES_SKYLIGHT,
+    FLAG_SOLID,
+};
 use crate::generated::b26_3::{BLOCKS, STATE_COUNT};
+use crate::generated::p26_3::SHAPES;
 
 /// Блок дампа (то, что нужно миру; квады/формы читает клиент из `ModBake`).
 #[derive(Clone, Debug)]
@@ -43,7 +49,26 @@ pub struct ModTable {
     pub state_block: Vec<u32>,
     /// Канонический прокси для каждого состояния дампа.
     pub proxy: Vec<u32>,
+    /// Свойства состояний дампа (формы/свет из дампа поверх прокси); пусто — только прокси.
+    props: Vec<StateProps>,
+    /// Формы дампа; индекс формы в `StateProps` = `SHAPES.len() + i`.
+    shapes: Vec<Vec<[f64; 6]>>,
     by_name: HashMap<String, u32>,
+}
+
+/// Физика и свет одного состояния дампа (`BakeState`), то, что нужно миру.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ModPhys {
+    /// Индексы форм дампа (`ModBake::shape`).
+    pub collision: u32,
+    pub outline: u32,
+    /// `getLightEmission` / `getLightBlock`.
+    pub light: u8,
+    pub light_block: u8,
+    pub can_occlude: bool,
+    /// `propagatesSkylightDown`.
+    pub skylight: bool,
+    pub air: bool,
 }
 
 impl ModTable {
@@ -84,8 +109,78 @@ impl ModTable {
             blocks,
             state_block,
             proxy,
+            props: Vec::new(),
+            shapes: Vec::new(),
             by_name,
         }
+    }
+
+    /// Свойства состояний из дампа: `phys` — по состояниям дампа, `shapes` — формы дампа.
+    /// Остальное (прочность, трение, взрывостойкость) — от прокси.
+    /// VANILLA: BlockBehaviour.BlockStateBase — blocksMotion ≈ непустая коллизия (у модов
+    /// `isSolid` дампер не снимает; VANILLA-UNSURE для блоков с `forceSolidOn/Off`).
+    pub fn set_physics(&mut self, phys: &[ModPhys], shapes: Vec<Vec<[f64; 6]>>) {
+        let base = SHAPES.len();
+        if base + shapes.len() > usize::from(u16::MAX) {
+            tracing::warn!(
+                "форм дампа {} + ванильных {base} не влезают в u16 — часть модовых блоков с формой прокси",
+                shapes.len()
+            );
+        }
+        // Индекс формы — u16; не влезло → форма прокси (физика грубая, но без паники).
+        let idx = |i: u32| {
+            u16::try_from(base + i as usize)
+                .ok()
+                .filter(|_| (i as usize) < shapes.len())
+        };
+        let vanilla = |id: u32| {
+            use crate::generated::p26_3 as p;
+            crate::block::state_props(p::STATE_PROPS, p::PROPS, id).copied()
+        };
+        self.props = phys
+            .iter()
+            .zip(&self.proxy)
+            .map(|(ph, &px)| {
+                let mut p = vanilla(px).or_else(|| vanilla(0)).unwrap_or(StateProps {
+                    destroy_time: 0.0,
+                    light_emission: 0,
+                    light_block: 0,
+                    flags: 0,
+                    collision_shape: 0,
+                    outline_shape: 0,
+                    explosion_resistance: 0.0,
+                    friction: 0.6,
+                    speed_factor: 1.0,
+                    jump_factor: 1.0,
+                });
+                if let (Some(c), Some(o)) = (idx(ph.collision), idx(ph.outline)) {
+                    p.collision_shape = c;
+                    p.outline_shape = o;
+                    let solid = !shapes[ph.collision as usize].is_empty();
+                    let mut f = p.flags
+                        & !(FLAG_CAN_OCCLUDE
+                            | FLAG_PROPAGATES_SKYLIGHT
+                            | FLAG_AIR
+                            | FLAG_BLOCKS_MOTION
+                            | FLAG_SOLID);
+                    for (on, bit) in [
+                        (ph.can_occlude, FLAG_CAN_OCCLUDE),
+                        (ph.skylight, FLAG_PROPAGATES_SKYLIGHT),
+                        (ph.air, FLAG_AIR),
+                        (solid && !ph.air, FLAG_BLOCKS_MOTION | FLAG_SOLID),
+                    ] {
+                        if on {
+                            f |= bit;
+                        }
+                    }
+                    p.flags = f;
+                }
+                p.light_emission = ph.light.min(15);
+                p.light_block = ph.light_block.min(15);
+                p
+            })
+            .collect();
+        self.shapes = shapes;
     }
 
     pub fn state_count(&self) -> u32 {
@@ -131,6 +226,21 @@ pub fn proxy(canon: u32) -> Option<u32> {
     let t = TABLE.get()?;
     let i = canon.checked_sub(STATE_COUNT)?;
     t.proxy.get(i as usize).copied()
+}
+
+/// Свойства модового состояния из дампа (`None` — не модовое или дамп без физики).
+#[inline]
+pub fn props(canon: u32) -> Option<&'static StateProps> {
+    let t = TABLE.get()?;
+    t.props.get(canon.checked_sub(STATE_COUNT)? as usize)
+}
+
+/// Форма дампа по индексу формы `StateProps` (`i >= SHAPES.len()`).
+pub fn shape(i: usize) -> Option<&'static [[f64; 6]]> {
+    let t = TABLE.get()?;
+    t.shapes
+        .get(i.checked_sub(SHAPES.len())?)
+        .map(Vec::as_slice)
 }
 
 /// Бит на id состояния в хранилище секций клиента (ваниль + модовые).
@@ -280,7 +390,26 @@ mod tests {
             },
         ];
         let kinds = [ProxyKind::Solid; 5];
-        let t = ModTable::new(blocks, &kinds);
+        let mut t = ModTable::new(blocks, &kinds);
+        // TODO-507: состояние 0 — полублок со светом 7, 1 — без коллизии; 2..4 без физики.
+        let half = ModPhys {
+            collision: 0,
+            outline: 0,
+            light: 7,
+            light_block: 0,
+            can_occlude: false,
+            skylight: true,
+            air: false,
+        };
+        let pass = ModPhys {
+            collision: 1,
+            outline: 0,
+            ..half
+        };
+        t.set_physics(
+            &[half, pass],
+            vec![vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]], vec![]],
+        );
         assert_eq!(t.state_block, [0, 0, 1, 1, 1]);
         install(t);
         // сервер: ваниль stone (1 сост.) + air (1), затем mod:b раньше mod:a
@@ -300,6 +429,19 @@ mod tests {
         assert_eq!(bake_index(STATE_COUNT + 4), Some(4));
         assert_eq!(bake_index(STATE_COUNT + 5), None);
         assert!(proxy(STATE_COUNT).is_some());
+        let p0 = crate::block::BlockState(STATE_COUNT).props().unwrap();
+        assert_eq!(p0.light_emission, 7);
+        assert!(p0.has(FLAG_BLOCKS_MOTION) && !p0.has(FLAG_CAN_OCCLUDE));
+        assert_eq!(
+            crate::block::shape(p0.collision_shape),
+            &[[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]
+        );
+        let p1 = crate::block::BlockState(STATE_COUNT + 1).props().unwrap();
+        assert!(crate::block::shape(p1.collision_shape).is_empty());
+        assert!(!p1.has(FLAG_BLOCKS_MOTION));
+        // без физики — прокси (black_concrete: полный куб)
+        let p2 = crate::block::BlockState(STATE_COUNT + 2).props().unwrap();
+        assert_eq!(p2.light_emission, 0);
         assert_eq!(
             block_global_bits(),
             crate::palette::ceil_log2(STATE_COUNT + 5)

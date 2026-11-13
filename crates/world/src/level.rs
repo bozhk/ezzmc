@@ -293,12 +293,7 @@ impl Level {
                 let st = chunks.block(bx, by, bz);
                 let boxes = st
                     .props()
-                    .and_then(|p| {
-                        crate::generated::p26_3::SHAPES
-                            .get(usize::from(p.collision_shape))
-                            .copied()
-                    })
-                    .unwrap_or(&[]);
+                    .map_or(&[][..], |p| crate::block::shape(p.collision_shape));
                 let (fx, fy, fz) = (x - f64::from(bx), y - f64::from(by), z - f64::from(bz));
                 boxes.iter().any(|b| {
                     fx >= b[0] && fx <= b[3] && fy >= b[1] && fy <= b[4] && fz >= b[2] && fz <= b[5]

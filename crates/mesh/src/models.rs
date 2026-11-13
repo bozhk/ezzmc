@@ -528,7 +528,7 @@ fn add_modded(
 /// Вызывать один раз до входа на сервер.
 pub fn install_mod_table(bake: &ezzmc_assets::modbake::ModBake) {
     use ezzmc_assets::modbake::flag;
-    use ezzmc_world::modded::{ModBlock, ModTable, ProxyKind};
+    use ezzmc_world::modded::{ModBlock, ModPhys, ModTable, ProxyKind};
     let mut first = vec![u32::MAX; bake.blocks.len()];
     for (i, st) in bake.states.iter().enumerate().rev() {
         if let Some(f) = first.get_mut(st.block as usize) {
@@ -569,7 +569,30 @@ pub fn install_mod_table(bake: &ezzmc_assets::modbake::ModBake) {
             }
         })
         .collect();
-    ezzmc_world::modded::install(ModTable::new(blocks, &kinds));
+    let mut table = ModTable::new(blocks, &kinds);
+    // TODO-507: формы и свет из дампа. Дампер пишет f32; координаты VoxelShape в Java — double,
+    // поэтому берём кратчайшую десятичную запись f32 (0.1f32 → 0.1, а не 0.100000001…).
+    let f = |v: f32| v.to_string().parse::<f64>().unwrap_or(f64::from(v));
+    let shapes = bake
+        .shapes
+        .iter()
+        .map(|s| s.iter().map(|b| b.map(f)).collect())
+        .collect();
+    let phys: Vec<ModPhys> = bake
+        .states
+        .iter()
+        .map(|st| ModPhys {
+            collision: st.collision,
+            outline: st.outline,
+            light: st.light,
+            light_block: st.light_block,
+            can_occlude: st.flags & flag::CAN_OCCLUDE != 0,
+            skylight: st.flags & flag::SKYLIGHT_DOWN != 0,
+            air: st.flags & flag::AIR != 0,
+        })
+        .collect();
+    table.set_physics(&phys, shapes);
+    ezzmc_world::modded::install(table);
 }
 
 // VANILLA: ModelBakery#WATER_STILL / WATER_FLOW / WATER_OVERLAY / LAVA_STILL / LAVA_FLOW

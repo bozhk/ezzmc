@@ -86,6 +86,11 @@ impl BlockState {
 
     pub fn props(self) -> Option<&'static StateProps> {
         use crate::generated::p26_3 as p;
+        if self.is_modded() {
+            if let Some(m) = crate::modded::props(self.0) {
+                return Some(m);
+            }
+        }
         state_props(p::STATE_PROPS, p::PROPS, self.canon().id())
     }
 
@@ -192,6 +197,17 @@ impl StateProps {
     pub fn has(&self, flag: u8) -> bool {
         self.flags & flag != 0
     }
+}
+
+/// Форма по индексу `StateProps::collision_shape/outline_shape`: ванильная из `SHAPES`,
+/// за её концом — формы модового дампа (`modded::shape`).
+pub fn shape(i: u16) -> &'static [[f64; 6]] {
+    let i = usize::from(i);
+    crate::generated::p26_3::SHAPES
+        .get(i)
+        .copied()
+        .or_else(|| crate::modded::shape(i))
+        .unwrap_or(&[])
 }
 
 /// Свойства по id состояния.
