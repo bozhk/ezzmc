@@ -1,106 +1,124 @@
-# ezzmc
+# ezzmc — a fast Minecraft Java Edition client written in Rust
 
-> Minecraft Java Edition клиент на Rust. Быстрый и приватный.
-> Цель: заходить на серверы любой версии — от 1.5.2 до последней (пока работает только 26.3, см. «Поддержка версий»).
+> An open-source, privacy-first **Minecraft Java client in Rust** built on **wgpu / Vulkan**, with an optional **GPU-driven renderer** (compute culling, Hi-Z occlusion, multi-draw indirect). Offline mode or Microsoft sign-in through a separate launcher. Goal: join servers of **any version, from 1.5.2 to the latest**.
 
-**ezzmc** — это клиент, у которого две цели:
+<p align="center">
+  <img src="docs/img/compute.jpg" alt="ezzmc rendering the world at render distance 32 with the GPU-driven compute renderer" width="100%">
+  <br>
+  <sub>ezzmc, render distance 32, GPU-driven (compute) renderer, vanilla 26.3 server.</sub>
+</p>
 
-1. **Максимальная скорость.** Ядро на Rust, рендер на `wgpu`, сеть и меш в отдельных потоках.
-2. **Вход на любой сервер.** Протокол для каждой версии от 1.5.2 до последней, серверы с `online-mode=false`.
+**Status:** working prototype. Version **26.3** works today; other versions are in progress (see [Version support](#version-support)).
 
-Поведение везде **ванильное**: за эталон берётся исходный код Mojang нужной версии. Никаких «улучшений» игровой логики.
+## Goals
 
-## Принципы
+1. **Maximum performance.** Rust core, `wgpu` rendering, networking and meshing on their own threads.
+2. **Join any server.** Protocol support for every version from 1.5.2 to latest, including `online-mode=false` servers.
 
-- **Оффлайн или вход через лаунчер.** Ник — и вперёд на серверы с `online-mode=false`. Для серверов с онлайн-режимом есть вход через Microsoft в отдельном лаунчере (`crates/launcher`). Подписанного чата нет.
-- **Приватность.** Клиент ничего никуда не отправляет, кроме самого сервера, к которому ты подключился.
-- **Ваниль.** Механики, физика и мир работают как в оригинале.
+Behaviour is **vanilla**: Mojang's decompiled source for each version is the reference. No gameplay "improvements".
 
-## Стек
+## Principles
 
-| Задача | Выбор |
+- **Offline or launcher sign-in.** Pick a name and join `online-mode=false` servers. For online-mode servers, sign in with Microsoft through the separate launcher (`crates/launcher`). Chat is unsigned.
+- **Privacy.** The client talks only to the server you connect to.
+- **Vanilla behaviour.** Mechanics, physics and world generation results match the original.
+
+## Render modes
+
+Toggle with **F8** (or start with `--compute-renderer`).
+
+| | Vanilla path (default) | Compute (GPU-driven) |
+|---|---|---|
+| How it works | Like the original: the CPU builds the visible list and submits it | The GPU decides visibility: frustum + Hi-Z culling, multi-draw indirect |
+| Pros | Runs everywhere, reference picture | Faster on weak GPUs and at high render distance; faster when standing or turning |
+| Cons | A weak GPU becomes the bottleneck | Needs `MULTI_DRAW_INDIRECT_COUNT` and compute shaders; up to ~9% slower in flight on a strong GPU |
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/img/vanilla.jpg" alt="Vanilla render path"><br><sub><b>Vanilla path</b></sub></td>
+    <td width="50%"><img src="docs/img/compute.jpg" alt="Compute render path"><br><sub><b>Compute path</b></sub></td>
+  </tr>
+</table>
+
+The two shots are taken from the same spot; clouds differ only because they keep moving between captures.
+
+## Benchmarks
+
+Frame time in ms (**lower is better**). Test bed: vanilla Paper 26.3 server, all sections loaded, camera flying back and forth, one client, `vsync=off`.
+
+| GPU | Render distance | Scenario | Vanilla path | Compute |
+|---|---|---|---|---|
+| RTX 5060 Laptop | 32 | standing | 2.8 | **1.9** |
+| RTX 5060 Laptop | 32 | rotating in place | 2.39 | **1.83** |
+| RTX 5060 Laptop | 32 | flight | **4.04** | 4.40 |
+| RTX 5060 Laptop | 8 | flight | 1.00 | 1.03 |
+| Radeon 780M (iGPU) | 32 | flight | 5.35 | **4.13** |
+
+Takeaways: on a strong discrete GPU the modes are close (compute is ~9% slower in flight, ~3% at distance 8, within noise), while on a weak integrated GPU compute is clearly faster.
+
+Caveats: the Radeon run is a single short run (~10 s per mode, mode order not alternated); the picture was compared against vanilla only on an empty scene; run-to-run noise is around 0.4 ms.
+
+## What makes it fast
+
+**Highlights**
+- **GPU-driven rendering:** section visibility is decided on the GPU (frustum + Hi-Z occlusion), the world is drawn with multi-draw indirect.
+- **Everything heavy off the main thread:** meshes are built and converted in a `rayon` pool; networking runs on plain threads with `crossbeam` channels, no async runtime.
+- **Less work per frame:** draw-list cache (not rebuilt while the camera is still), per-frame budget for transparent-quad re-sorting, nearest-first section rebuild queue.
+
+**World and meshing**
+- Palette-based block storage per chunk section and a packed 16-byte vertex: less memory and GPU traffic.
+- Cave culling over the section visibility graph and hidden-face culling between blocks, as in the original.
+- Ambient-occlusion table generated from Mojang's source; light is recomputed by an own client-side light engine.
+- Dropped items are drawn with GPU instancing: the model is stored once in VRAM, 80 bytes per copy.
+
+**Resources and build**
+- Assets are memory-mapped (`memmap2`); packet compression uses `libdeflater`.
+- Entities live in flat arrays, no ECS.
+- Release build: `lto="fat"`, `codegen-units=1`, `panic=abort`. A `fast` profile exists for development.
+- Built-in frame profiler: set `EZZMC_PROF=1`.
+
+## Tech stack
+
+| Area | Choice |
 |---|---|
-| Язык | Rust (stable) |
-| Окно и GPU | `winit` + `wgpu` |
-| Математика | `glam` |
-| Сеть | потоки + блокирующие сокеты + `crossbeam-channel` |
-| Сжатие | `libdeflater` |
-| Параллельность | `rayon` |
-| Логи и ошибки | `tracing` / `thiserror` |
+| Language | Rust (stable) |
+| Window and GPU | `winit` + `wgpu` (Vulkan) |
+| Math | `glam` |
+| Networking | threads + blocking sockets + `crossbeam-channel` |
+| Compression | `libdeflater` |
+| Parallelism | `rayon` |
+| Logging and errors | `tracing` / `thiserror` |
 
-## Структура
+## Project layout
 
-Workspace разбит на крейты:
+Cargo workspace:
 
-- `crates/protocol` — пакеты и версии протокола
-- `crates/net` — сетевой слой
-- `crates/world` — мир, чанки, освещение
-- `crates/mesh` — построение мешей
-- `crates/render` — рендер
-- `crates/launcher` — лаунчер: онлайн-вход, список серверов, пинг
-- `crates/assets` — ресурсы игры
-- `crates/client` — сам клиент и точка входа
+- `crates/protocol` — packets and protocol versions
+- `crates/net` — networking layer
+- `crates/world` — world, chunks, lighting
+- `crates/mesh` — chunk meshing
+- `crates/render` — renderer
+- `crates/launcher` — launcher: online sign-in, server list, ping
+- `crates/assets` — game assets
+- `crates/client` — the client and entry point
 
-## Сборка и запуск
+## Build and run
 
-Нужен Rust 1.85 или новее.
+Requires Rust 1.85 or newer.
 
 ```sh
 cargo build --profile fast -p ezzmc-client
 ./target/fast/ezzmc-client --connect 127.0.0.1:25565
 ```
 
-Флаг `--connect host:port` задаёт адрес сервера. Версия протокола определяется автоматически по ответу сервера.
+`--connect host:port` sets the server address. The protocol version is detected automatically from the server's ping reply.
 
-## Режимы рендера
+Useful environment variables: `EZZMC_RENDER_DISTANCE`, `EZZMC_VSYNC=0`, `EZZMC_PROF=1`.
 
-Переключаются клавишей **F8** (или флагом `--compute-renderer`).
+## Version support
 
-| | Обычный (по умолчанию) | Compute |
-|---|---|---|
-| Как работает | Как в оригинале: процессор собирает список видимого и отдаёт GPU | Видимость решает GPU: frustum + Hi-Z отсечение, multi-draw indirect |
-| Плюсы | Работает везде, картинка эталонная | Быстрее на слабых GPU и при большой дальности; стоя и при вращении камеры |
-| Минусы | На слабой видеокарте упирается в GPU | Нужны `MULTI_DRAW_INDIRECT_COUNT` и compute-шейдеры; на мощной карте в полёте до ~9% медленнее |
+- **Works:** Minecraft **26.3** (latest) — the main target, all development and testing happens here.
+- **Partial:** 1.21.11 — a connection was made, but it has not been tested thoroughly.
+- **Does not connect yet:** everything else from **1.5.2 to 26.2**. Protocol code for older versions is in progress but not verified against live servers. The goal of joining any server from 1.5.2 to latest is **not reached yet**.
 
-### Замеры
-
-Период кадра, мс (меньше — лучше). Стенд: ванильный сервер 26.3, секции догружены, камера летит вперёд-назад; один клиент, `vsync=off`.
-
-| GPU | Дальность | Сценарий | Обычный | Compute |
-|---|---|---|---|---|
-| RTX 5060 Laptop | 32 | стоя | 2.8 | **1.9** |
-| RTX 5060 Laptop | 32 | вращение на месте | 2.39 | **1.83** |
-| RTX 5060 Laptop | 32 | полёт | **4.04** | 4.40 |
-| RTX 5060 Laptop | 8 | полёт | 1.00 | 1.03 |
-| Radeon 780M (iGPU) | 32 | полёт | 5.35 | **4.13** |
-
-Выводы: на мощной карте режимы близки (в полёте compute ~9% медленнее, на малой дальности разница ~3%, в пределах шума), а на слабой встроенной compute заметно быстрее. Замер на Radeon короткий (один прогон, ~10 с на режим), точная цифра приблизительная. Картинка сверена только на пустой сцене.
-
-## Что делает клиент быстрым
-
-**Главное**
-- **Compute-рендер:** видимость секций решает GPU (frustum + Hi-Z), мир рисуется через multi-draw indirect. Быстрее на слабых видеокартах и при большой дальности (см. замеры выше).
-- **Всё тяжёлое вне главного потока:** меши строятся и конвертируются в пуле потоков (`rayon`), сеть работает на отдельных потоках с каналами `crossbeam`, без async-рантайма.
-- **Меньше работы за кадр:** кэш списка отрисовки (пока камера не сдвинулась, он не пересобирается), пересортировка прозрачных квадов с бюджетом на кадр, перестроение ближайших к камере секций первыми.
-
-**Мир и меш**
-- Палитровое хранение блоков в секциях чанка и упакованная 16-байтная вершина: меньше памяти и трафика на GPU.
-- Cave culling по графу видимости секций и отсечение скрытых граней между блоками, как в оригинале.
-- Таблица ambient occlusion сгенерирована из исходников Mojang, свет пересчитывается собственным клиентским движком.
-- Предметы на земле рисуются GPU-инстансингом: модель в видеопамяти один раз, на каждую копию 80 байт.
-
-**Ресурсы и сборка**
-- Ресурсы читаются через `memmap2`, сжатие пакетов через `libdeflater`.
-- Сущности хранятся в плоских массивах, без ECS.
-- Release-сборка: `lto="fat"`, `codegen-units=1`, `panic=abort`. Для разработки есть быстрый профиль `fast`.
-- Встроенный профайлер кадра: переменная `EZZMC_PROF=1`.
-
-## Статус
-
-### Поддержка версий
-
-- **Работает:** Minecraft **26.3** (latest) — основная версия, на ней идёт вся разработка и проверка.
-- **Частично:** 1.21.11, подключение было, но полноценно не проверялось.
-- **Пока не заходит:** всё остальное от **1.5.2 до 26.2**. Код протокола для старых версий в разработке, но вживую они не проверены. Цель — вход на любой сервер от 1.5.2 до последней версии, сейчас она не достигнута.
-
-Проект в активной разработке. Пока это не готовый клиент для игры, а рабочий прототип: часть механик уже работает, часть в процессе переноса с эталона.
+The project is under active development: a working prototype, not a finished client. Some mechanics already work, others are still being ported from the reference.
