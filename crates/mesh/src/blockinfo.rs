@@ -296,7 +296,10 @@ fn fluid_table() -> &'static [Option<Fluid>] {
 }
 
 pub fn fluid(state: BlockState) -> Option<Fluid> {
-    fluid_table().get(usize::from(state.0)).copied().flatten()
+    fluid_table()
+        .get(state.canon().0 as usize)
+        .copied()
+        .flatten()
 }
 
 fn table() -> &'static [u8] {
@@ -315,7 +318,7 @@ fn table() -> &'static [u8] {
 }
 
 pub fn flags(state: BlockState) -> u8 {
-    table().get(usize::from(state.0)).copied().unwrap_or(0)
+    table().get(state.canon().0 as usize).copied().unwrap_or(0)
 }
 
 pub fn has(state: BlockState, flag: u8) -> bool {

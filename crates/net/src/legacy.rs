@@ -14,15 +14,28 @@ fn entity_type_map() -> &'static [Option<u32>] {
 /// Тело пакета (имя из таблицы версии соединения) → канон, если версия не каноническая.
 /// `None` — пакет надо отбросить (в каноне нет аналога).
 pub fn to_canon(name: Option<&str>, body: Vec<u8>) -> ProtocolResult<Option<Vec<u8>>> {
-    let Some(n) = name else { return Ok(Some(body)) };
-    if ezzmc_protocol::version::current().is_canon() {
+    let v = ezzmc_protocol::version::current();
+    if v.is_canon() {
         return Ok(Some(body));
     }
+    if v.protocol == 763 {
+        return match name {
+            Some(n) => clientbound_1_20_1(n, &body),
+            None => Ok(None),
+        };
+    }
+    let Some(n) = name else { return Ok(Some(body)) };
     match clientbound_1_21_11(n, &body)? {
         Some(b) if b.is_empty() && !body.is_empty() => Ok(None),
         Some(b) => Ok(Some(b)),
         None => Ok(Some(body)),
     }
+}
+
+/// Сервер 1.20.1: БЕЛЫЙ список переведённых пакетов; всё остальное отбрасываем
+/// (форматы 1.20.1 и канона расходятся, непереведённый пакет сломал бы разбор).
+pub fn clientbound_1_20_1(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
+    crate::v1201::play_to_canon(name, body)
 }
 
 /// Клиентский пакет сервера 1.21.11 → тело в каноне. Неизвестные расхождения не трогаем.

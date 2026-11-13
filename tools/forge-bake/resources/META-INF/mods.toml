@@ -1,0 +1,10 @@
+modLoader = "javafml"
+loaderVersion = "[47,)"
+license = "private"
+
+[[mods]]
+modId = "ezzmc_bake"
+version = "1"
+displayName = "ezzmc bake (dumper)"
+description = "Dumps baked block models/states for ezzmc. Active only with -Dezzmc.bake.out=<file>."
+displayTest = "IGNORE_ALL_VERSION"

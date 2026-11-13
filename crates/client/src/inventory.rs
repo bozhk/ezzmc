@@ -15,6 +15,35 @@ pub const OFFHAND: usize = 45;
 
 pub type Slot = Option<ItemStack>;
 
+/// Имя типа меню (канон): ванильное 26.3 без префикса или полное имя модового меню
+/// (`modded::MOD_MENU_BASE + id сервера`, Forge 1.20.1).
+pub fn menu_name(menu: i32) -> Option<String> {
+    use ezzmc_world::modded::{server_name, MOD_MENU_BASE};
+    if menu >= MOD_MENU_BASE {
+        return server_name("minecraft:menu", (menu - MOD_MENU_BASE) as u32);
+    }
+    let i = usize::try_from(menu).ok()?;
+    ezzmc_protocol::generated::r26_3::MENU
+        .get(i)
+        .map(|s| (*s).to_owned())
+}
+
+/// Имя предмета (канон): ванильное 26.3 без префикса или полное имя модового (Forge 1.20.1).
+pub fn item_name(item: u32) -> Option<String> {
+    use ezzmc_world::modded::{server_name, MOD_ITEM_BASE};
+    if item >= MOD_ITEM_BASE {
+        return server_name("minecraft:item", item - MOD_ITEM_BASE);
+    }
+    ezzmc_protocol::generated::r26_3::ITEM
+        .get(item as usize)
+        .map(|s| (*s).to_owned())
+}
+
+/// Модовое меню (Forge): раскладки нет, показывается сетка слотов.
+pub fn is_modded_menu(menu: i32) -> bool {
+    menu >= ezzmc_world::modded::MOD_MENU_BASE
+}
+
 /// Индекс Inventory (хотбар 0–8, основной 9–35, броня ботинки→голова 36–39, offhand 40) → слот меню.
 pub fn menu_slot_for_inventory_index(i: i32) -> Option<usize> {
     Some(match i {
@@ -125,6 +154,10 @@ pub fn parse_packet(name: &str, body: &[u8]) -> ProtocolResult<Option<InvEvent>>
         _ => return Ok(None),
     }))
 }
+
+/// Id окна локального предпросмотра модового меню (control `mod_menu_preview`): клики и
+/// закрытие этого окна netthread на сервер не отправляет.
+pub const PREVIEW_CONTAINER: i32 = -0x7EE;
 
 /// Открытый (не-инвентарный) контейнер.
 #[derive(Clone, Debug)]

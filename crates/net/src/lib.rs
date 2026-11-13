@@ -10,6 +10,7 @@ pub mod replay;
 pub mod session;
 pub mod srv;
 pub mod status;
+pub mod v1201;
 
 pub use conn::{Connection, Intent};
 pub use error::{NetError, NetResult};

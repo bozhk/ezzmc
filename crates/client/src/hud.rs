@@ -473,6 +473,10 @@ pub fn stack_icon(
     x: f32,
     y: f32,
 ) {
+    if s.item >= ezzmc_world::modded::MOD_ITEM_BASE {
+        mod_item_icon(p, dev, q, s.item, x, y);
+        return;
+    }
     if let Some(name) = ezzmc_protocol::generated::r26_3::ITEM.get(s.item as usize) {
         patch_icon(p, dev, q, rm, name, &s.patch, x, y);
         // VANILLA: GuiGraphicsExtractor#itemBar — чёрная подложка 13×2 и цветная полоса высотой 1.
@@ -512,6 +516,44 @@ pub fn stack_icon(
             );
         }
     }
+}
+
+/// Иконка модового предмета Forge (TODO-508): снимок `GuiGraphics#renderItem` из дампа `.ezbake` v2
+/// (страница атласа иконок грузится в рисовалку при первом обращении). Нет дампа/иконки — пусто.
+pub fn mod_item_icon(
+    p: &mut GuiPainter,
+    dev: &wgpu::Device,
+    q: &wgpu::Queue,
+    item: u32,
+    x: f32,
+    y: f32,
+) {
+    let Some(bake) = ezzmc_assets::modbake::global() else {
+        return;
+    };
+    let Some(name) = ezzmc_world::modded::server_name(
+        "minecraft:item",
+        item - ezzmc_world::modded::MOD_ITEM_BASE,
+    ) else {
+        return;
+    };
+    let Some((page, ix, iy, cell)) = bake.item_by_name(&name).and_then(|i| bake.item_icon(i))
+    else {
+        return;
+    };
+    let key = format!("modicons:{page}");
+    if !p.has(&key) {
+        let Some(img) = bake
+            .icon_page_png(page)
+            .and_then(|d| ezzmc_assets::texture::Image::decode_png(d).ok())
+        else {
+            return;
+        };
+        p.add_texture(dev, q, &key, &img.to_rgba8(), img.width, img.height, false);
+    }
+    let k = 1.0 / bake.icon_page as f32;
+    let (u, v, c) = (ix as f32 * k, iy as f32 * k, cell as f32 * k);
+    p.blit(&key, x, y, 16.0, 16.0, [u, v, u + c, v + c], 0xFFFF_FFFF);
 }
 
 /// Иконка предмета с патчем компонентов (тинт, зелья, блеск зачарований) в (x, y), 16×16.

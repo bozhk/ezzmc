@@ -738,8 +738,15 @@ fn read_template_at(r: &mut Reader, depth: u32) -> ProtocolResult<ItemStack> {
     Ok(ItemStack { item, count, patch })
 }
 
+/// Канонический id модового предмета Forge 1.20.1: `MOD_ITEM_BASE + id сервера` (TODO-508);
+/// имя — снимок реестра FML (`ezzmc_world::modded::server_name`).
+pub const MOD_ITEM_BASE: u32 = 1 << 20;
+
 fn read_item(r: &mut Reader) -> ProtocolResult<u32> {
     let item = r.var_int()? as u32;
+    if (MOD_ITEM_BASE..MOD_ITEM_BASE * 2).contains(&item) {
+        return Ok(item);
+    }
     if ClientRegistry::Item.name_of(item).is_none() {
         return Err(bad("unknown item id"));
     }

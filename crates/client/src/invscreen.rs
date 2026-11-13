@@ -26,6 +26,10 @@ enum Kind {
     Tex(&'static str, f32),
     /// Кафедра: экран книги на весь GUI (BookViewScreen), без инвентаря.
     Lectern,
+    /// Модовое меню без схемы: сетка 9×rows (любое число рядов), фон собирается из полос сундука.
+    Modded(usize),
+    /// Модовое меню по схеме дампа (индекс в `ModBake::menus`): фон-снимок, слоты из `menu.slots`.
+    Snap(usize),
     Other,
 }
 
@@ -53,6 +57,51 @@ fn player_inv_rows_x(out: &mut Vec<Option<(f32, f32)>>, x: f32, main_y: f32, hot
     for c in 0..9 {
         out.push(Some((x + c as f32 * 18.0, hot_y)));
     }
+}
+
+/// Модовое меню по схеме дампа (TODO-514): размер окна и слоты — как у экрана мода
+/// (`AbstractContainerScreen#imageWidth/Height`, `Slot#x/y`), неактивные слоты скрыты.
+/// Число слотов схемы ≠ присланному сервером → `None` (фолбэк-сетка).
+fn snap_layout(o: &crate::inventory::OpenMenu) -> Option<Layout> {
+    if !crate::inventory::is_modded_menu(o.menu) {
+        return None;
+    }
+    let bake = ezzmc_assets::modbake::global()?;
+    let name = crate::inventory::menu_name(o.menu)?;
+    let (idx, m) = bake
+        .menus
+        .iter()
+        .enumerate()
+        .find(|(_, m)| m.name == name)?;
+    // Снимок фона не снялся в дампере (экран мода упал без блок-сущности) — окно было бы
+    // невидимым, лучше фолбэк-сетка (TODO-515).
+    if m.bg_w == 0 || m.bg_h == 0 || bake.menu_png(m).is_empty() {
+        return None;
+    }
+    if !o.slots.is_empty() && o.slots.len() != m.slots.len() {
+        static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        if let Ok(mut w) = WARNED.lock() {
+            if !w.contains(&name) {
+                tracing::warn!(
+                    "меню {name}: слотов у сервера {}, в схеме {} — фолбэк-сетка",
+                    o.slots.len(),
+                    m.slots.len()
+                );
+                w.push(name);
+            }
+        }
+        return None;
+    }
+    Some(Layout {
+        kind: Kind::Snap(idx),
+        w: f32::from(m.img_w),
+        h: f32::from(m.img_h),
+        slots: m
+            .slots
+            .iter()
+            .map(|s| (s.flags & 1 != 0).then_some((f32::from(s.x), f32::from(s.y))))
+            .collect(),
+    })
 }
 
 /// Раскладка для текущего состояния (открытое меню или InventoryMenu).
@@ -101,6 +150,30 @@ pub fn layout(inv: &Inventory) -> Layout {
         };
     }
     let n = o.slots.len().max(36);
+    if let Some(lay) = snap_layout(o) {
+        return lay;
+    }
+    if crate::inventory::is_modded_menu(o.menu) {
+        // Модовое меню без схемы (TODO-512/515): слоты контейнера сеткой 9×N, последние 36 —
+        // инвентарь игрока (как у ванильных контейнеров); фон — растянутый сундук.
+        let c = n - 36;
+        let rows = c.div_ceil(9);
+        let mut s = Vec::with_capacity(n);
+        for i in 0..c {
+            s.push(Some((
+                8.0 + (i % 9) as f32 * 18.0,
+                18.0 + (i / 9) as f32 * 18.0,
+            )));
+        }
+        let main_y = 31.0 + rows as f32 * 18.0;
+        player_inv_rows(&mut s, main_y, main_y + 58.0);
+        return Layout {
+            kind: Kind::Modded(rows),
+            w: 176.0,
+            h: 114.0 + rows as f32 * 18.0,
+            slots: s,
+        };
+    }
     if rows > 0 && n == rows * 9 + 36 {
         // VANILLA: ContainerScreen / ChestMenu.
         let mut s = Vec::new();
@@ -286,7 +359,17 @@ impl Layout {
 
     pub fn outside(&self, gw: f32, gh: f32, mx: f32, my: f32) -> bool {
         let (l, t) = (self.left(gw), self.top(gh));
-        mx < l || my < t || mx >= l + self.w || my >= t + self.h
+        let out =
+            |x0: f32, y0: f32, w: f32, h: f32| mx < x0 || my < y0 || mx >= x0 + w || my >= y0 + h;
+        if let Kind::Snap(idx) = self.kind {
+            // Вкладки модов вылезают за imageWidth: «снаружи» — вне окна и вне снимка фона.
+            if let Some(m) = ezzmc_assets::modbake::global().and_then(|b| b.menus.get(idx)) {
+                let (bx, by) = (l + f32::from(m.bg_dx), t + f32::from(m.bg_dy));
+                return out(l, t, self.w, self.h)
+                    && out(bx, by, f32::from(m.bg_w), f32::from(m.bg_h));
+            }
+        }
+        out(l, t, self.w, self.h)
     }
 }
 
@@ -522,6 +605,61 @@ pub fn draw_sprites(
                 0xFFFF_FFFF,
             );
         }
+        Kind::Snap(idx) => {
+            if let Some(m) = ezzmc_assets::modbake::global().and_then(|b| b.menus.get(idx)) {
+                let key = format!("modmenu:{idx}");
+                if !p.has(&key) {
+                    if let Some(img) = ezzmc_assets::modbake::global()
+                        .and_then(|b| ezzmc_assets::texture::Image::decode_png(b.menu_png(m)).ok())
+                    {
+                        p.add_texture(dev, q, &key, &img.to_rgba8(), img.width, img.height, false);
+                    }
+                }
+                if p.has(&key) {
+                    p.blit(
+                        &key,
+                        l + f32::from(m.bg_dx),
+                        t + f32::from(m.bg_dy),
+                        f32::from(m.bg_w),
+                        f32::from(m.bg_h),
+                        [0.0, 0.0, 1.0, 1.0],
+                        0xFFFF_FFFF,
+                    );
+                }
+            }
+        }
+        Kind::Modded(rows) => {
+            // Шапка 17 px, по полосе 18 px на ряд (ряд сундука), низ 96 px — из generic_54.
+            p.blit(
+                "container_54",
+                l,
+                t,
+                176.0,
+                17.0,
+                [0.0, 0.0, 176.0 * k, 17.0 * k],
+                0xFFFF_FFFF,
+            );
+            for r in 0..rows {
+                p.blit(
+                    "container_54",
+                    l,
+                    t + 17.0 + r as f32 * 18.0,
+                    176.0,
+                    18.0,
+                    [0.0, 17.0 * k, 176.0 * k, 35.0 * k],
+                    0xFFFF_FFFF,
+                );
+            }
+            p.blit(
+                "container_54",
+                l,
+                t + 17.0 + rows as f32 * 18.0,
+                176.0,
+                96.0,
+                [0.0, 126.0 * k, 176.0 * k, 222.0 * k],
+                0xFFFF_FFFF,
+            );
+        }
         Kind::Tex(tex, h) => {
             // villager.png — 512×256, остальные 256×256.
             let kx = if tex == "container_villager" {
@@ -742,21 +880,15 @@ pub fn draw_dim(t: &mut TextRenderer, gw: f32, gh: f32) {
     t.fill(0.0, 0.0, gw, gh, 0xC010_1010);
 }
 
-/// Подсветка, заголовок и количества (проход текста).
-#[allow(clippy::too_many_arguments)]
-pub fn draw_text(
+/// Заголовок окна и подпись «Инвентарь» (ванильные экраны).
+fn draw_labels(
     t: &mut TextRenderer,
     inv: &Inventory,
     lang: &crate::ui::lang::Lang,
     lay: &Layout,
-    gw: f32,
-    gh: f32,
-    mx: f32,
-    my: f32,
-    anvil: &mut AnvilName,
-    caret: bool,
+    l: f32,
+    top: f32,
 ) {
-    let (l, top) = (lay.left(gw), lay.top(gh));
     // VANILLA: Screen title — Component (translatable) → lang.
     let title = inv
         .open
@@ -800,6 +932,28 @@ pub fn draw_text(
             0x404040,
             false,
         );
+    }
+}
+
+/// Подсветка, заголовок и количества (проход текста).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_text(
+    t: &mut TextRenderer,
+    inv: &Inventory,
+    lang: &crate::ui::lang::Lang,
+    lay: &Layout,
+    gw: f32,
+    gh: f32,
+    mx: f32,
+    my: f32,
+    anvil: &mut AnvilName,
+    caret: bool,
+) {
+    let (l, top) = (lay.left(gw), lay.top(gh));
+    // Заголовок и «Инвентарь» модового окна уже на снимке экрана мода (язык дампа);
+    // количества и подсветка слотов ниже рисуются для всех окон.
+    if !matches!(lay.kind, Kind::Snap(_)) {
+        draw_labels(t, inv, lang, lay, l, top);
     }
     if let (true, Some(o)) = (lay.is_anvil(), &inv.open) {
         anvil.draw(t, lang, inv, o, l, top, caret);

@@ -259,6 +259,13 @@ impl App {
             s["sneaking"] = json!(v.player.crouching);
             s["game_mode"] = json!(v.game_mode);
             s["held_slot"] = json!(v.inv.selected);
+            s["container"] = json!(v.inv.open.as_ref().map(|o| json!({
+                "id": o.id,
+                "menu": crate::inventory::menu_name(o.menu),
+                "modded": crate::inventory::is_modded_menu(o.menu),
+                "title": o.title,
+                "slots": o.slots.len(),
+            })));
             s["attack_delay"] = json!(v.attack_delay());
             s["attack_strength"] = json!(v.attack_strength(0.0));
             s["sections"] = json!(v.resident_sections());
@@ -700,14 +707,82 @@ impl App {
                     .enumerate()
                     .filter_map(|(i, s)| {
                         let s = s.as_ref()?;
-                        let name = ezzmc_protocol::generated::r26_3::ITEM.get(s.item as usize);
+                        let name = crate::inventory::item_name(s.item);
                         Some(json!({"slot": i, "item": name, "count": s.count}))
                     })
                     .collect();
-                let cursor = v.inv.cursor.as_ref().map(|s| {
-                    json!({"item": ezzmc_protocol::generated::r26_3::ITEM.get(s.item as usize), "count": s.count})
+                // Открытый контейнер (слоты меню, без последних 36 — инвентарь игрока).
+                let container: Option<Vec<Value>> = v.inv.open.as_ref().map(|o| {
+                    let n = o.slots.len().saturating_sub(36);
+                    o.slots[..n]
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, s)| {
+                            let s = s.as_ref()?;
+                            Some(json!({"slot": i, "item": crate::inventory::item_name(s.item), "count": s.count}))
+                        })
+                        .collect()
                 });
-                ok(json!({"held_slot": v.inv.selected, "cursor": cursor, "slots": slots}))
+                let cursor = v.inv.cursor.as_ref().map(
+                    |s| json!({"item": crate::inventory::item_name(s.item), "count": s.count}),
+                );
+                ok(
+                    json!({"held_slot": v.inv.selected, "cursor": cursor, "slots": slots, "container": container}),
+                )
+            }
+            "mod_menu_preview" => {
+                // Агент (TODO-514): открыть модовое меню по схеме дампа локально, без сервера —
+                // сверка фона/слотов со снимком. Клики и закрытие на сервер не уходят
+                // (`PREVIEW_CONTAINER`). `name` — имя меню, иначе `index` в дампе; без них — список.
+                let Some(bake) = ezzmc_assets::modbake::global() else {
+                    return Some(err("no mod bake loaded"));
+                };
+                if self.view.is_none() || self.inv_open {
+                    return Some(err("not in play screen"));
+                }
+                let m = match (c["name"].as_str(), c["index"].as_u64()) {
+                    (Some(n), _) => bake.menus.iter().find(|m| m.name == n),
+                    (None, Some(i)) => bake.menus.get(i as usize),
+                    (None, None) => {
+                        let names: Vec<Value> = bake
+                            .menus
+                            .iter()
+                            .map(|m| json!({"name": m.name, "slots": m.slots.len(), "w": m.img_w, "h": m.img_h, "bg": [m.bg_dx, m.bg_dy, m.bg_w, m.bg_h], "png": bake.menu_png(m).len()}))
+                            .collect();
+                        return Some(ok(json!({"count": names.len(), "menus": names})));
+                    }
+                };
+                let Some(m) = m else {
+                    return Some(err("no such menu in bake"));
+                };
+                let Some(sid) = ezzmc_world::modded::server_id("minecraft:menu", &m.name) else {
+                    return Some(err("menu not in server registry (not a Forge server?)"));
+                };
+                let (name, n) = (m.name.clone(), m.slots.len());
+                // Слоты инвентаря игрока (флаг 2): по порядку как InventoryMenu 9..45
+                // (27 основных, затем хотбар) — тогда видны свои предметы и количества.
+                let player: Vec<usize> = (0..n).filter(|&i| m.slots[i].flags & 2 != 0).collect();
+                if let Some(v) = &mut self.view {
+                    let mut slots = vec![None; n];
+                    if player.len() == 36 {
+                        for (k, &i) in player.iter().enumerate() {
+                            slots[i] = v.inv.slots.get(9 + k).cloned().flatten();
+                        }
+                    }
+                    v.inv.open = Some(crate::inventory::OpenMenu {
+                        id: crate::inventory::PREVIEW_CONTAINER,
+                        menu: ezzmc_world::modded::MOD_MENU_BASE + sid as i32,
+                        title: name.clone(),
+                        slots,
+                        data: [0; 10],
+                        sel: [0; 2],
+                        scroll: 0.0,
+                        scrolling: false,
+                        trades: None,
+                    });
+                }
+                self.open_inv();
+                ok(json!({"name": name, "slots": n}))
             }
             "dialog_button" => {
                 // Агент: нажать кнопку диалога сервера по индексу (см. state.dialog.buttons).

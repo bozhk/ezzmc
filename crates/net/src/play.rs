@@ -860,7 +860,11 @@ impl PlayHandler {
         let mut w = Writer::new();
         w.string(cmd).i64(ms).i64(0).var_int(0);
         w.var_int(0).bytes(&[0, 0, 0]).u8(0);
-        conn.send(self.sid("chat_command_signed")?, &w.buf)
+        // 1.20.1: единственный `chat_command` с подписями
+        let id = self
+            .sid("chat_command_signed")
+            .or_else(|_| self.sid("chat_command"))?;
+        conn.send(id, &w.buf)
     }
 
     /// VANILLA: ServerboundCustomClickActionPacket — Identifier + Optional<Tag> с префиксом длины.
@@ -906,12 +910,18 @@ impl PlayHandler {
     /// VANILLA: Minecraft#tick → ServerboundClientTickEndPacket в конце каждого клиентского тика (сбрасывает
     /// receivedPositionThisTick на сервере; без него второй пакет позиции = kick invalid_player_movement).
     pub fn send_client_tick_end(&self, conn: &mut Connection) -> NetResult<()> {
-        conn.send(self.sid("client_tick_end")?, &[])
+        match self.sid("client_tick_end") {
+            Ok(id) => conn.send(id, &[]),
+            Err(_) => Ok(()), // версии без пакета (1.20.1)
+        }
     }
 
     /// VANILLA: после закрытия экрана загрузки (чанк под игроком получен) — Player Loaded.
     pub fn send_player_loaded(&self, conn: &mut Connection) -> NetResult<()> {
-        conn.send(self.sid("player_loaded")?, &[])
+        match self.sid("player_loaded") {
+            Ok(id) => conn.send(id, &[]),
+            Err(_) => Ok(()), // версии без пакета (1.20.1)
+        }
     }
 
     /// Ответ на Chunk Batch Finished: желаемое число чанков за тик (VANILLA: ChunkBatchSizeCalculator).

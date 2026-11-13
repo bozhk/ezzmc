@@ -41,11 +41,15 @@ pub fn run_cmd(ver: &str) -> Res<()> {
             })
             .collect::<Result<_, _>>()?;
         v.sort();
-        for (i, (id, n)) in v.iter().enumerate() {
-            if *id != i as u64 {
-                return Err(format!("{reg}: id не плотные ({n}: {id} != {i})").into());
+        // Дыры в id (1.20.1: mob_effect с 1) → пустые имена, индекс = protocol_id.
+        let mut dense: Vec<(u64, &str)> = Vec::new();
+        for (id, n) in &v {
+            while (dense.len() as u64) < *id {
+                dense.push((dense.len() as u64, ""));
             }
+            dense.push((*id, n));
         }
+        let v = dense;
         let ident: String = reg
             .strip_prefix("minecraft:")
             .unwrap_or(reg)

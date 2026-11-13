@@ -87,6 +87,23 @@ impl BlockAtlas {
         let missing_id = Identifier::new("minecraft", "missingno");
         map.entry(missing_id.clone()).or_insert(SpriteLoad::Missing);
         let mut loaded = Vec::with_capacity(map.len());
+        // DEC-018: спрайты модов из дампа `.ezbake` (только недостающие в ресурсах)
+        if name == "blocks" {
+            if let Some(bake) = crate::modbake::global() {
+                for (id, frame) in bake.sprite_images() {
+                    if map.contains_key(&id) {
+                        continue;
+                    }
+                    loaded.push(Loaded {
+                        id,
+                        frame,
+                        strip: None,
+                        strategy: MipmapStrategy::Auto,
+                        cutoff_bias: 0.0,
+                    });
+                }
+            }
+        }
         for (id, load) in &map {
             let Some(img) = load.load(rm) else { continue };
             let raw_meta = rm.read(&format!(

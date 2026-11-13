@@ -17,6 +17,7 @@ rsa = "0.9"
 rand_core = { version = "0.6", features = ["getrandom"] }
 thiserror.workspace = true
 tracing.workspace = true
+ezzmc-world.workspace = true
+serde_json = "1.0.154"
 
 [dev-dependencies]
-ezzmc-world.workspace = true

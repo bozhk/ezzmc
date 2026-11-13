@@ -192,6 +192,7 @@ TOOLS = {
     "game_creative_click": ("Creative screen open: click one target — tab (0..), cell (grid 0..44), slot (InventoryMenu index, hotbar 36..44), trash=true, outside=true, or x/y GUI px; button left/right/middle; drag_to = slot indexes; hover=true only moves the cursor (tooltip checks).", S(tab=INT, cell=INT, slot=INT, trash={"type": "boolean"}, outside={"type": "boolean"}, x=N, y=N, button=STR, drag_to={"type": "array", "items": {"type": "integer"}}, hold={"type": "boolean"}, hover={"type": "boolean"}), "creative_click"),
     "game_creative_release": ("Release the mouse button held by game_creative_click hold=true.", S(), "creative_release"),
     "game_anvil_type": ("Anvil screen with an item in slot 0: type into the rename field (clear=true erases first); returns name, cost, has result.", S(text=STR, clear={"type": "boolean"}), "anvil_type"),
+    "game_mod_menu_preview": ("Forge server only: open a modded menu locally from the mod bake schema (background + slots, no server; clicks are not sent). No args -> list of menus; name=... or index=... opens one. Close with game_tap esc.", S(name=STR, index=INT), "mod_menu_preview"),
     "game_creative_search": ("Creative screen, Search tab selected: type text into the search field.", S(text=STR), "creative_search"),
     "game_chat_open": ("Open the chat screen (text='/' like the command key).", S(text=STR), "chat_open"),
     "game_chat_type": ("Chat screen open: type text into the input box.", S(text=STR), "chat_type"),

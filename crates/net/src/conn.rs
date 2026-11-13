@@ -60,6 +60,8 @@ pub struct Connection {
     out: Vec<u8>,
     scratch: Box<[u8; 16 * 1024]>,
     cipher: Option<crate::crypt::CipherPair>,
+    /// Пакеты, возвращённые в начало очереди приёма (1.20.1: `login` читается раньше).
+    pending: std::collections::VecDeque<Packet>,
 }
 
 impl Connection {
@@ -89,6 +91,7 @@ impl Connection {
             out: Vec::new(),
             scratch: Box::new([0; 16 * 1024]),
             cipher: None,
+            pending: std::collections::VecDeque::new(),
         })
     }
 
@@ -106,6 +109,16 @@ impl Connection {
         }
         self.state = to;
         Ok(())
+    }
+
+    /// Перейти в состояние без проверки таблицы переходов (1.20.1: Login → Play).
+    pub fn set_state_raw(&mut self, to: State) {
+        self.state = to;
+    }
+
+    /// Вернуть пакет в начало очереди приёма.
+    pub fn push_front(&mut self, p: Packet) {
+        self.pending.push_front(p);
     }
 
     pub fn set_compression(&mut self, threshold: i32) {
@@ -130,6 +143,17 @@ impl Connection {
     }
 
     pub fn send(&mut self, id: i32, body: &[u8]) -> NetResult<()> {
+        // Сервер 1.20.1: клиент собирает пакеты в каноне — переводим перед отправкой.
+        if self.state == State::Play && ezzmc_protocol::version::current().protocol == 763 {
+            for (i, b) in crate::v1201::play_from_canon(id, body)? {
+                self.send_raw(i, &b)?;
+            }
+            return Ok(());
+        }
+        self.send_raw(id, body)
+    }
+
+    fn send_raw(&mut self, id: i32, body: &[u8]) -> NetResult<()> {
         self.out.clear();
         self.codec.encode(id, body, &mut self.out)?;
         if let Some(c) = &mut self.cipher {
@@ -141,6 +165,9 @@ impl Connection {
 
     /// Блокирующее чтение следующего пакета (общий таймаут `READ_TIMEOUT` на пакет).
     pub fn recv(&mut self) -> NetResult<Packet> {
+        if let Some(p) = self.pending.pop_front() {
+            return Ok(p);
+        }
         let deadline = Instant::now() + READ_TIMEOUT;
         loop {
             if let Some(p) = self.codec.next_packet()? {
@@ -176,6 +203,9 @@ impl Connection {
     /// Чтение с коротким ожиданием: `Ok(None)`, если за `wait` пакет не пришёл
     /// (нужно сетевому потоку, чтобы между пакетами слать позицию игрока).
     pub fn poll(&mut self, wait: Duration) -> NetResult<Option<Packet>> {
+        if let Some(p) = self.pending.pop_front() {
+            return Ok(Some(p));
+        }
         let deadline = Instant::now() + wait;
         loop {
             if let Some(p) = self.codec.next_packet()? {

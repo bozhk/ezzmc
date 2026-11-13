@@ -14,6 +14,7 @@ pub mod level;
 pub mod light;
 pub mod lightengine;
 pub mod lightning;
+pub mod modded;
 pub mod noise;
 pub mod palette;
 pub mod piston;

@@ -76,7 +76,7 @@ fn first_not_covered(a: &[Rect], b: &[Rect]) -> bool {
 
 thread_local! {
     // VANILLA: Block#OCCLUSION_CACHE (ключ — пара форм; здесь — пара состояний+направление)
-    static CACHE: RefCell<HashMap<(u16, u16, u8), bool>> = RefCell::new(HashMap::new());
+    static CACHE: RefCell<HashMap<(u32, u32, u8), bool>> = RefCell::new(HashMap::new());
 }
 
 /// Семейства, у которых соседний блок того же типа скрывает грань

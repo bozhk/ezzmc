@@ -7,6 +7,7 @@ use crate::section::{ModelPart, ModelProvider, Neighborhood, SectionPos};
 use ezzmc_assets::atlas::Identifier;
 use ezzmc_assets::bake::{bake_elements, ModelState, QuadCollection, SpriteGetter, SpriteUv};
 use ezzmc_assets::blockstate::{BlockModelDefinition, PropertyDef, StateModel, StateView};
+use ezzmc_assets::model::Direction;
 use ezzmc_assets::model::ModelLoader;
 use ezzmc_assets::pack::ResourceManager;
 use ezzmc_world::biome_color::{
@@ -33,6 +34,8 @@ pub struct Baked {
 struct Weighted {
     entries: Vec<(Arc<Baked>, u32)>,
     total: u32,
+    /// Модель из дампа Forge 1.20.1: выбор варианта по-старому (`pick_1201`).
+    legacy: bool,
 }
 
 impl Weighted {
@@ -41,7 +44,15 @@ impl Weighted {
         if self.entries.len() == 1 {
             return &self.entries[0].0;
         }
-        let mut r = rnd.next_int_bound(self.total.max(1) as i32) as u32;
+        let mut r = if self.legacy {
+            // VANILLA: WeightedBakedModel#getQuads (1.20.1) —
+            // getWeightedItem(list, Math.abs((int) random.nextLong()) % totalWeight)
+            let hi = i64::from(rnd.next(32)) << 32;
+            let l = hi.wrapping_add(i64::from(rnd.next(32)));
+            (l as i32).unsigned_abs() % self.total.max(1)
+        } else {
+            rnd.next_int_bound(self.total.max(1) as i32) as u32
+        };
         for (b, w) in &self.entries {
             if r < *w {
                 return b;
@@ -315,6 +326,7 @@ impl BlockModels {
                         parts.push(Weighted {
                             entries: entries_w,
                             total,
+                            legacy: false,
                         });
                     }
                 }
@@ -357,6 +369,9 @@ impl BlockModels {
                     tint: tint_kind(info.name, st),
                 });
             }
+        }
+        if let Some(bake) = ezzmc_assets::modbake::global() {
+            add_modded(&mut entries, bake, sprites);
         }
         BlockModels {
             entries,
@@ -401,6 +416,160 @@ impl BlockModels {
     fn entry(&self, s: BlockState) -> Option<&StateEntry> {
         self.entries.get(s.id() as usize)?.as_ref()
     }
+}
+
+/// Модели модовых состояний из дампа `.ezbake` (DEC-018, TODO-506): канонический id
+/// `STATE_COUNT + i` ↔ состояние дампа `i`. Ванильные блоки дампа пропускаются (их рисует
+/// ванильный путь 26.3).
+fn add_modded(
+    entries: &mut Vec<Option<StateEntry>>,
+    bake: &ezzmc_assets::modbake::ModBake,
+    sprites: &dyn SpriteGetter,
+) {
+    use ezzmc_assets::modbake::{flag, BakeTint};
+    let base = entries.len();
+    entries.resize_with(base + bake.states.len(), || None);
+    let sprite_ids: Vec<Identifier> = bake
+        .sprites
+        .iter()
+        .map(|s| Identifier::parse(&s.name))
+        .collect();
+    type Variants = Vec<(Arc<Baked>, u32)>;
+    let mut cache: HashMap<u32, (Variants, RenderLayer)> = HashMap::new();
+    let mut n = 0usize;
+    for (i, st) in bake.states.iter().enumerate() {
+        let Some(block) = bake.blocks.get(st.block as usize) else {
+            continue;
+        };
+        if block.name.starts_with("minecraft:") {
+            continue;
+        }
+        let ao = st.flags & flag::AMBIENT_OCCLUSION != 0;
+        let (variants, layer) = cache
+            .entry(st.model)
+            .or_insert_with(|| {
+                let mut layer = RenderLayer::Solid;
+                let vs = bake
+                    .model(st.model)
+                    .iter()
+                    .map(|v| {
+                        let mut qc = QuadCollection::default();
+                        let mut particle = None;
+                        for q in v.quads() {
+                            let sp = sprite_ids
+                                .get(q.sprite as usize)
+                                .and_then(|id| sprites.get(id))
+                                .unwrap_or_else(|| sprites.missing());
+                            particle.get_or_insert(sp);
+                            layer = layer.max(match q.layer {
+                                0 => RenderLayer::Solid,
+                                3 => RenderLayer::Translucent,
+                                4 => RenderLayer::Tripwire,
+                                _ => RenderLayer::Cutout,
+                            });
+                            let bq = ezzmc_assets::bake::BakedQuad {
+                                pos: q.pos,
+                                uv: q.uv.map(|[u, v]| [sp.get_u(u), sp.get_v(v)]),
+                                tint_index: q.tint,
+                                direction: Direction::ALL[usize::from(q.face.min(5))],
+                                sprite: sprite_ids
+                                    .get(q.sprite as usize)
+                                    .cloned()
+                                    .unwrap_or_else(|| Identifier::new("minecraft", "missingno")),
+                                // VANILLA-UNSURE: shade=false (1.20.1) ≈ яркость верхней грани
+                                shade_direction_override: (!q.shade).then_some(Direction::Up),
+                                light_emission: 0,
+                            };
+                            match q.cull {
+                                Some(c) => qc.culled[usize::from(c.min(5))].push(bq),
+                                None => qc.unculled.push(bq),
+                            }
+                        }
+                        (
+                            Arc::new(Baked {
+                                quads: qc,
+                                ao,
+                                particle,
+                            }),
+                            v.weight.max(1),
+                        )
+                    })
+                    .collect();
+                (vs, layer)
+            })
+            .clone();
+        if variants.is_empty() {
+            continue;
+        }
+        let total = variants.iter().map(|v| v.1).sum();
+        // VANILLA-UNSURE: биомные тинты модов (NeedsLevel) — листва/трава по имени (TODO-509)
+        let tint = match bake.tint(st, 0) {
+            BakeTint::Color(c) => TintKind::Fixed(c),
+            BakeTint::NeedsLevel if block.name.contains("grass") => TintKind::Grass,
+            BakeTint::NeedsLevel if block.name.contains("water") => TintKind::Water,
+            BakeTint::NeedsLevel => TintKind::Foliage,
+            BakeTint::None => TintKind::None,
+        };
+        entries[base + i] = Some(StateEntry {
+            parts: vec![Weighted {
+                entries: variants,
+                total,
+                legacy: true,
+            }],
+            layer,
+            tint,
+        });
+        n += 1;
+    }
+    tracing::info!("модовые модели: {n} состояний, {} моделей", cache.len());
+}
+
+/// Таблица модовых состояний для мира (`ezzmc_world::modded`): блоки дампа и прокси для логики.
+/// Вызывать один раз до входа на сервер.
+pub fn install_mod_table(bake: &ezzmc_assets::modbake::ModBake) {
+    use ezzmc_assets::modbake::flag;
+    use ezzmc_world::modded::{ModBlock, ModTable, ProxyKind};
+    let mut first = vec![u32::MAX; bake.blocks.len()];
+    for (i, st) in bake.states.iter().enumerate().rev() {
+        if let Some(f) = first.get_mut(st.block as usize) {
+            *f = i as u32;
+        }
+    }
+    let blocks = bake
+        .blocks
+        .iter()
+        .zip(&first)
+        .map(|(b, &f)| ModBlock {
+            name: b.name.clone(),
+            first: if f == u32::MAX { 0 } else { f },
+            count: if f == u32::MAX {
+                0
+            } else {
+                b.props
+                    .iter()
+                    .map(|p| p.values.len() as u32)
+                    .product::<u32>()
+                    .max(1)
+            },
+        })
+        .collect();
+    let kinds: Vec<ProxyKind> = bake
+        .states
+        .iter()
+        .map(|st| {
+            if st.flags & flag::AIR != 0 {
+                return ProxyKind::Air;
+            }
+            match bake.shape(st.collision) {
+                Some([]) => ProxyKind::Passable,
+                Some([[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]) if st.flags & flag::SOLID_RENDER != 0 => {
+                    ProxyKind::Solid
+                }
+                _ => ProxyKind::SeeThrough,
+            }
+        })
+        .collect();
+    ezzmc_world::modded::install(ModTable::new(blocks, &kinds));
 }
 
 // VANILLA: ModelBakery#WATER_STILL / WATER_FLOW / WATER_OVERLAY / LAVA_STILL / LAVA_FLOW

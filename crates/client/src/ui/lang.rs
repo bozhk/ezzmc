@@ -23,7 +23,12 @@ impl Lang {
     }
 
     pub fn tr(&self, key: &str) -> String {
-        self.0.get(key).cloned().unwrap_or_else(|| key.to_owned())
+        // Ключи модов Forge — из переводов дампа `.ezbake` v3 (язык игры, где пекли).
+        self.0
+            .get(key)
+            .cloned()
+            .or_else(|| Some(ezzmc_assets::modbake::global()?.tr(key)?.to_owned()))
+            .unwrap_or_else(|| key.to_owned())
     }
 
     /// VANILLA: `%s` / `%d` подставляются по порядку, `%%` → `%`.

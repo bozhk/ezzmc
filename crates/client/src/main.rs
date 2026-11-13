@@ -530,9 +530,23 @@ impl App {
         true
     }
 
+    /// Открыт локальный предпросмотр модового меню (control `mod_menu_preview`) — только
+    /// просмотр: клики и клавиши слотов не меняют инвентарь.
+    fn inv_preview(&self) -> bool {
+        self.view.as_ref().is_some_and(|v| {
+            v.inv
+                .open
+                .as_ref()
+                .is_some_and(|o| o.id == inventory::PREVIEW_CONTAINER)
+        })
+    }
+
     pub fn inv_mouse(&mut self, pressed: bool, right: bool, left: bool, middle: bool) {
         if self.inv_creative {
             self.creative_mouse(pressed, right, left, middle);
+            return;
+        }
+        if self.inv_preview() {
             return;
         }
         // VANILLA: BookViewScreen#mouseClicked — кнопки книги и ПКМ по тексту (кафедра).
@@ -972,6 +986,9 @@ impl App {
         let Some((gw, gh, mx, my)) = self.gui_cursor() else {
             return;
         };
+        if self.inv_preview() {
+            return;
+        }
         let is = |name: &str| {
             self.keys
                 .get(name)
@@ -3146,6 +3163,28 @@ fn autoshot_secs() -> Option<u64> {
     std::env::var("EZZMC_AUTOSHOT").ok()?.parse().ok()
 }
 
+/// Самый свежий `*.ezbake` в `reference/_cache/forge-bake/` — от текущей папки или от бинарника
+/// (`target/<профиль>/ezzmc-client` → корень проекта).
+fn find_mod_bake() -> Option<std::path::PathBuf> {
+    let rel = std::path::Path::new("reference/_cache/forge-bake");
+    let mut dirs = vec![rel.to_path_buf()];
+    if let Some(root) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent()?.parent()?.parent().map(|r| r.join(rel)))
+    {
+        dirs.push(root);
+    }
+    dirs.iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "ezbake"))
+        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
+        .max_by_key(|(t, _)| *t)
+        .map(|(_, p)| p)
+}
+
 fn arg_value(flag: &str) -> Option<String> {
     let a: Vec<String> = std::env::args().collect();
     a.iter()
@@ -3189,6 +3228,24 @@ fn main() {
         ..Default::default()
     });
     tracing::info!("ezzmc");
+    // DEC-018: дамп моделей модов Forge 1.20.1 (`--mod-bake <файл.ezbake>` или EZZMC_MOD_BAKE)
+    // Без флага/переменной — самый свежий дамп из reference/_cache/forge-bake/ (рядом с проектом);
+    // `--mod-bake off` — без модов.
+    match arg_value("--mod-bake") {
+        Some(p) if p == "off" => std::env::remove_var("EZZMC_MOD_BAKE"),
+        // до запуска потоков: читается только через modbake::global()
+        Some(p) => std::env::set_var("EZZMC_MOD_BAKE", p),
+        None if std::env::var_os("EZZMC_MOD_BAKE").is_none() => {
+            if let Some(p) = find_mod_bake() {
+                tracing::info!("дамп модов найден: {}", p.display());
+                std::env::set_var("EZZMC_MOD_BAKE", p);
+            }
+        }
+        None => {}
+    }
+    if let Some(b) = ezzmc_assets::modbake::global() {
+        ezzmc_mesh::models::install_mod_table(b);
+    }
     audio::init();
     // Всегда X11 (XWayland), если не задано EZZMC_BACKEND=wayland: на Wayland захват курсора
     // не включался при запуске сразу на сервер.

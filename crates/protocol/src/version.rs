@@ -40,10 +40,22 @@ pub const V1_21_11: Version = Version {
     particle_type: generated::r1_21_11::PARTICLE_TYPE,
 };
 
+/// Forge/ваниль 1.20.1 (протокол 763): нет Configuration-фазы, реестры внутри Play `login`.
+pub const V1_20_1: Version = Version {
+    name: "1.20.1",
+    protocol: 763,
+    packets: generated::v1_20_1::PACKETS,
+    item: generated::r1_20_1::ITEM,
+    block: generated::r1_20_1::BLOCK,
+    entity_type: generated::r1_20_1::ENTITY_TYPE,
+    sound_event: generated::r1_20_1::SOUND_EVENT,
+    particle_type: generated::r1_20_1::PARTICLE_TYPE,
+};
+
 /// Каноническая версия (на ней написан весь клиент).
 pub const CANON: Version = V26_3;
 
-pub const SUPPORTED: &[Version] = &[V26_3, V1_21_11];
+pub const SUPPORTED: &[Version] = &[V26_3, V1_21_11, V1_20_1];
 
 /// Версия по protocol number из Status-ответа.
 pub fn by_protocol(protocol: i32) -> Option<Version> {

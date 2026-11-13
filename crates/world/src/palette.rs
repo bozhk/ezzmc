@@ -241,11 +241,21 @@ impl PalettedContainer {
             });
         }
         let bits = u32::from(bits);
-        let (mem_bits, global) = config_for_bits(kind, bits, global_bits);
+        let (mut mem_bits, global) = config_for_bits(kind, bits, global_bits);
+        // 1.20.1/Forge: ширина прямой палитры — по реестру сервера (с модами шире канона);
+        // значения потом переводятся в канон (`map_values`).
+        if global && bits != global_bits && crate::legacy::is_legacy() {
+            mem_bits = bits;
+        }
         let n = kind.entry_count();
+        // VANILLA: до 1.21.5 (протокол < 770) массив long[] писался с VarInt-длиной.
+        let prefixed = ezzmc_protocol::version::current().protocol < 770;
         if mem_bits == 0 {
             let v = r.var_int()?;
             let v = to_id(v)?;
+            if prefixed {
+                r.var_int()?;
+            }
             // readFixedSizeLongArray(raw длины 0) — ничего не читает.
             return Ok(PalettedContainer {
                 kind,
@@ -263,6 +273,9 @@ impl PalettedContainer {
             }
             Some(p)
         };
+        if prefixed {
+            r.var_int()?;
+        }
         let raw = BitStorage::raw_len(mem_bits, n);
         let mut storage = BitStorage::new(mem_bits, n);
         for cell in storage.data.iter_mut().take(raw) {

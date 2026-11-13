@@ -30,11 +30,11 @@ pub fn decode_state(blocks: &'static [BlockInfo], state: u32) -> Option<(usize, 
     Some((i, idx))
 }
 
-/// Компактный id состояния блока (`Block.BLOCK_STATE_REGISTRY`). u16 хватает: 29671 < 65536.
+/// id состояния блока (`Block.BLOCK_STATE_REGISTRY`): `0..STATE_COUNT` — ваниль 26.3,
+/// дальше — модовые состояния Forge (`crate::modded`, DEC-018).
 /// VANILLA: Block#getId(BlockState) / Block#stateById.
-/// Таблицы пока только 1.21.11; мульти-версии — глава 18.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub struct BlockState(pub u16);
+pub struct BlockState(pub u32);
 
 impl BlockState {
     pub const AIR: BlockState = BlockState(0);
@@ -42,21 +42,37 @@ impl BlockState {
     /// `None`, если id вне таблицы.
     pub fn from_id(id: u32) -> Option<BlockState> {
         use crate::generated::b26_3::STATE_COUNT;
-        if id < STATE_COUNT {
-            u16::try_from(id).ok().map(BlockState)
+        if id < STATE_COUNT || crate::modded::bake_index(id).is_some() {
+            Some(BlockState(id))
         } else {
             None
         }
     }
 
     pub fn id(self) -> u32 {
-        u32::from(self.0)
+        self.0
     }
 
-    /// Индекс блока в `BLOCKS` (= id в реестре блоков).
+    /// Модовое состояние (`crate::modded`)?
+    #[inline]
+    pub fn is_modded(self) -> bool {
+        self.0 >= crate::generated::b26_3::STATE_COUNT
+    }
+
+    /// Ванильное состояние для игровой логики: само состояние или прокси модового.
+    #[inline]
+    pub fn canon(self) -> BlockState {
+        if self.is_modded() {
+            BlockState(crate::modded::proxy(self.0).unwrap_or(0))
+        } else {
+            self
+        }
+    }
+
+    /// Индекс блока в `BLOCKS` (= id в реестре блоков); у модовых — блок прокси.
     pub fn block_id(self) -> usize {
         state_to_block()
-            .get(usize::from(self.0))
+            .get(self.canon().0 as usize)
             .map_or(0, |&b| usize::from(b))
     }
 
@@ -70,7 +86,7 @@ impl BlockState {
 
     pub fn props(self) -> Option<&'static StateProps> {
         use crate::generated::p26_3 as p;
-        state_props(p::STATE_PROPS, p::PROPS, self.id())
+        state_props(p::STATE_PROPS, p::PROPS, self.canon().id())
     }
 
     pub fn is_air(self) -> bool {
@@ -79,7 +95,7 @@ impl BlockState {
 
     /// Значение свойства по имени (`"facing"` → `"north"`).
     pub fn property(self, name: &str) -> Option<&'static str> {
-        let (b, idx) = decode_state(crate::generated::b26_3::BLOCKS, self.id())?;
+        let (b, idx) = decode_state(crate::generated::b26_3::BLOCKS, self.canon().id())?;
         let info = &crate::generated::b26_3::BLOCKS[b];
         let k = info.props.iter().position(|p| p.name == name)?;
         info.props[k].values.get(idx[k] as usize).copied()
@@ -87,6 +103,9 @@ impl BlockState {
 
     /// Состояние с изменённым свойством (`BlockState#setValue`); `None`, если свойства/значения нет.
     pub fn with(self, name: &str, value: &str) -> Option<BlockState> {
+        if self.is_modded() {
+            return None;
+        }
         let info = self.block();
         let (_, mut idx) = decode_state(crate::generated::b26_3::BLOCKS, self.id())?;
         let k = info.props.iter().position(|p| p.name == name)?;
@@ -123,7 +142,7 @@ mod state_tests {
     fn block_state_roundtrip() {
         assert!(BlockState::AIR.is_air());
         assert_eq!(BlockState::from_id(1).unwrap().name(), "stone");
-        assert!(BlockState::from_id(35723).is_none());
+        assert!(BlockState::from_id(u32::MAX).is_none());
         let s = BlockState::from_id(5463).unwrap();
         assert_eq!(s.name(), "oak_stairs");
         assert_eq!(s.property("facing"), Some("north"));

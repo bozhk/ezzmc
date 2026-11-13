@@ -6,6 +6,7 @@ pub mod block_atlas;
 pub mod blockstate;
 pub mod error;
 pub mod install;
+pub mod modbake;
 pub mod model;
 pub mod pack;
 pub mod source;

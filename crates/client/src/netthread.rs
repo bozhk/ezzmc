@@ -352,24 +352,37 @@ fn run(
     let ids = PacketIds::for_version(&ver);
     let (host, port) = ezzmc_net::srv::parse_address(addr);
     let mut c = Connection::connect(addr).map_err(|x| e(&x))?;
-    c.handshake(ver.protocol, &host, port, Intent::Login)
+    let cfg = if ver.protocol == 763 {
+        // 1.20.1 (в т. ч. Forge FML3): хендшейк с суффиксом, без Configuration, реестры из `login`.
+        let fml_host = format!("{host}{}", ezzmc_net::v1201::FML3_SUFFIX);
+        c.handshake(ver.protocol, &fml_host, port, Intent::Login)
+            .map_err(|x| e(&x))?;
+        Box::new(
+            ezzmc_net::v1201::login(&mut c, &ids, name)
+                .map_err(|x| e(&x))?
+                .cfg,
+        )
+    } else {
+        c.handshake(ver.protocol, &host, port, Intent::Login)
+            .map_err(|x| e(&x))?;
+        // DEC-016: сессия лаунчера (Microsoft) → онлайн-вход, иначе offline.
+        match session() {
+            Some(sess) => login_online(&mut c, &ids, sess),
+            None => login_offline(&mut c, &ids, name),
+        }
         .map_err(|x| e(&x))?;
-    // DEC-016: сессия лаунчера (Microsoft) → онлайн-вход, иначе offline.
-    match session() {
-        Some(sess) => login_online(&mut c, &ids, sess),
-        None => login_offline(&mut c, &ids, name),
-    }
-    .map_err(|x| e(&x))?;
-    let ConfigOutcome::Play(cfg) = configure(
-        &mut c,
-        &ids,
-        &crate::settings::client_info(&crate::ui::options::Options::load(std::path::Path::new(
-            "./options.txt",
-        ))),
-    )
-    .map_err(|x| e(&x))?
-    else {
-        return Err("сервер просит transfer (не поддержано в M1)".into());
+        let ConfigOutcome::Play(cfg) = configure(
+            &mut c,
+            &ids,
+            &crate::settings::client_info(&crate::ui::options::Options::load(
+                std::path::Path::new("./options.txt"),
+            )),
+        )
+        .map_err(|x| e(&x))?
+        else {
+            return Err("сервер просит transfer (не поддержано в M1)".into());
+        };
+        cfg
     };
     let reg = |n: &str| cfg.registries.iter().find(|r| r.registry == n);
     if let Ok(mut g) = crate::mobs::VARIANT_REGS.lock() {
@@ -487,12 +500,15 @@ fn run(
         );
     }
     // Id часов overworld в реестре world_clock (holder = индекс в порядке registry_data).
-    let clock_id = reg("minecraft:world_clock").and_then(|r| {
-        r.entries
-            .iter()
-            .position(|(n, _)| n == "minecraft:overworld")
-            .map(|i| i as i32)
-    });
+    let clock_id = reg("minecraft:world_clock")
+        .and_then(|r| {
+            r.entries
+                .iter()
+                .position(|(n, _)| n == "minecraft:overworld")
+                .map(|i| i as i32)
+        })
+        // 1.20.1: реестра часов нет, set_time переводится в часы с id 0
+        .or((ver.protocol == 763).then_some(0));
     let mut h = PlayHandler::new(ids);
     let mut loaded_sent = false;
     let mut cur_dim = String::new();
@@ -663,6 +679,9 @@ fn run(
                     let _ = h.send_pick_item_from_block(&mut c, bp, data);
                 }
                 NetCmd::Attack { .. } | NetCmd::Interact { .. } => deferred.push(cmd),
+                // Локальный предпросмотр модового меню (control `mod_menu_preview`): на сервер не шлём.
+                NetCmd::ContainerClick { container, .. } | NetCmd::ContainerClose(container)
+                    if container == crate::inventory::PREVIEW_CONTAINER => {}
                 NetCmd::ContainerClick {
                     container,
                     state_id,
@@ -799,15 +818,23 @@ fn run(
             let pid = p.id;
             let pname = ids.name_of(State::Play, Direction::Clientbound, p.id);
             // Сервер старой версии: тело → формат канона (глава 18).
+            let canon_pname = (ver.protocol == 763)
+                .then(|| pname.map(|n| ezzmc_net::v1201::canon_name(n, &p.body)))
+                .flatten();
             let mut p = p;
             p.body = match ezzmc_net::legacy::to_canon(pname, std::mem::take(&mut p.body)) {
                 Ok(Some(b)) => b,
-                Ok(None) => continue,
+                Ok(None) => {
+                    tracing::trace!(target: "packets", "in play {pname:?} id={pid} отброшен трансляцией");
+                    continue;
+                }
                 Err(err) => {
                     tracing::warn!("{pname:?}: трансляция версии: {err}");
                     continue;
                 }
             };
+            // 1.20.1: имя пакета в каноне (тело уже переведено).
+            let pname = canon_pname.or(pname);
             // VANILLA: рендер ClientLevel держит секции чанков после forget_level_chunk (сервер шлёт их
             // при смерти), поэтому под экраном смерти виден мир; новые чанки придут после Respawn.
             if player_dead && pname == Some("forget_level_chunk") {
@@ -871,7 +898,7 @@ fn run(
                         .ok_or("нет dimension_type в реестре")?;
                     let dim = DimensionType::from_nbt(tag).map_err(|x| e(&x))?;
                     let fmt = dim.chunk_format(
-                        ceil_log2(ezzmc_world::generated::b26_3::STATE_COUNT),
+                        ezzmc_world::modded::block_global_bits(),
                         ceil_log2(biomes.entries.len() as u32),
                     );
                     if let Ok(mut g) = shared.lock() {
