@@ -121,4 +121,27 @@ Useful environment variables: `EZZMC_RENDER_DISTANCE`, `EZZMC_VSYNC=0`, `EZZMC_P
 - **Partial:** 1.21.11 — a connection was made, but it has not been tested thoroughly.
 - **Does not connect yet:** everything else from **1.5.2 to 26.2**. Protocol code for older versions is in progress but not verified against live servers. The goal of joining any server from 1.5.2 to latest is **not reached yet**.
 
+### Implemented (on 26.3)
+
+- **World:** chunk streaming and storage, vanilla lighting (own client-side light engine), sky, fog, clouds, weather, lightning, biome colours, particles, render distance up to 32.
+- **Player:** walking, sprinting, flying, physics and collisions, boats.
+- **Blocks:** breaking and placing.
+- **Inventory:** inventory and creative menu, held items and hand rendering (some creative icons are still missing).
+- **Entities:** pigs, cows and chickens; mobs, chests and dropped items are GPU-instanced (thousands on screen at ~300 FPS).
+- **UI:** menus, options, F3 debug screen, chat.
+- **Audio:** sounds and music (not yet verified by ear).
+- **Networking:** offline login, Microsoft sign-in through the launcher, encrypted connection, server list ping.
+
+### Not done yet
+
+- **Other versions (the main goal):** only 26.3 works; 1.5.2–26.2 do not connect yet.
+- **Entities:** only three mob types render so far; sheep (wool layer) and everything else is untested or missing.
+- **Client gameplay:** hunger and food, status effects, combat and the rest of vanilla client mechanics.
+- **Dimensions and portals**, **commands and chat features**, **The End and the Ender Dragon**.
+- **UI and containers:** most screens beyond the inventory, creative menu and options.
+- **Audio** is not verified, and part of the sound work is open.
+- **Singleplayer / integrated server:** not started.
+- **Known vanilla differences on 26.3:** some newer play packets are ignored (`game_rule_values`, `swing_animation`, `post_effects`, …); fluid counters in sections are not tracked; `force_translucent` texture material flag is not ported; side-by-side vanilla comparison is still in progress.
+- **Rendering:** on a strong GPU the compute path is ~9% slower than the vanilla path in flight (see [Benchmarks](#benchmarks)).
+
 The project is under active development: a working prototype, not a finished client. Some mechanics already work, others are still being ported from the reference.
