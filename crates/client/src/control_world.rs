@@ -76,8 +76,9 @@ const JUMP: usize = 1;
 const SPRINT: usize = 2;
 const ATTACK: usize = 3;
 
+/// Имя блока для агента: модовые (Forge) — настоящее `ns:path` из дампа, не прокси.
 fn name_of(s: BlockState) -> &'static str {
-    s.name()
+    ezzmc_world::modded::describe(s.id()).map_or_else(|| s.name(), |(n, _)| n)
 }
 
 /// Высота верхней грани коллизии блока (0 — проходим).
@@ -176,6 +177,14 @@ fn r2(v: f64) -> f64 {
 }
 
 fn props_json(s: BlockState) -> Value {
+    if let Some((_, props)) = ezzmc_world::modded::describe(s.id()) {
+        return Value::Object(
+            props
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), json!(v)))
+                .collect(),
+        );
+    }
     let info = s.block();
     let mut m = serde_json::Map::new();
     if let Some((_, idx)) =
@@ -648,7 +657,7 @@ impl App {
                         if s.is_air() {
                             continue;
                         }
-                        let n = s.name();
+                        let n = name_of(s);
                         if finds.is_empty() {
                             *counts.entry(n).or_default() += 1;
                         } else if finds.iter().any(|f| n.contains(f.as_str())) {

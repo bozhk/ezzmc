@@ -26,6 +26,8 @@ pub struct ModBlock {
     pub first: u32,
     /// Число состояний (произведение числа значений свойств).
     pub count: u32,
+    /// Свойства в порядке `StateDefinition` (имя, значения) — для F3/агента.
+    pub props: Vec<(String, Vec<String>)>,
 }
 
 /// Грубая классификация состояния для прокси.
@@ -235,6 +237,25 @@ pub fn props(canon: u32) -> Option<&'static StateProps> {
     t.props.get(canon.checked_sub(STATE_COUNT)? as usize)
 }
 
+/// Полное имя модового блока (`ns:path`) и его свойства для состояния `canon` (F3, агент).
+/// Порядок состояний — `StateDefinition`: первое свойство старшее (как в `set_server_blocks`).
+pub fn describe(canon: u32) -> Option<(&'static str, Vec<(&'static str, &'static str)>)> {
+    let t = TABLE.get()?;
+    let i = canon.checked_sub(STATE_COUNT)?;
+    let b = t.blocks.get(*t.state_block.get(i as usize)? as usize)?;
+    let mut off = i.checked_sub(b.first)?;
+    let mut props = Vec::with_capacity(b.props.len());
+    for (name, vals) in b.props.iter().rev() {
+        let n = vals.len().max(1) as u32;
+        if let Some(v) = vals.get((off % n) as usize) {
+            props.push((name.as_str(), v.as_str()));
+        }
+        off /= n;
+    }
+    props.reverse();
+    Some((b.name.as_str(), props))
+}
+
 /// Форма дампа по индексу формы `StateProps` (`i >= SHAPES.len()`).
 pub fn shape(i: usize) -> Option<&'static [[f64; 6]]> {
     let t = TABLE.get()?;
@@ -382,11 +403,13 @@ mod tests {
                 name: "mod:a".into(),
                 first: 0,
                 count: 2,
+                props: vec![("lit".into(), vec!["true".into(), "false".into()])],
             },
             ModBlock {
                 name: "mod:b".into(),
                 first: 2,
                 count: 3,
+                props: Vec::new(),
             },
         ];
         let kinds = [ProxyKind::Solid; 5];
@@ -429,6 +452,11 @@ mod tests {
         assert_eq!(bake_index(STATE_COUNT + 4), Some(4));
         assert_eq!(bake_index(STATE_COUNT + 5), None);
         assert!(proxy(STATE_COUNT).is_some());
+        assert_eq!(
+            describe(STATE_COUNT + 1),
+            Some(("mod:a", vec![("lit", "false")]))
+        );
+        assert_eq!(describe(STATE_COUNT + 3), Some(("mod:b", vec![])));
         let p0 = crate::block::BlockState(STATE_COUNT).props().unwrap();
         assert_eq!(p0.light_emission, 7);
         assert!(p0.has(FLAG_BLOCKS_MOTION) && !p0.has(FLAG_CAN_OCCLUDE));

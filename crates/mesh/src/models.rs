@@ -541,6 +541,11 @@ pub fn install_mod_table(bake: &ezzmc_assets::modbake::ModBake) {
         .zip(&first)
         .map(|(b, &f)| ModBlock {
             name: b.name.clone(),
+            props: b
+                .props
+                .iter()
+                .map(|p| (p.name.clone(), p.values.clone()))
+                .collect(),
             first: if f == u32::MAX { 0 } else { f },
             count: if f == u32::MAX {
                 0

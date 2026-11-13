@@ -52,7 +52,12 @@ fn state_lines(
 ) -> Vec<String> {
     let mut v = vec![
         format!("§n{title}: {}, {}, {}", pos[0], pos[1], pos[2]),
-        format!("minecraft:{name}"),
+        // Модовые (Forge) приходят уже с пространством имён.
+        if name.contains(':') {
+            name.to_owned()
+        } else {
+            format!("minecraft:{name}")
+        },
     ];
     for (k, val) in props {
         let c = match val.as_str() {
@@ -66,6 +71,12 @@ fn state_lines(
 }
 
 fn block_props(s: BlockState) -> Vec<(String, String)> {
+    if let Some((_, p)) = ezzmc_world::modded::describe(s.id()) {
+        return p
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+    }
     s.block()
         .props
         .iter()
@@ -269,7 +280,7 @@ pub fn build(v: &WorldView, e: &Env) -> (Vec<String>, Vec<String>) {
         right.extend(state_lines(
             "Targeted Block",
             t.pos,
-            t.state.name(),
+            ezzmc_world::modded::describe(t.state.id()).map_or_else(|| t.state.name(), |(n, _)| n),
             block_props(t.state),
         ));
         right.push(String::new());
