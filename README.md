@@ -123,25 +123,24 @@ Useful environment variables: `EZZMC_RENDER_DISTANCE`, `EZZMC_VSYNC=0`, `EZZMC_P
 
 ### Implemented (on 26.3)
 
+Ported from Mojang's source; the list reflects what exists in the code. Not every piece has been checked in live play yet.
+
 - **World:** chunk streaming and storage, vanilla lighting (own client-side light engine), sky, fog, clouds, weather, lightning, biome colours, particles, render distance up to 32.
-- **Player:** walking, sprinting, flying, physics and collisions, boats.
-- **Blocks:** breaking and placing.
-- **Inventory:** inventory and creative menu, held items and hand rendering (some creative icons are still missing).
-- **Entities:** pigs, cows and chickens; mobs, chests and dropped items are GPU-instanced (thousands on screen at ~300 FPS).
-- **UI:** menus, options, F3 debug screen, chat.
+- **Player:** walking, sprinting, flying, physics and collisions, boats, third-person camera, status effects with HUD icons, armor rendering.
+- **Blocks:** breaking and placing, block entities: chests (single/double, lid animation), signs (both sides, glow), banners, skulls, bells, enchanting-table book, pistons.
+- **Mobs (~80 types):** farm animals, hostile mobs (creeper, spider, enderman, blaze, ghast, slime, witch, illagers, piglins, hoglin, guardian, phantom, ravager, warden, shulker, breeze, creaking, …), villagers and golems, horses/camel/llama/goat/sniffer, fish, bees, parrots, bats, frogs, axolotl, armadillo, and the bosses **Wither** and **Ender Dragon** (flight animation). Mobs, chests and dropped items are GPU-instanced (thousands on screen at ~300 FPS).
+- **Inventory and screens:** inventory, creative menu, chests, furnace/brewing, enchanting, anvil, loom, villager trading, beacon, lectern and books, sign editor, server dialogs, boss bars, tab list, tooltips.
+- **Menus:** main menu, options, key bindings, resource-pack manager (drag and drop), F3 debug screen, hitboxes (F3+B), disconnect screen.
+- **Chat:** unsigned chat, command suggestions.
 - **Audio:** sounds and music (not yet verified by ear).
 - **Networking:** offline login, Microsoft sign-in through the launcher, encrypted connection, server list ping.
 
 ### Not done yet
 
 - **Other versions (the main goal):** only 26.3 works; 1.5.2–26.2 do not connect yet.
-- **Entities:** only three mob types render so far; sheep (wool layer) and everything else is untested or missing.
-- **Client gameplay:** hunger and food, status effects, combat and the rest of vanilla client mechanics.
-- **Dimensions and portals**, **commands and chat features**, **The End and the Ender Dragon**.
-- **UI and containers:** most screens beyond the inventory, creative menu and options.
-- **Audio** is not verified, and part of the sound work is open.
 - **Singleplayer / integrated server:** not started.
-- **Known vanilla differences on 26.3:** some newer play packets are ignored (`game_rule_values`, `swing_animation`, `post_effects`, …); fluid counters in sections are not tracked; `force_translucent` texture material flag is not ported; side-by-side vanilla comparison is still in progress.
+- **Verification:** the vanilla side-by-side acceptance pass is still in progress; audio is not checked by ear; some creative-menu icons are missing; several rarer mob variants (e.g. baby/adult forms of a few animals) are partial.
+- **Known vanilla differences on 26.3:** some newer play packets are ignored (`game_rule_values`, `swing_animation`, `post_effects`, …); fluid counters in sections are not tracked; `force_translucent` texture material flag is not ported; old golden tests are not updated for 26.3.
 - **Rendering:** on a strong GPU the compute path is ~9% slower than the vanilla path in flight (see [Benchmarks](#benchmarks)).
 
 The project is under active development: a working prototype, not a finished client. Some mechanics already work, others are still being ported from the reference.
