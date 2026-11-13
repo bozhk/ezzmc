@@ -323,6 +323,9 @@ impl HandItems {
     }
 
     fn build(&self, rm: &ResourceManager, name: &str, cx: &Ctx) -> Option<HandMesh> {
+        if name.contains(':') && !name.starts_with("minecraft:") {
+            return self.build_mod_block(rm, name);
+        }
         let build_ctx = |dc: DisplayContext| -> Option<(Vec<Quad>, Mat4)> {
             let json: Value =
                 serde_json::from_slice(&rm.read(&format!("assets/minecraft/items/{name}.json"))?)
@@ -349,24 +352,7 @@ impl HandItems {
                     continue;
                 };
                 let t = resolved.transform(dc);
-                xf.get_or_insert_with(|| {
-                    // VANILLA: ItemTransform#apply (translation уже ×1/16; левая рука: −x, −rotY, −rotZ).
-                    let (tx, ry, rz) = if dc.left_hand() {
-                        (-t.translation[0], -t.rotation[1], -t.rotation[2])
-                    } else {
-                        (t.translation[0], t.rotation[1], t.rotation[2])
-                    };
-                    let rot = Quat::from_euler(
-                        EulerRot::XYZ,
-                        t.rotation[0].to_radians(),
-                        ry.to_radians(),
-                        rz.to_radians(),
-                    );
-                    Mat4::from_translation(Vec3::new(tx, t.translation[1], t.translation[2]))
-                        * Mat4::from_quat(rot)
-                        * Mat4::from_scale(Vec3::from(t.scale))
-                        * Mat4::from_translation(Vec3::splat(-0.5))
-                });
+                xf.get_or_insert_with(|| display_matrix(&t, dc));
                 if let Some(tex) = chest {
                     self.chest_quads(&tex, &mut quads);
                     continue;
@@ -435,6 +421,63 @@ impl HandItems {
             first_person_left: pick(DisplayContext::FirstPersonLeftHand),
             third_person_left: pick(DisplayContext::ThirdPersonLeftHand),
             ground: pick(DisplayContext::Ground),
+        })
+    }
+
+    /// Модовый блок-предмет (Forge, TODO-508b): модель блока из дампа (первое состояние блока —
+    /// VANILLA-UNSURE, у мода может быть своя модель предмета) с трансформами ванильного
+    /// `block/block` (родитель моделей блок-предметов). Не блок — `None` (руки нет).
+    fn build_mod_block(&self, rm: &ResourceManager, name: &str) -> Option<HandMesh> {
+        let bake = ezzmc_assets::modbake::global()?;
+        let bi = bake.block_by_name(name)?;
+        let st = bake.states.iter().find(|s| s.block as usize == bi)?;
+        let variant = bake.model(st.model).into_iter().next()?;
+        let g = Getter {
+            items: &self.items.sprites,
+            blocks: &self.blocks,
+        };
+        let mut quads = Vec::new();
+        for q in variant.quads() {
+            let id = bake
+                .sprites
+                .get(q.sprite as usize)
+                .map(|sp| Identifier::parse(&sp.name));
+            let sp = id
+                .and_then(|i| self.blocks.get(&i).copied())
+                .unwrap_or_else(|| g.missing());
+            let tint = match bake.tint(st, q.tint) {
+                ezzmc_assets::modbake::BakeTint::Color(c) => c,
+                _ => 0xFF_FFFF,
+            };
+            let a = Vec3::from(q.pos[1]) - Vec3::from(q.pos[0]);
+            let b = Vec3::from(q.pos[2]) - Vec3::from(q.pos[0]);
+            let n = a.cross(b).normalize_or_zero();
+            // VANILLA-UNSURE: как у 3D-предметов выше — освещение формулой GUI по нормали.
+            let l0 = Vec3::new(-0.933, 0.263, -0.244);
+            let l1 = Vec3::new(-0.104, 0.977, 0.188);
+            let shade = ((n.dot(l0).abs().max(n.dot(l1).abs())) * 0.6 + 0.4).min(1.0);
+            quads.push(Quad {
+                pos: q.pos,
+                uv: q.uv.map(|[u, v]| [sp.get_u(u), sp.get_v(v)]),
+                color: tint_rgb(tint, shade),
+                tint: tint_rgb(tint, 1.0),
+                normal: n.to_array(),
+                items: false,
+            });
+        }
+        if quads.is_empty() {
+            return None;
+        }
+        let mut loader = ModelLoader::new(rm);
+        let (base, _) = loader.resolve(&Identifier::parse("minecraft:block/block"))?;
+        let m = |dc: DisplayContext| display_matrix(&base.transform(dc), dc);
+        Some(HandMesh {
+            quads,
+            first_person: m(DisplayContext::FirstPersonRightHand),
+            third_person: m(DisplayContext::ThirdPersonRightHand),
+            first_person_left: m(DisplayContext::FirstPersonLeftHand),
+            third_person_left: m(DisplayContext::ThirdPersonLeftHand),
+            ground: m(DisplayContext::Ground),
         })
     }
 
@@ -624,8 +667,45 @@ fn tint_rgb(tint: u32, shade: f32) -> [u8; 3] {
 }
 
 /// Имя предмета и контекст для стека (часы/компасы динамические).
+/// VANILLA: ItemTransform#apply (translation уже ×1/16; левая рука: −x, −rotY, −rotZ).
+fn display_matrix(t: &ezzmc_assets::model::ItemTransform, dc: DisplayContext) -> Mat4 {
+    let (tx, ry, rz) = if dc.left_hand() {
+        (-t.translation[0], -t.rotation[1], -t.rotation[2])
+    } else {
+        (t.translation[0], t.rotation[1], t.rotation[2])
+    };
+    let rot = Quat::from_euler(
+        EulerRot::XYZ,
+        t.rotation[0].to_radians(),
+        ry.to_radians(),
+        rz.to_radians(),
+    );
+    Mat4::from_translation(Vec3::new(tx, t.translation[1], t.translation[2]))
+        * Mat4::from_quat(rot)
+        * Mat4::from_scale(Vec3::from(t.scale))
+        * Mat4::from_translation(Vec3::splat(-0.5))
+}
+
+/// Имя модового предмета (Forge) как `&'static str`: набор конечный (реестр сервера), строки
+/// живут до конца процесса.
+fn mod_item_name(item: u32) -> Option<&'static str> {
+    use std::sync::Mutex;
+    static NAMES: Mutex<Vec<(u32, &'static str)>> = Mutex::new(Vec::new());
+    let mut g = NAMES.lock().ok()?;
+    if let Some((_, n)) = g.iter().find(|(i, _)| *i == item) {
+        return Some(n);
+    }
+    let n: &'static str = Box::leak(crate::inventory::item_name(item)?.into_boxed_str());
+    g.push((item, n));
+    Some(n)
+}
+
 pub fn stack_ctx(s: &ezzmc_protocol::item::ItemStack) -> Option<(&'static str, Ctx)> {
-    let name = ezzmc_protocol::generated::r26_3::ITEM.get(s.item as usize)?;
+    let name = if s.item >= ezzmc_world::modded::MOD_ITEM_BASE {
+        mod_item_name(s.item)?
+    } else {
+        ezzmc_protocol::generated::r26_3::ITEM.get(s.item as usize)?
+    };
     Some((
         name,
         crate::itemicon::dynamic(name, crate::itemicon::ctx_of(&s.patch)),
