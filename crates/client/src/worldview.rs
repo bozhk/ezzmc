@@ -4177,7 +4177,13 @@ impl WorldView {
         };
         crate::mobs::prof_at(10, "t до encoder");
         let compute = self.use_compute && self.vox.is_some();
-        let view_proj = proj * mv;
+        // VANILLA: GameRenderer#renderLevel — projection.mul(bobHurt·bobView): качание входит в матрицу
+        // всего мира, в том числе compute-пути (MDI/Hi-Z), контуров и отладочных линий.
+        let view_proj = if self.walking {
+            proj * self.bob((self.tick_acc / 0.05) as f32) * mv
+        } else {
+            proj * mv
+        };
         let mut enc = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
@@ -4328,11 +4334,7 @@ impl WorldView {
                 .collect();
             let width = (w as f32 / 1920.0 * 2.5).max(2.5);
             // VANILLA: боббинг входит в матрицу проекции — контур качается вместе с миром.
-            let outline_vp = if self.walking {
-                proj * self.bob((self.tick_acc / 0.05) as f32) * mv
-            } else {
-                view_proj
-            };
+            let outline_vp = view_proj;
             self.lines.set(
                 &gpu.queue,
                 outline_vp,
