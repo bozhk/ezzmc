@@ -296,6 +296,14 @@ fn fluid_table() -> &'static [Option<Fluid>] {
 }
 
 pub fn fluid(state: BlockState) -> Option<Fluid> {
+    if state.is_modded() {
+        return mod_waterlogged(state).then_some(Fluid {
+            lava: false,
+            amount: 8,
+            falling: false,
+            source: true,
+        });
+    }
     fluid_table()
         .get(state.canon().0 as usize)
         .copied()
@@ -322,6 +330,25 @@ pub fn flags(state: BlockState) -> u8 {
         return mod_flags(state);
     }
     table().get(state.0 as usize).copied().unwrap_or(0)
+}
+
+/// Модовое состояние с `waterlogged=true` (TODO-520; у модов SimpleWaterloggedBlock — вода-источник).
+/// Таблица строится при первом запросе из `modded::describe`.
+fn mod_waterlogged(state: BlockState) -> bool {
+    static T: OnceLock<Vec<bool>> = OnceLock::new();
+    let t = T.get_or_init(|| {
+        (0..ezzmc_world::modded::count())
+            .map(|i| {
+                ezzmc_world::modded::describe(STATE_COUNT + i)
+                    .is_some_and(|(_, p)| p.iter().any(|&(k, v)| k == "waterlogged" && v == "true"))
+            })
+            .collect()
+    });
+    state
+        .0
+        .checked_sub(STATE_COUNT)
+        .and_then(|i| t.get(i as usize).copied())
+        .unwrap_or(false)
 }
 
 /// Флаги модовых состояний (формы/заслонение из дампа, TODO-507); строятся при первом запросе
@@ -361,6 +388,27 @@ mod tests {
     fn st(name: &str) -> BlockState {
         let b = BLOCKS.iter().find(|b| b.name == name).unwrap();
         BlockState::from_id(b.default_state).unwrap()
+    }
+
+    #[test]
+    fn modded_waterlogged_is_water() {
+        // TODO-520: mod:pipe (waterlogged true/false) — первое состояние с водой.
+        use ezzmc_world::modded::{install, ModBlock, ModTable, ProxyKind};
+        let wl = vec![(
+            "waterlogged".to_string(),
+            vec!["true".into(), "false".into()],
+        )];
+        let blocks = vec![ModBlock {
+            name: "mod:pipe".into(),
+            first: 0,
+            count: 2,
+            props: wl,
+        }];
+        install(ModTable::new(blocks, &[ProxyKind::SeeThrough; 2]));
+        let wet = BlockState(STATE_COUNT);
+        let dry = BlockState(STATE_COUNT + 1);
+        assert!(fluid(wet).is_some_and(|f| f.source && !f.lava));
+        assert!(fluid(dry).is_none());
     }
 
     #[test]
