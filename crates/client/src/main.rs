@@ -74,6 +74,7 @@ mod support;
 mod tablist;
 mod threads;
 mod timer;
+mod titles;
 mod toolspeed;
 mod tooltip;
 mod ui;
@@ -165,7 +166,7 @@ struct App {
     inv_creative: bool,
     creative: creativescreen::State,
     /// Сообщение над хотбаром (VANILLA: Gui#setOverlayMessage, 60 тиков): текст и срок.
-    overlay: Option<(String, std::time::Instant)>,
+    overlay: Option<(Vec<chat::Span>, std::time::Instant)>,
     /// Hud#animateOverlayMessageColor (радужный цвет «Now Playing»).
     overlay_anim: bool,
     chat: chat::Chat,
@@ -974,7 +975,7 @@ impl App {
                 .replacen("%1$s", &label(self, "key.loadToolbarActivator"), 1)
                 .replacen("%2$s", &label(self, &format!("key.hotbar.{}", n + 1)), 1);
             self.overlay = Some((
-                msg,
+                vec![chat::Span::plain(msg)],
                 std::time::Instant::now() + std::time::Duration::from_secs(3),
             ));
             self.overlay_anim = false;
@@ -2157,11 +2158,9 @@ impl ApplicationHandler for App {
                                 self.chat_colors,
                             ),
                             None => {
-                                // VANILLA: Gui#setOverlayMessage — 60 тиков.
-                                let m = chat::flatten(&c, &self.item_lang, self.chat_colors)
-                                    .iter()
-                                    .map(|s| s.text.as_str())
-                                    .collect::<String>();
+                                // VANILLA: Gui#setOverlayMessage — 60 тиков; Component со своими
+                                // цветами (опция chatColors на action bar не влияет).
+                                let m = chat::flatten(&c, &self.item_lang, true);
                                 self.overlay = Some((
                                     m,
                                     std::time::Instant::now()
@@ -2189,6 +2188,10 @@ impl ApplicationHandler for App {
                 let n = self.timer.advance_time(self.clock.now_ms(), true);
                 for _ in 0..n.min(timer::MAX_TICKS_PER_UPDATE) {
                     self.tick_count += 1;
+                    // VANILLA: Hud#tick — таймер титров.
+                    if let Some(v) = &mut self.view {
+                        v.titles.tick();
+                    }
                 }
                 // VANILLA: pauseGame(false) — меню паузы появится с GUI (гл. 11); пока курсор освобождён.
                 if self.focus.frame(self.clock.now_ms()) {
@@ -2209,7 +2212,7 @@ impl ApplicationHandler for App {
                 }
                 self.yaw = y;
                 self.pitch = p;
-                let _partial = self.timer.partial_tick(false);
+                let gui_partial = self.timer.partial_tick(false);
                 // VANILLA: FramerateLimitTracker + limitDisplayFPS.
                 let now = self.clock.now_ms();
                 let iconified = self
@@ -2472,7 +2475,7 @@ impl ApplicationHandler for App {
                                         .replacen("%s", &d, 1)
                                         .replacen("%1$s", &d, 1);
                                     self.overlay = Some((
-                                        msg,
+                                        vec![chat::Span::plain(msg)],
                                         std::time::Instant::now()
                                             + std::time::Duration::from_millis(3000),
                                     ));
@@ -2610,34 +2613,34 @@ impl ApplicationHandler for App {
                                         }
                                         if let (Some((m, ticks)), false) = (&overlay, hid) {
                                             // VANILLA: Hud#extractOverlayMessage — над хотбаром (gh − 68),
-                                            // alpha = t·255/20, при animate цвет hsv(t/50, 0.7, 0.6).
+                                            // alpha = t·255/20, при animate цвет hsv(t/50, 0.7, 0.6); тень,
+                                            // подложки нет (backgroundForChatOnly=true по умолчанию).
                                             let alpha = ((ticks * 255.0 / 20.0) as i32).min(255);
                                             if alpha > 0 {
-                                                let rgb = if overlay_anim {
-                                                    hsv_rgb(ticks / 50.0, 0.7, 0.6)
-                                                } else {
-                                                    0xFF_FFFF
-                                                };
                                                 let a = alpha as f32 / 255.0;
-                                                let mw = t.text_width(m);
-                                                let (x, y) =
-                                                    (gwf / 2.0 - mw / 2.0, ghf - 68.0 - 4.0);
-                                                t.fill(
-                                                    x - 2.0,
-                                                    y - 2.0,
-                                                    x + mw + 2.0,
-                                                    y + 11.0,
-                                                    ((alpha / 2) as u32) << 24,
+                                                let mw = titles::spans_width(t, m).floor();
+                                                let (x, y) = (
+                                                    (gwf / 2.0).floor() - (mw / 2.0).floor(),
+                                                    ghf - 68.0 - 4.0,
                                                 );
-                                                t.draw_alpha(
-                                                    m,
-                                                    x + 1.0,
-                                                    y + 1.0,
-                                                    (rgb >> 2) & 0x3F_3F3F,
-                                                    a,
-                                                );
-                                                t.draw_alpha(m, x, y, rgb, a);
+                                                if overlay_anim {
+                                                    let rgb = hsv_rgb(ticks / 50.0, 0.7, 0.6);
+                                                    let m: Vec<chat::Span> = m
+                                                        .iter()
+                                                        .map(|s| chat::Span {
+                                                            color: rgb,
+                                                            ..s.clone()
+                                                        })
+                                                        .collect();
+                                                    titles::draw_spans(t, &m, x, y, a, true);
+                                                } else {
+                                                    titles::draw_spans(t, m, x, y, a, true);
+                                                }
                                             }
+                                        }
+                                        if !hid {
+                                            // VANILLA: Hud#extractTitle — после overlay, до чата.
+                                            v.titles.draw(t, item_lang, gwf, ghf, gui_partial);
                                         }
                                         if !hid {
                                             let (ccfg, tick) = (self.chat_cfg, self.tick_count);

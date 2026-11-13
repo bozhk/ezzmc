@@ -138,6 +138,8 @@ pub enum NetEvt {
     /// Чат: оформленный текст и индикатор; overlay=true — action bar.
     Chat(ezzmc_protocol::text::Component, crate::chat::Tag),
     Overlay(ezzmc_protocol::text::Component),
+    /// set_title_text/set_subtitle_text/set_titles_animation/clear_titles.
+    Title(crate::titles::TitleEvt),
     /// Список игроков (Tab): player_info_update/remove, tab_list.
     Tab(Box<crate::tablist::TabEvt>),
     /// boss_event: (uuid, операция).
@@ -1102,6 +1104,36 @@ fn run(
                                 let _ = tx.send(NetEvt::Tab(Box::new(ev)));
                             }
                             Err(x) => tracing::warn!("{pname}: {x}"),
+                        }
+                        continue;
+                    }
+                    if matches!(
+                        pname,
+                        "set_title_text"
+                            | "set_subtitle_text"
+                            | "set_action_bar_text"
+                            | "set_titles_animation"
+                            | "clear_titles"
+                    ) {
+                        // VANILLA: ClientPacketListener#setTitleText/setSubtitleText/setActionBarText/
+                        // setTitlesAnimation/handleTitlesClear.
+                        use crate::titles::{self as ti, TitleEvt};
+                        let ev = match pname {
+                            "set_titles_animation" => ti::parse_times(&body).map(NetEvt::Title),
+                            "clear_titles" => ti::parse_clear(&body).map(NetEvt::Title),
+                            _ => crate::chatnet::parse_component(&body)
+                                .ok()
+                                .map(|c| match pname {
+                                    "set_title_text" => NetEvt::Title(TitleEvt::Title(c)),
+                                    "set_subtitle_text" => NetEvt::Title(TitleEvt::Subtitle(c)),
+                                    _ => NetEvt::Overlay(c),
+                                }),
+                        };
+                        match ev {
+                            Some(ev) => {
+                                let _ = tx.send(ev);
+                            }
+                            None => tracing::warn!("{pname}: не разобран [len={}]", body.len()),
                         }
                         continue;
                     }

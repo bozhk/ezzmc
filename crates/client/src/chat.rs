@@ -40,7 +40,7 @@ pub struct Span {
 }
 
 impl Span {
-    fn plain(text: String) -> Self {
+    pub fn plain(text: String) -> Self {
         Self {
             text,
             color: 0xFFFFFF,

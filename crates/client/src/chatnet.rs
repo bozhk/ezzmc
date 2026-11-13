@@ -169,6 +169,11 @@ pub fn decorate(b: &Bound, content: Component) -> Component {
 }
 
 /// `system_chat`: (текст, overlay).
+/// Пакет из одного Component (title/subtitle/action bar).
+pub fn parse_component(body: &[u8]) -> ProtocolResult<Component> {
+    component(&mut Reader::new(body))
+}
+
 pub fn parse_system(body: &[u8]) -> ProtocolResult<(Component, bool)> {
     let mut r = Reader::new(body);
     let c = component(&mut r)?;

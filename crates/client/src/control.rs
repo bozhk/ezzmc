@@ -269,7 +269,24 @@ impl App {
             s["attack_delay"] = json!(v.attack_delay());
             s["attack_strength"] = json!(v.attack_strength(0.0));
             s["sections"] = json!(v.resident_sections());
+            let plain = |c: &ezzmc_protocol::text::Component| {
+                crate::chat::flatten(c, &self.item_lang, true)
+                    .iter()
+                    .map(|x| x.text.as_str())
+                    .collect::<String>()
+            };
+            s["title"] = json!(v.titles.current().map(|(t, sub, time)| json!({
+                "title": plain(t),
+                "subtitle": sub.map(plain),
+                "time": time,
+                "alpha": v.titles.alpha(0.0),
+            })));
         }
+        s["overlay"] = json!(self
+            .overlay
+            .as_ref()
+            .filter(|(_, t)| std::time::Instant::now() < *t)
+            .map(|(m, _)| m.iter().map(|x| x.text.as_str()).collect::<String>()));
         if let Some((title, kind, buttons)) = self.gui.as_ref().and_then(|g| g.dialog_info()) {
             s["dialog"] = json!({"title": title, "kind": kind, "buttons": buttons});
         }

@@ -305,6 +305,8 @@ pub struct WorldView {
     pub sugg_in: Vec<(i32, i32, i32, Vec<String>)>,
     pub tab: crate::tablist::TabList,
     pub boss: crate::bossbar::BossBars,
+    /// Титры `/title` (VANILLA: Hud title/subtitle).
+    pub titles: crate::titles::Titles,
     /// Неймтеги кадра: (позиция якоря, текст, присед) и матрица проекции этого кадра.
     nametags: Vec<([f64; 3], String, bool)>,
     nt_view: (Mat4, [f64; 3], f32),
@@ -1063,6 +1065,7 @@ impl WorldView {
             sugg_in: Vec::new(),
             tab: Default::default(),
             boss: Default::default(),
+            titles: Default::default(),
             nametags: Vec::new(),
             nt_view: (Mat4::IDENTITY, [0.0; 3], 1.0),
             chat_in: Vec::new(),
@@ -1399,6 +1402,7 @@ impl WorldView {
                 NetEvt::Overlay(c) => self.chat_in.push((c, None)),
                 NetEvt::Tab(e) => self.tab.apply(*e),
                 NetEvt::Boss(id, op) => self.boss.apply(id, *op),
+                NetEvt::Title(e) => self.titles.apply(e),
                 NetEvt::Dialog(d) => self.dialog_in.push(d),
                 NetEvt::OpenSign(p, f) => self.sign_in.push((p, f)),
                 NetEvt::Suggestions(id, s, l, v) => self.sugg_in.push((id, s, l, v)),
