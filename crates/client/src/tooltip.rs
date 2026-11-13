@@ -18,14 +18,28 @@ use std::sync::{Mutex, OnceLock};
 
 /// Отображаемое имя предмета по id реестра. VANILLA: Item#getDescriptionId (item./block.minecraft.*).
 pub fn item_title(lang: &Lang, name: &str) -> String {
+    // Модовый предмет (Forge) приходит полным именем `ns:path`; ключи — `item.ns.path` /
+    // `block.ns.path` (VANILLA: Item#getDescriptionId / BlockItem → Block#getDescriptionId).
+    let (ns, path) = name.split_once(':').unwrap_or(("minecraft", name));
     for p in ["item", "block"] {
-        let key = format!("{p}.minecraft.{name}");
+        let key = format!("{p}.{ns}.{path}");
         let s = lang.tr(&key);
         if s != key {
             return s;
         }
     }
     name.to_owned()
+}
+
+/// Имя предмета для тултипа: ванильное — короткое из реестра 26.3, модовое (Forge) —
+/// полное `ns:path` из снимка реестра сервера; неизвестное — `air`.
+pub fn item_key(item: u32) -> std::borrow::Cow<'static, str> {
+    if item >= ezzmc_world::modded::MOD_ITEM_BASE {
+        if let Some(n) = crate::inventory::item_name(item) {
+            return n.into();
+        }
+    }
+    ITEM.get(item as usize).copied().unwrap_or("air").into()
 }
 
 /// Зачарования сервера: (имя, макс. уровень) в порядке registry_data (holder id = индекс).
@@ -706,7 +720,8 @@ fn gcd(a: i128, b: i128) -> i128 {
 
 /// Вес стека. VANILLA: BundleContents#getWeight (бандл в бандле = 1/16 + вес содержимого; пчёлы = 1; иначе 1/maxStack).
 fn stack_weight(s: &ItemStack) -> (i128, i128) {
-    let name = ITEM.get(s.item as usize).copied().unwrap_or("air");
+    let name_k = item_key(s.item);
+    let name: &str = &name_k;
     let (n, d) = if let Some(b) = comp(&s.patch, "bundle_contents") {
         let (n, d) = contents_weight(&read_contents(b));
         (n * 16 + d, d * 16)
@@ -1097,7 +1112,8 @@ fn component_count(name: &str, patch: &ComponentPatch) -> usize {
 
 /// Имя предмета без стиля/цвета. VANILLA: ItemStack#getHoverName (custom_name → item_name → зелье → lang).
 pub fn hover_name(lang: &Lang, s: &ItemStack) -> String {
-    let name = ITEM.get(s.item as usize).copied().unwrap_or("air");
+    let name_k = item_key(s.item);
+    let name: &str = &name_k;
     comp(&s.patch, "custom_name")
         .and_then(|b| text_of(lang, b))
         .or_else(|| comp(&s.patch, "item_name").and_then(|b| text_of(lang, b)))
@@ -1121,7 +1137,8 @@ pub fn has_custom_name(s: &ItemStack) -> bool {
 
 /// Строки тултипа в порядке `ItemStack#addDetailsToTooltip`.
 pub fn stack_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack) -> Vec<(String, u32)> {
-    let name = ITEM.get(s.item as usize).copied().unwrap_or("air");
+    let name_k = item_key(s.item);
+    let name: &str = &name_k;
     // VANILLA: ItemStack#getTooltipLines — вне креатива hide_tooltip даёт пустую подсказку
     // (ветка OP_NBT_WARNING не портирована: нужен shouldPrintOpWarning).
     if hide_tooltip(&s.patch) && !CREATIVE.load(Ordering::Relaxed) {

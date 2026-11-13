@@ -220,11 +220,9 @@ fn wrap180(a: f32) -> f32 {
     (a + 180.0).rem_euclid(360.0) - 180.0
 }
 
-fn item_name(item: u32) -> &'static str {
-    ezzmc_protocol::generated::r26_3::ITEM
-        .get(item as usize)
-        .copied()
-        .unwrap_or("?")
+/// Имя предмета для агента; модовые (Forge) — полное `ns:path` из реестра сервера.
+fn item_name(item: u32) -> String {
+    crate::inventory::item_name(item).unwrap_or_else(|| "?".to_owned())
 }
 
 /// Символы ASCII-карты: частые блоки — фиксированные, остальным выдаём свободные буквы.
