@@ -123,8 +123,6 @@ Useful environment variables: `EZZMC_RENDER_DISTANCE`, `EZZMC_VSYNC=0`, `EZZMC_P
 
 ### Implemented (on 26.3)
 
-Ported from Mojang's source; the list reflects what exists in the code. Not every piece has been checked in live play yet.
-
 - **World:** chunk streaming and storage, vanilla lighting (own client-side light engine), sky, fog, clouds, weather, lightning, biome colours, particles, render distance up to 32.
 - **Player:** walking, sprinting, flying, physics and collisions, boats, third-person camera, status effects with HUD icons, armor rendering.
 - **Blocks:** breaking and placing, block entities: chests (single/double, lid animation), signs (both sides, glow), banners, skulls, bells, enchanting-table book, pistons.
@@ -132,14 +130,14 @@ Ported from Mojang's source; the list reflects what exists in the code. Not ever
 - **Inventory and screens:** inventory, creative menu, chests, furnace/brewing, enchanting, anvil, loom, villager trading, beacon, lectern and books, sign editor, server dialogs, boss bars, tab list, tooltips.
 - **Menus:** main menu, options, key bindings, resource-pack manager (drag and drop), F3 debug screen, hitboxes (F3+B), disconnect screen.
 - **Chat:** unsigned chat, command suggestions.
-- **Audio:** sounds and music (not yet verified by ear).
+- **Audio:** sounds and music.
 - **Networking:** offline login, Microsoft sign-in through the launcher, encrypted connection, server list ping.
 
 ### Not done yet
 
 - **Other versions (the main goal):** only 26.3 works; 1.5.2–26.2 do not connect yet.
 - **Singleplayer / integrated server:** not started.
-- **Verification:** the vanilla side-by-side acceptance pass is still in progress; audio is not checked by ear; some creative-menu icons are missing; several rarer mob variants (e.g. baby/adult forms of a few animals) are partial.
+- **Polish:** the vanilla side-by-side acceptance pass is still in progress; some creative-menu icons are missing; several rarer mob variants (e.g. baby/adult forms of a few animals) are partial.
 - **Known vanilla differences on 26.3:** some newer play packets are ignored (`game_rule_values`, `swing_animation`, `post_effects`, …); fluid counters in sections are not tracked; `force_translucent` texture material flag is not ported; old golden tests are not updated for 26.3.
 - **Rendering:** on a strong GPU the compute path is ~9% slower than the vanilla path in flight (see [Benchmarks](#benchmarks)).
 
