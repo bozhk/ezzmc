@@ -383,6 +383,14 @@ pub fn server_id(registry: &str, name: &str) -> Option<u32> {
     names.iter().position(|n| n == name).map(|i| i as u32)
 }
 
+/// Все имена снимка реестра сервера по id (дыры — пустые строки); `None` — снимка нет.
+pub fn server_names(registry: &str) -> Option<Vec<String>> {
+    let g = SERVER_REGS.read().ok()?;
+    g.iter()
+        .find(|(r, _)| r == registry)
+        .map(|(_, n)| n.clone())
+}
+
 /// Есть ли снимок реестра сервера.
 pub fn has_server_registry(registry: &str) -> bool {
     SERVER_REGS

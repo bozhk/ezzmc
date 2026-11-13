@@ -82,7 +82,7 @@ fn read_registry_snapshot(r: &mut Reader) -> ProtocolResult<()> {
     let name = r.string(32767)?;
     let wanted = matches!(
         name.as_str(),
-        "minecraft:block" | "minecraft:menu" | "minecraft:item"
+        "minecraft:block" | "minecraft:menu" | "minecraft:item" | "minecraft:enchantment"
     );
     if !wanted || !r.bool()? {
         return Ok(());
@@ -300,6 +300,8 @@ fn parse_login_registries(body: &[u8]) -> ProtocolResult<Vec<RegistryData>> {
             entries: entries.into_iter().map(|(_, n, t)| (n, norm(t))).collect(),
         });
     }
+    // У 1.20.1 зачарований в кодеке нет — подсказкам нужен реестр (TODO-508c).
+    out.push(enchant_registry());
     Ok(out)
 }
 
@@ -401,7 +403,7 @@ pub fn login_to_canon(body: &[u8]) -> ProtocolResult<Vec<u8>> {
     Ok(w.into_vec())
 }
 
-/// 1.20.1 ItemStack (bool, id, byte count, NBT) → канон (count, id, пустой патч). NBT пока теряется.
+/// 1.20.1 ItemStack (bool, id, byte count, NBT) → канон (count, id, патч из NBT, TODO-508c).
 fn item_to_canon(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
     if !r.bool()? {
         w.var_int(0);
@@ -409,7 +411,7 @@ fn item_to_canon(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
     }
     let id = r.var_int()?;
     let count = r.i8()?;
-    nbt::read_named(r)?;
+    let tag = nbt::read_named(r)?.map(|(_, t)| t);
     // Модовый предмет Forge (снимок FML minecraft:item) → MOD_ITEM_BASE + id сервера (TODO-508).
     let canon = u32::try_from(id)
         .ok()
@@ -422,16 +424,213 @@ fn item_to_canon(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
         });
     match canon {
         Some(c) if count > 0 => {
+            let book =
+                ezzmc_protocol::generated::r26_3::ITEM.get(c as usize) == Some(&"enchanted_book");
+            let added = tag
+                .as_ref()
+                .map(|t| nbt_to_components(t, book))
+                .unwrap_or_default();
             w.var_int(i32::from(count))
                 .var_int(c as i32)
-                .var_int(0)
+                .var_int(added.len() as i32)
                 .var_int(0);
+            for (id, v) in added {
+                w.var_int(id as i32).bytes(&v);
+            }
         }
         _ => {
             w.var_int(0);
         }
     }
     Ok(())
+}
+
+/// Номер типа компонента 26.3 по имени.
+fn component_id(name: &str) -> Option<u32> {
+    ezzmc_protocol::generated::r26_3::DATA_COMPONENT_TYPE
+        .iter()
+        .position(|n| *n == name)
+        .map(|i| i as u32)
+}
+
+/// VANILLA: max_level ванильных зачарований (data/minecraft/enchantment/*.json, 26.3; у
+/// 1.20.1 те же значения — VANILLA-UNSURE, исходника 1.20.1 нет). Для подсказки уровня.
+const ENCHANT_MAX: &[(&str, i32)] = &[
+    ("aqua_affinity", 1),
+    ("bane_of_arthropods", 5),
+    ("binding_curse", 1),
+    ("blast_protection", 4),
+    ("channeling", 1),
+    ("depth_strider", 3),
+    ("efficiency", 5),
+    ("feather_falling", 4),
+    ("fire_aspect", 2),
+    ("fire_protection", 4),
+    ("flame", 1),
+    ("fortune", 3),
+    ("frost_walker", 2),
+    ("impaling", 5),
+    ("infinity", 1),
+    ("knockback", 2),
+    ("looting", 3),
+    ("loyalty", 3),
+    ("luck_of_the_sea", 3),
+    ("lure", 3),
+    ("mending", 1),
+    ("multishot", 1),
+    ("piercing", 4),
+    ("power", 5),
+    ("projectile_protection", 4),
+    ("protection", 4),
+    ("punch", 2),
+    ("quick_charge", 3),
+    ("respiration", 3),
+    ("riptide", 3),
+    ("sharpness", 5),
+    ("silk_touch", 1),
+    ("smite", 5),
+    ("soul_speed", 3),
+    ("sweeping_edge", 3),
+    ("swift_sneak", 3),
+    ("thorns", 3),
+    ("unbreaking", 3),
+    ("vanishing_curse", 1),
+];
+
+/// Имя зачарования 1.20.1 → 26.3 (VANILLA: datafix переименование `sweeping` → `sweeping_edge`, 1.20.5).
+fn enchant_canon_name(n: &str) -> String {
+    let full = if n.contains(':') {
+        n.to_owned()
+    } else {
+        format!("minecraft:{n}")
+    };
+    if full == "minecraft:sweeping" {
+        "minecraft:sweeping_edge".to_owned()
+    } else {
+        full
+    }
+}
+
+/// Реестр зачарований сервера 1.20.1 (у него нет registry_data): снимок FML, иначе ванильный
+/// список 1.20.1. Holder id канона = индекс в этом списке.
+fn enchant_names() -> Vec<String> {
+    if let Some(fml) = ezzmc_world::modded::server_names("minecraft:enchantment") {
+        return fml.iter().map(|n| enchant_canon_name(n)).collect();
+    }
+    ezzmc_protocol::generated::r1_20_1::ENCHANTMENT
+        .iter()
+        .map(|n| enchant_canon_name(n))
+        .collect()
+}
+
+fn enchant_holder(name: &str) -> Option<u32> {
+    let want = enchant_canon_name(name);
+    enchant_names()
+        .iter()
+        .position(|n| *n == want)
+        .map(|i| i as u32)
+}
+
+/// Синтетический `registry_data minecraft:enchantment` для подсказок (имена + max_level).
+fn enchant_registry() -> RegistryData {
+    RegistryData {
+        registry: "minecraft:enchantment".into(),
+        entries: enchant_names()
+            .into_iter()
+            .map(|n| {
+                let max = ENCHANT_MAX
+                    .iter()
+                    .find(|(k, _)| n.strip_prefix("minecraft:") == Some(*k))
+                    .map_or(1, |(_, m)| *m);
+                (
+                    n,
+                    Some(Tag::Compound(vec![("max_level".into(), Tag::Int(max))])),
+                )
+            })
+            .collect(),
+    }
+}
+
+/// NBT предмета 1.20.1 → компоненты 26.3 (id, точные байты значения).
+/// VANILLA: ItemStackComponentizationFix#fixItemStack/fixDisplay/fixEnchantments (26.3):
+/// Damage, RepairCost, Unbreakable, Enchantments, StoredEnchantments (книга), display.Name/Lore/color.
+/// HideFlags (show_in_tooltip → tooltip_display) не переносится.
+fn nbt_to_components(t: &Tag, book: bool) -> Vec<(u32, Vec<u8>)> {
+    let mut out: Vec<(u32, Vec<u8>)> = Vec::new();
+    let mut put = |name: &str, v: Vec<u8>| {
+        if let Some(id) = component_id(name) {
+            out.push((id, v));
+        }
+    };
+    let int = |k: &str| t.get(k).and_then(Tag::as_i64);
+    for (k, c) in [("Damage", "damage"), ("RepairCost", "repair_cost")] {
+        if let Some(v) = int(k).and_then(|v| i32::try_from(v).ok()) {
+            // VANILLA: moveTagToComponent с умолчанием 0 — нулевое значение не переносится.
+            if v != 0 {
+                let mut w = Writer::new();
+                w.var_int(v);
+                put(c, w.into_vec());
+            }
+        }
+    }
+    if int("Unbreakable").is_some_and(|v| v != 0) {
+        put("unbreakable", Vec::new());
+    }
+    let mut ench = |key: &str, comp: &str| {
+        let Some(Tag::List(list)) = t.get(key) else {
+            return;
+        };
+        let levels: Vec<(u32, i32)> = list
+            .iter()
+            .filter_map(|e| {
+                let id = e.get("id")?.as_str()?;
+                let lvl = e.get("lvl")?.as_i64()?.clamp(0, 255) as i32;
+                (lvl > 0).then_some((enchant_holder(id)?, lvl))
+            })
+            .collect();
+        if levels.is_empty() {
+            let mut w = Writer::new();
+            w.bool(true);
+            put("enchantment_glint_override", w.into_vec());
+            return;
+        }
+        let mut w = Writer::new();
+        w.var_int(levels.len() as i32);
+        for (h, l) in levels {
+            w.var_int(h as i32).var_int(l);
+        }
+        put(comp, w.into_vec());
+    };
+    ench("Enchantments", "enchantments");
+    if book {
+        ench("StoredEnchantments", "stored_enchantments");
+    }
+    if let Some(d) = t.get("display") {
+        let valid = |s: &str| serde_json::from_str::<serde_json::Value>(s).is_ok();
+        if let Some(n) = d.get("Name").and_then(Tag::as_str).filter(|s| valid(s)) {
+            put("custom_name", json_component(n));
+        }
+        if let Some(Tag::List(lore)) = d.get("Lore") {
+            let lines: Vec<&str> = lore
+                .iter()
+                .filter_map(Tag::as_str)
+                .filter(|s| valid(s))
+                .take(256)
+                .collect();
+            let mut w = Writer::new();
+            w.var_int(lines.len() as i32);
+            for l in lines {
+                w.bytes(&json_component(l));
+            }
+            put("lore", w.into_vec());
+        }
+        if let Some(c) = d.get("color").and_then(Tag::as_i64) {
+            let mut w = Writer::new();
+            w.i32(c as i32);
+            put("dyed_color", w.into_vec());
+        }
+    }
+    out
 }
 
 fn item_map() -> &'static [Option<u32>] {
@@ -1215,6 +1414,74 @@ mod tests {
         assert!(r.bool().unwrap());
         assert_eq!(r.var_int().unwrap(), 1500);
         assert_eq!(r.u8().unwrap(), 5);
+    }
+
+    #[test]
+    fn item_nbt_to_components() {
+        // TODO-508c: алмазный меч 1.20.1 с Damage, именем, описанием и sharpness III.
+        let id = ezzmc_protocol::generated::r1_20_1::ITEM
+            .iter()
+            .position(|n| *n == "diamond_sword")
+            .unwrap() as i32;
+        let ench = |n: &str, l: i16| {
+            Tag::Compound(vec![
+                ("id".into(), Tag::String(n.into())),
+                ("lvl".into(), Tag::Short(l)),
+            ])
+        };
+        let tag = Tag::Compound(vec![
+            ("Damage".into(), Tag::Int(12)),
+            (
+                "Enchantments".into(),
+                Tag::List(vec![ench("minecraft:sharpness", 3)]),
+            ),
+            (
+                "display".into(),
+                Tag::Compound(vec![
+                    ("Name".into(), Tag::String(r#"{"text":"Меч"}"#.into())),
+                    (
+                        "Lore".into(),
+                        Tag::List(vec![Tag::String(r#""строка""#.into())]),
+                    ),
+                ]),
+            ),
+        ]);
+        let mut w = Writer::new();
+        w.bool(true).var_int(id).u8(1);
+        let mut nb = Vec::new();
+        nbt::write_named(&mut nb, "", &tag).unwrap();
+        w.bytes(&nb);
+        let body = w.into_vec();
+        let mut out = Writer::new();
+        item_to_canon(&mut Reader::new(&body), &mut out).unwrap();
+        let out = out.into_vec();
+        let mut r = Reader::new(&out);
+        let st = ezzmc_protocol::item::read_stack(&mut r).unwrap().unwrap();
+        assert_eq!(r.remaining(), 0);
+        let get = |n: &str| {
+            st.patch
+                .added
+                .iter()
+                .find(|(i, _)| Some(*i) == component_id(n))
+                .map(|(_, v)| v.to_vec())
+        };
+        assert_eq!(get("damage"), Some(vec![12]));
+        let sharp = enchant_holder("minecraft:sharpness").unwrap() as u8;
+        assert_eq!(get("enchantments"), Some(vec![1, sharp, 3]));
+        assert!(get("custom_name").is_some() && get("lore").is_some());
+        let reg = enchant_registry();
+        let e = &reg.entries[sharp as usize];
+        assert_eq!(e.0, "minecraft:sharpness");
+        assert_eq!(
+            e.1.as_ref()
+                .and_then(|t| t.get("max_level"))
+                .and_then(Tag::as_i64),
+            Some(5)
+        );
+        assert!(reg
+            .entries
+            .iter()
+            .any(|(n, _)| n == "minecraft:sweeping_edge"));
     }
 
     #[test]
