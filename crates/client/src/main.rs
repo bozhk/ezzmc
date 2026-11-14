@@ -2616,6 +2616,7 @@ impl ApplicationHandler for App {
                                         if !hid {
                                             v.draw_nametags(t, item_lang, gwf, ghf);
                                             v.draw_signs(t, w, h);
+                                            v.draw_map_labels(t, item_lang, w, h);
                                         }
                                         if !hid {
                                             // VANILLA: Hud#extractScoreboardSidebar — до overlay/титров.
@@ -3036,6 +3037,7 @@ impl ApplicationHandler for App {
                                     if !self.hud_hidden {
                                         t.begin(w, h);
                                         v.draw_signs(t, w, h);
+                                        v.draw_map_labels(t, &self.item_lang, w, h);
                                         v.flush_nametags(t, g, view, w, h);
                                     }
                                 }

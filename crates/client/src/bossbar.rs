@@ -1,6 +1,6 @@
 //! Босс-бар: пакет boss_event и отрисовка полос сверху экрана.
 //! VANILLA: ClientboundBossEventPacket, BossHealthOverlay, LerpingBossEvent.
-//! Не портировано: darkenScreen / playBossMusic / createWorldFog (флаги разбираются и хранятся).
+//! Флаги darkenScreen / playBossMusic / createWorldFog читают `worldview` (лайтмап, туман, музыка).
 use crate::chat;
 use crate::ui::lang::Lang;
 use ezzmc_protocol::nbt;
@@ -112,7 +112,7 @@ struct Event {
     color: usize,
     /// 0 = PROGRESS, 1..=4 = NOTCHED_6/10/12/20.
     overlay: usize,
-    #[allow(dead_code)]
+    /// Биты: 1 darkenScreen, 2 playBossMusic, 4 createWorldFog.
     flags: u8,
 }
 
@@ -180,6 +180,35 @@ impl BossBars {
         self.events.is_empty()
     }
 
+    /// VANILLA: BossHealthOverlay#shouldDarkenScreen.
+    pub fn darken_screen(&self) -> bool {
+        self.events.iter().any(|e| e.flags & 1 != 0)
+    }
+
+    /// VANILLA: BossHealthOverlay#shouldPlayMusic.
+    pub fn play_music(&self) -> bool {
+        self.events.iter().any(|e| e.flags & 2 != 0)
+    }
+
+    /// VANILLA: BossHealthOverlay#shouldCreateWorldFog.
+    pub fn world_fog(&self) -> bool {
+        self.events.iter().any(|e| e.flags & 4 != 0)
+    }
+
+    /// Для агента: (имя, прогресс 0..1, цвет, оверлей, флаги).
+    pub fn snapshot(&self, lang: &Lang) -> Vec<(String, f32, usize, usize, u8)> {
+        self.events
+            .iter()
+            .map(|e| {
+                let name: String = chat::flatten(&e.name, lang, true)
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect();
+                (name, e.target, e.color, e.overlay, e.flags)
+            })
+            .collect()
+    }
+
     /// VANILLA: BossHealthOverlay#extractRenderState. Текст рисуется сразу, возвращает
     /// спрайты (имя, x, y, ширина в пикселях) для отдельного прохода GuiPainter.
     pub fn draw(
@@ -193,7 +222,9 @@ impl BossBars {
         let mut y = 12.0_f32;
         for e in &self.events {
             let x = (gw / 2.0).floor() - 91.0;
-            let width = (e.progress().clamp(0.0, 1.0) * 182.0).round();
+            // VANILLA: Mth#lerpDiscrete(progress, 0, 182).
+            let p = e.progress();
+            let width = (p * 181.0).floor() + if p > 0.0 { 1.0 } else { 0.0 };
             sprites.push((BG[e.color], x, y, 182.0));
             if e.overlay > 0 {
                 sprites.push((OV_BG[e.overlay - 1], x, y, 182.0));

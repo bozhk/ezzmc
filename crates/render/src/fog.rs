@@ -77,6 +77,10 @@ pub struct FogInput {
     /// Есть ли у измерения дневной цикл (таймлайн `day`, skybox overworld). Нет — Nether/End:
     /// дневная дорожка и закатный туман не применяются, цвет = чистый FOG_COLOR биома.
     pub day_cycle: bool,
+    /// GameRenderer#bossOverlayWorldDarkening (флаг босс-бара darkenScreen).
+    pub darken_world: f32,
+    /// BossHealthOverlay#shouldCreateWorldFog.
+    pub boss_fog: bool,
 }
 
 /// Плавный множитель дождевого тумана (AtmosphericFogEnvironment#rainFogMultiplier).
@@ -187,13 +191,14 @@ pub fn setup_fog(i: &FogInput, st: &FogState) -> FogUniform {
             let e = (a.fog_end - 256.0 * m).max(96.0_f32.min(a.fog_end));
             let sky_end = rd.min(a.sky_fog_end);
             // VANILLA: cloudEnd = min(cloudRange*16, CLOUD_FOG_END_DISTANCE)
-            (
-                c,
-                s,
-                e,
-                sky_end,
-                (i.cloud_range as f32 * 16.0).min(a.cloud_fog_end),
-            )
+            let cloud_end = (i.cloud_range as f32 * 16.0).min(a.cloud_fog_end);
+            if i.boss_fog {
+                // VANILLA: AtmosphericFogEnvironment#setupFog — туман босса.
+                let e = e.min(96.0);
+                (c, s.min(10.0), e, e, e)
+            } else {
+                (c, s, e, sky_end, cloud_end)
+            }
         }
     };
     // VANILLA: FOG_ENVIRONMENTS по порядку Lava, PowderSnow, Blindness, Darkness, Water, Atmospheric;
@@ -231,6 +236,15 @@ pub fn setup_fog(i: &FogInput, st: &FogState) -> FogUniform {
     if darkness > 0.0 && !matches!(i.fog_type, FogType::Lava | FogType::PowderSnow) {
         let k = (1.0 - darkness) * (1.0 - darkness);
         col = [col[0] * k, col[1] * k, col[2] * k];
+    }
+    if i.darken_world > 0.0 {
+        // VANILLA: FogRenderer#computeFogColor — darkenWorldAmount.
+        let d = i.darken_world;
+        col = [
+            col[0] + (col[0] * 0.7 - col[0]) * d,
+            col[1] + (col[1] * 0.6 - col[1]) * d,
+            col[2] + (col[2] * 0.6 - col[2]) * d,
+        ];
     }
     // VANILLA: FogRenderer#computeFogColor — brightenFactor: в воде getWaterVision, иначе ночное зрение.
     let bright = if matches!(i.fog_type, FogType::Water) {
@@ -276,6 +290,8 @@ mod tests {
             water_vision: 1.0,
             cloud_range: 64,
             day_cycle: true,
+            darken_world: 0.0,
+            boss_fog: false,
         }
     }
 
@@ -356,5 +372,21 @@ mod tests {
         for (got, want) in f.color[..3].iter().zip(c) {
             assert!((got - want).abs() < 1e-5, "{got} != {want}");
         }
+    }
+
+    #[test]
+    fn boss_fog_and_darken() {
+        let st = FogState::default();
+        let base = setup_fog(&input(FogType::Atmospheric), &st);
+        let mut i = input(FogType::Atmospheric);
+        i.boss_fog = true;
+        i.darken_world = 1.0;
+        let f = setup_fog(&i, &st);
+        assert!(f.environmental_start <= 10.0);
+        assert_eq!(f.environmental_end, 96.0_f32.min(base.environmental_end));
+        assert_eq!(f.sky_end, f.environmental_end);
+        assert_eq!(f.clouds_end, f.environmental_end);
+        assert!((f.color[0] - base.color[0] * 0.7).abs() < 1e-6);
+        assert!((f.color[1] - base.color[1] * 0.6).abs() < 1e-6);
     }
 }

@@ -289,6 +289,15 @@ impl App {
                     })).collect::<Vec<_>>(),
                 }))
                 .collect::<Vec<_>>());
+            s["boss"] = json!(v
+                .boss
+                .snapshot(&self.item_lang)
+                .iter()
+                .map(|(n, p, c, o, f)| json!({
+                    "name": n, "progress": p, "color": c, "overlay": o, "flags": f,
+                }))
+                .collect::<Vec<_>>());
+            s["boss_darken"] = json!(v.boss_darken(1.0));
             s["sidebar"] =
                 json!(v
                     .scoreboard

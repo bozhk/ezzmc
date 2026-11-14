@@ -4,12 +4,14 @@
 
 use std::collections::HashMap;
 
+use crate::ui::lang::Lang;
 use ezzmc_protocol::item::ItemStack;
 use ezzmc_protocol::nbt;
 use ezzmc_protocol::text::Component;
 use ezzmc_protocol::wire::Reader;
 use ezzmc_protocol::ProtocolResult;
 use ezzmc_render::particledraw::{push_vertex_raw, ParticleDraw};
+use ezzmc_render::text::TextRenderer;
 use glam::{Mat4, Vec3};
 
 /// Сторона карты в пикселях (MapRenderer.WIDTH/HEIGHT).
@@ -328,6 +330,7 @@ impl Maps {
     /// Карта в координатах 0..128 (матрица `m` уже содержит масштаб 1/128 и сдвиги вызывающего).
     /// VANILLA: MapRenderer#render. Свет — 0..240. `lay` — раскладка текстуры (None = атлас мира).
     /// `false`, если данных карты нет.
+    #[allow(clippy::too_many_arguments)]
     pub fn bake(
         &self,
         id: i32,
@@ -336,6 +339,7 @@ impl Maps {
         light: (u16, u16),
         lay: Option<Layout>,
         out: &mut Vec<u8>,
+        labels: &mut Vec<Label>,
     ) -> bool {
         let Some(map) = self.map.get(&id) else {
             return false;
@@ -394,11 +398,71 @@ impl Maps {
                     ([-1.0, -1.0, z], [u0, v0 + tv]),
                 ],
             );
-            // TODO-526: подписи значков (decoration.name) в мире не рисуются.
+            if let Some(name) = &d.name {
+                labels.push(Label {
+                    m,
+                    x: f32::from(d.x) / 2.0 + 64.0,
+                    y: f32::from(d.y) / 2.0 + 64.0,
+                    name: name.clone(),
+                    light,
+                });
+            }
             count += 1;
         }
         true
     }
+}
+
+/// Подпись значка: матрица карты (0..128), центр значка, свет 0..240.
+#[derive(Clone, Debug)]
+pub struct Label {
+    pub m: Mat4,
+    pub x: f32,
+    pub y: f32,
+    pub name: Component,
+    pub light: (u16, u16),
+}
+
+/// VANILLA: MapRenderer#render — submitText(name, цвет -1, фон Integer.MIN_VALUE): масштаб
+/// clamp(25/width, 0, 6/9), под значком (+4). `vp` — проекция·вид для координат `Label::m`,
+/// `bias` — сдвиг глубины к камере; `k` — яркость по свету (0..1) для (block, sky) 0..15.
+pub fn draw_labels(
+    t: &mut TextRenderer,
+    lang: &Lang,
+    labels: &[Label],
+    vp: Mat4,
+    (w, h): (f32, f32),
+    bias: f32,
+    k: impl Fn(u16, u16) -> f32,
+) {
+    for l in labels {
+        let spans = crate::chat::flatten(&l.name, lang, true);
+        let width = crate::titles::spans_width(t, &spans);
+        if width <= 0.0 {
+            continue;
+        }
+        let scale = (25.0 / width).clamp(0.0, 6.0 / 9.0);
+        let m = vp
+            * l.m
+            * Mat4::from_translation(Vec3::new(l.x - width * scale / 2.0, l.y + 4.0, -0.025))
+            * Mat4::from_scale(Vec3::new(scale, scale, -1.0))
+            * Mat4::from_translation(Vec3::new(0.0, 0.0, 0.1));
+        let b = k(l.light.0 / 16, l.light.1 / 16).clamp(0.0, 1.0);
+        let lit: Vec<_> = spans
+            .into_iter()
+            .map(|mut s| {
+                let c = |sh: u32| ((((s.color >> sh) & 255) as f32 * b) as u32) << sh;
+                s.color = c(16) | c(8) | c(0);
+                s
+            })
+            .collect();
+        // VANILLA: Font.PreparedTextBuilder#markBackground — (x−1, y−1)…(x+width, y+9).
+        t.set_world(Some((m, w, h, bias)));
+        t.fill(-1.0, -1.0, width, 9.0, 0x8000_0000);
+        t.set_world(Some((m, w, h, bias + 1.0e-5)));
+        crate::titles::draw_spans(t, &lit, 0.0, 0.0, 1.0, false);
+    }
+    t.set_world(None);
 }
 
 #[cfg(test)]

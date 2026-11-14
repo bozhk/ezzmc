@@ -201,7 +201,7 @@ pub struct WorldView {
     probe_colors: [u32; 3],
     last_frame: Option<std::time::Instant>,
     #[allow(clippy::type_complexity)]
-    lightmap_key: Option<(f32, [f32; 3], f32, f32, [f32; 3], [f32; 3])>,
+    lightmap_key: Option<(f32, [f32; 3], f32, f32, [f32; 3], [f32; 4])>,
     /// Активные эффекты локального игрока (UpdateMobEffect/RemoveMobEffect).
     pub effects: crate::effects::Effects,
     /// VANILLA: Player#getAbsorptionAmount.
@@ -316,6 +316,9 @@ pub struct WorldView {
     pub sugg_in: Vec<(i32, i32, i32, Vec<String>)>,
     pub tab: crate::tablist::TabList,
     pub boss: crate::bossbar::BossBars,
+    /// VANILLA: GameRenderer#bossOverlayWorldDarkening / …O (тиковое, лерп по partialTick).
+    boss_darken: f32,
+    boss_darken_o: f32,
     /// Титры `/title` (VANILLA: Hud title/subtitle).
     pub titles: crate::titles::Titles,
     /// Scoreboard (цели/очки/команды). VANILLA: ClientPacketListener#scoreboard.
@@ -326,6 +329,9 @@ pub struct WorldView {
     /// Карта в руке: свой атлас (`maps::HAND_ATLAS`), проекция руки.
     hand_map_draw: ezzmc_render::particledraw::ParticleDraw,
     hand_map_visible: bool,
+    /// Подписи значков карт: в рамках (координаты от камеры) и в руке (уже с проекцией руки).
+    map_labels: Vec<crate::maps::Label>,
+    hand_map_labels: Vec<crate::maps::Label>,
     /// (id, version) карт, залитых в `hand_map_draw` (основная, вторая рука).
     hand_map_seen: [Option<(i32, u32)>; 2],
     /// Неймтеги кадра: (позиция якоря, текст, присед) и матрица проекции этого кадра.
@@ -1136,12 +1142,16 @@ impl WorldView {
             sugg_in: Vec::new(),
             tab: Default::default(),
             boss: Default::default(),
+            boss_darken: 0.0,
+            boss_darken_o: 0.0,
             titles: Default::default(),
             scoreboard: Default::default(),
             maps: Default::default(),
             map_draw,
             hand_map_draw,
             hand_map_visible: false,
+            map_labels: Vec::new(),
+            hand_map_labels: Vec::new(),
             hand_map_seen: [None; 2],
             nametags: Vec::new(),
             own_name: String::new(),
@@ -1749,10 +1759,20 @@ impl WorldView {
     }
 
     /// Клиентские тики частиц по росту `game_time` (VANILLA: ParticleEngine#tick + tickWeatherEffects).
-    /// VANILLA: Minecraft#getSituationalMusic (без босса Энда): BACKGROUND_MUSIC в позиции камеры.
+    /// VANILLA: Minecraft#getSituationalMusic: босс Энда (Musics.END_BOSS), иначе BACKGROUND_MUSIC
+    /// в позиции камеры.
     pub fn situational_music(&self) -> Option<crate::music::Music> {
         let g = self.net.level.lock().ok()?;
         let level = g.as_ref()?;
+        // VANILLA-UNSURE: dimension() == Level.END; ключ измерения не хранится → по skybox=end.
+        if level.skybox == ezzmc_world::dimension::Skybox::End && self.boss.play_music() {
+            return Some(crate::music::Music {
+                sound: "music.dragon".into(),
+                min_delay: 0,
+                max_delay: 0,
+                replace: true,
+            });
+        }
         let a = crate::ambient::Ambient::attrs_at(level, &self.models.tints.biomes, self.cam);
         let bg = a.music.as_ref().or(level.audio.music.as_ref())?;
         bg.select(self.game_mode == 1, self.player.under_water)
@@ -2356,6 +2376,13 @@ impl WorldView {
                 self.right_click_delay = (self.right_click_delay - 1).max(0);
                 self.miss_time = (self.miss_time - 1).max(0);
                 self.effects.tick();
+                // VANILLA: GameRenderer#tick — +0.05 за тик при darkenScreen, спад −0.0125.
+                self.boss_darken_o = self.boss_darken;
+                if self.boss.darken_screen() {
+                    self.boss_darken = (self.boss_darken + 0.05).min(1.0);
+                } else if self.boss_darken > 0.0 {
+                    self.boss_darken -= 0.0125;
+                }
                 self.tick_using();
                 crate::cooldown::tick();
                 self.tick_hand();
@@ -2602,6 +2629,37 @@ impl WorldView {
     pub fn draw_signs(&self, t: &mut ezzmc_render::text::TextRenderer, w: u32, h: u32) {
         let (vp, cam, _) = self.nt_view;
         self.signs.draw(t, vp, cam, (w as f32, h as f32));
+    }
+
+    /// Подписи значков карт (TODO-526): в рамках — с depth-тестом по миру; в руке — поверх
+    /// (у руки своя очищенная глубина, сдвиг 2.0 прижимает к ближней плоскости).
+    pub fn draw_map_labels(
+        &self,
+        t: &mut ezzmc_render::text::TextRenderer,
+        lang: &crate::ui::lang::Lang,
+        w: u32,
+        h: u32,
+    ) {
+        let (vp, _, _) = self.nt_view;
+        let size = (w as f32, h as f32);
+        let sd = self.sky_darken;
+        // Как у табличек: кривая LightTexture по max(block, sky − skyDarken).
+        let k = |b: u16, s: u16| {
+            let v = (i32::from(b).max(i32::from(s) - sd)).clamp(0, 15) as f32 / 15.0;
+            (v / (4.0 - 3.0 * v)).max(0.04)
+        };
+        crate::maps::draw_labels(t, lang, &self.map_labels, vp, size, 3.0e-5, k);
+        if !self.hud_hidden {
+            crate::maps::draw_labels(
+                t,
+                lang,
+                &self.hand_map_labels,
+                Mat4::IDENTITY,
+                size,
+                2.0,
+                |_, _| 1.0,
+            );
+        }
     }
 
     /// Яркий слой неймтегов с depth-тестом по мировому буферу кадра (после `render`).
@@ -3172,6 +3230,7 @@ impl WorldView {
         self.hand_visible = false;
         self.hand_item_visible = false;
         self.hand_map_visible = false;
+        self.hand_map_labels.clear();
         if self.perspective != 0 || !self.walking || !self.have_pos {
             return;
         }
@@ -3327,6 +3386,9 @@ impl WorldView {
             self.hand_map_visible = true;
         }
         let proj = Mat4::perspective_rh(70.0f32.to_radians(), aspect, NEAR, far) * self.bob(pt);
+        for l in &mut self.hand_map_labels {
+            l.m = proj * l.m;
+        }
         gpu.queue.write_buffer(
             &self.hand_proj_buf,
             0,
@@ -3395,6 +3457,7 @@ impl WorldView {
         }
         // VANILLA: renderMap.
         let maps_ref = &self.maps;
+        let hand_labels = std::cell::RefCell::new(Vec::new());
         let render_map = |m: Mat4, slot: usize, id: i32, out: &mut Vec<u8>| {
             let m = m
                 * Mat4::from_rotation_y(pi)
@@ -3413,7 +3476,15 @@ impl WorldView {
                 let q = m.transform_point3(Vec3::from(p));
                 ezzmc_render::particledraw::push_vertex_raw(out, q.to_array(), uv, [255; 4], l240);
             }
-            maps_ref.bake(id, m, false, l240, Some(maps::hand_layout(slot)), out);
+            maps_ref.bake(
+                id,
+                m,
+                false,
+                l240,
+                Some(maps::hand_layout(slot)),
+                out,
+                &mut hand_labels.borrow_mut(),
+            );
         };
         // VANILLA: renderPlayerArm (invert = ±1).
         let player_arm = |inv: f32, inv_h: f32, a: f32| {
@@ -3498,6 +3569,7 @@ impl WorldView {
             let inv_h = 1.0 - (self.off_h.0 + (self.off_h.1 - self.off_h.0) * pt);
             one_handed(&mut arm_list, -main_inv, inv_h, 0.0, 1, id, out);
         }
+        self.hand_map_labels = hand_labels.into_inner();
         for (m, right) in arm_list {
             self.bake_arm(m, right, light, arms);
         }
@@ -4016,6 +4088,7 @@ impl WorldView {
     /// (26.3): модель блока `item_frame[_map]` (BlockModelResolver#updateForItemFrame), предмет FIXED
     /// ×0.5 с поворотом rotation·45°; у светящейся — свет блока ≥5, предмет полной яркости.
     fn bake_item_frames(&mut self, item_data: &mut (Vec<u8>, Vec<u8>), map_data: &mut Vec<u8>) {
+        self.map_labels.clear();
         use ezzmc_protocol::generated::r26_3::ENTITY_TYPE;
         struct F {
             pos: [f64; 3],
@@ -4132,7 +4205,8 @@ impl WorldView {
                 } else {
                     (u16::from(f.light.0) * 16, u16::from(f.light.1) * 16)
                 };
-                self.maps.bake(id, mm, true, light, None, map_data);
+                self.maps
+                    .bake(id, mm, true, light, None, map_data, &mut self.map_labels);
                 continue;
             }
             let Some((name, cx)) = crate::handitem::stack_ctx(&stack) else {
@@ -4437,13 +4511,15 @@ impl WorldView {
                 } else {
                     0.0
                 };
+                // VANILLA: LightmapRenderStateExtractor — bossOverlayWorldDarkening(partialTicks).
+                let darken_world = self.boss_darken(pt);
                 let key = (
                     sky_factor,
                     sky_light_color,
                     self.cfg.gamma,
                     ambient_light,
                     ambient_color,
-                    [darkness_effect, darkness_scale, night_vision],
+                    [darkness_effect, darkness_scale, night_vision, darken_world],
                 );
                 if self.lightmap_key != Some(key) {
                     self.lightmap_key = Some(key);
@@ -4458,13 +4534,16 @@ impl WorldView {
                             darkness_effect,
                             darkness_scale,
                             night_vision,
+                            darken_world,
                             ..LightmapParams::default()
                         },
                     );
                 }
                 // VANILLA: небо рисуется только при skybox=overworld (Nether: none, End: end_sky — TODO).
-                self.sky_state =
-                    (l.skybox == ezzmc_world::dimension::Skybox::Overworld).then_some(drawn);
+                // VANILLA: GameRenderer#renderLevel — shouldRenderSky = !shouldCreateWorldFog.
+                self.sky_state = (l.skybox == ezzmc_world::dimension::Skybox::Overworld
+                    && !self.boss.world_fog())
+                .then_some(drawn);
                 [
                     f64::from((c >> 16) & 255) / 255.0,
                     f64::from((c >> 8) & 255) / 255.0,
@@ -5248,9 +5327,16 @@ impl WorldView {
                 water_vision,
                 cloud_range: 64,
                 day_cycle,
+                darken_world: self.boss_darken(pt),
+                boss_fog: self.boss.world_fog(),
             },
             &self.fog_state,
         )
+    }
+
+    /// VANILLA: GameRenderer#bossOverlayWorldDarkening(partialTicks).
+    pub fn boss_darken(&self, pt: f32) -> f32 {
+        self.boss_darken_o + (self.boss_darken - self.boss_darken_o) * pt
     }
 
     pub fn view_radius(&self) -> i32 {
