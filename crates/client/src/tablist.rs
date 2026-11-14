@@ -57,6 +57,8 @@ pub struct TabList {
     pub profiles: HashMap<u128, String>,
     pub header: Option<Component>,
     pub footer: Option<Component>,
+    /// VANILLA: PlayerTabOverlay#healthStates (ключ — имя профиля).
+    health: std::cell::RefCell<HashMap<String, HealthState>>,
 }
 
 fn component(r: &mut Reader) -> ProtocolResult<Component> {
@@ -139,6 +141,44 @@ pub fn parse_header_footer(body: &[u8]) -> ProtocolResult<(Option<Component>, Op
     Ok((keep(h), keep(f)))
 }
 
+/// VANILLA: PlayerTabOverlay.HealthState — мигание сердец при смене значения.
+#[derive(Clone, Copy, Debug)]
+pub struct HealthState {
+    last: i32,
+    displayed: i32,
+    last_update: u64,
+    blink_until: u64,
+}
+
+impl HealthState {
+    fn new(v: i32) -> Self {
+        Self {
+            last: v,
+            displayed: v,
+            last_update: 0,
+            blink_until: 0,
+        }
+    }
+
+    fn update(&mut self, v: i32, tick: u64) {
+        if v != self.last {
+            self.blink_until = tick + if v < self.last { 20 } else { 10 };
+            self.last = v;
+            self.last_update = tick;
+        }
+        if tick.saturating_sub(self.last_update) > 20 {
+            self.displayed = v;
+        }
+    }
+
+    fn blinking(&self, tick: u64) -> bool {
+        self.blink_until > tick && (self.blink_until - tick) % 6 >= 3
+    }
+}
+
+/// Значок поверх списка: (x, y, спрайт, ширина, высота).
+pub type Icon = (f32, f32, &'static str, f32, f32);
+
 impl TabList {
     pub fn apply(&mut self, e: TabEvt) {
         match e {
@@ -192,6 +232,95 @@ impl TabList {
         v
     }
 
+    /// VANILLA: PlayerTabOverlay#extractTablistHearts. `score` — сырые очки цели.
+    #[allow(clippy::too_many_arguments)]
+    fn hearts(
+        &self,
+        t: &mut TextRenderer,
+        lang: &Lang,
+        name: &str,
+        score: i32,
+        tick: u64,
+        (yo, left, right): (f32, f32, f32),
+        icons: &mut Vec<Icon>,
+    ) {
+        let mut states = self.health.borrow_mut();
+        let h = states
+            .entry(name.to_owned())
+            .or_insert_with(|| HealthState::new(score));
+        h.update(score, tick);
+        let shown = h.displayed;
+        // Mth.positiveCeilDiv
+        let full = (score.max(shown) + 1).div_euclid(2);
+        let to_render = score.max(shown.max(20)) / 2;
+        let blink = h.blinking(tick);
+        if full <= 0 {
+            return;
+        }
+        let per = ((right - left - 4.0) / to_render as f32).min(9.0).floor();
+        if per <= 3.0 {
+            let pct = (score as f32 / 20.0).clamp(0.0, 1.0);
+            let color = (((1.0 - pct) * 255.0) as u32) << 16 | (((pct * 255.0) as u32) << 8);
+            // Float.toString: целые — с «.0».
+            let hearts = format!("{:?}", score as f32 / 2.0);
+            let hp = lang
+                .get("multiplayer.player.list.hp")
+                .unwrap_or("%shp")
+                .replace("%s", &hearts);
+            let text = if right - t.text_width(&hp) >= left {
+                hp
+            } else {
+                hearts
+            };
+            let x = ((right + left - t.text_width(&text)) / 2.0).floor();
+            t.draw(&text, x, yo, color, true);
+            return;
+        }
+        let cont = if blink {
+            "heart_container_blinking"
+        } else {
+            "heart_container"
+        };
+        let mut put = |heart: i32, s: &'static str| {
+            icons.push((left + heart as f32 * per, yo, s, 9.0, 9.0));
+        };
+        for heart in full..to_render {
+            put(heart, cont);
+        }
+        for heart in 0..full {
+            put(heart, cont);
+            if blink {
+                if heart * 2 + 1 < shown {
+                    put(heart, "heart_full_blinking");
+                }
+                if heart * 2 + 1 == shown {
+                    put(heart, "heart_half_blinking");
+                }
+            }
+            // VANILLA: при heart >= 10 — спрайты absorbing_*_blinking (так в оригинале).
+            if heart * 2 + 1 < score {
+                put(
+                    heart,
+                    if heart >= 10 {
+                        "heart_absorbing_full_blinking"
+                    } else {
+                        "heart_full"
+                    },
+                );
+            }
+            if heart * 2 + 1 == score {
+                put(
+                    heart,
+                    if heart >= 10 {
+                        "heart_absorbing_half_blinking"
+                    } else {
+                        "heart_half"
+                    },
+                );
+            }
+        }
+    }
+
     /// VANILLA: PlayerTabOverlay#extractRenderState. Возвращает значки связи (x, y, спрайт),
     /// их рисует вызывающий поверх (отдельный проход GuiPainter).
     pub fn draw(
@@ -200,8 +329,13 @@ impl TabList {
         lang: &Lang,
         gw: f32,
         sb: &crate::scoreboard::Scoreboard,
-    ) -> Vec<(f32, f32, &'static str)> {
+        tick: u64,
+    ) -> Vec<Icon> {
         let infos = self.sorted();
+        // VANILLA: healthStates — только для игроков в списке.
+        self.health
+            .borrow_mut()
+            .retain(|n, _| infos.iter().any(|e| &e.name == n));
         let legacy =
             |c: &Component, base: u32| chat::spans_to_legacy(&chat::flatten(c, lang, true), base);
         // VANILLA: PlayerTabOverlay#getNameForDisplay — displayName или имя профиля с оформлением команды.
@@ -303,11 +437,18 @@ impl TabList {
             t.draw(name, xo, yo, c, true);
             if let (Some((_, o)), Some((sc, sw))) = (list_obj, &scores[i]) {
                 // VANILLA: extractTablistScore — не у наблюдателей, при right − left > 5.
-                // TODO-521: сердца (RenderType.HEARTS) не рисуются.
                 let left = xo + max_name + 1.0;
                 let right = left + width_for_score;
-                if e.game_mode != SPECTATOR && right - left > 5.0 && o.render_type != 1 {
-                    t.draw(sc, right - sw, yo, 0xFFFFFF, true);
+                if e.game_mode != SPECTATOR && right - left > 5.0 {
+                    if o.render_type == 1 {
+                        let raw = list_obj
+                            .and_then(|(k, _)| sb.scores.get(&e.name)?.get(k))
+                            .map_or(0, |s| s.value);
+                        let at = (yo, left, right);
+                        self.hearts(t, lang, &e.name, raw, tick, at, &mut icons);
+                    } else {
+                        t.draw(sc, right - sw, yo, 0xFFFFFF, true);
+                    }
                 }
             }
             let sprite = match e.latency {
@@ -318,7 +459,7 @@ impl TabList {
                 l if l < 1000 => "tab_ping_2",
                 _ => "tab_ping_1",
             };
-            icons.push((xo + slot_w - 11.0, yo, sprite));
+            icons.push((xo + slot_w - 11.0, yo, sprite, 10.0, 8.0));
         }
         if !fl.is_empty() {
             yyo += rows as f32 * 9.0 + 1.0;

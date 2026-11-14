@@ -2713,18 +2713,23 @@ impl ApplicationHandler for App {
                                         }
                                         // VANILLA: Hud#extractTabList — пока зажат key.playerlist (не при открытом чате/инвентаре).
                                         if tab_down && !hid && !inv_open && !chat.open && !dead {
-                                            let icons =
-                                                v.tab.draw(t, item_lang, gwf, &v.scoreboard);
+                                            let icons = v.tab.draw(
+                                                t,
+                                                item_lang,
+                                                gwf,
+                                                &v.scoreboard,
+                                                self.tick_count,
+                                            );
                                             t.flush(&g.device, &g.queue, view, w, h);
                                             t.begin(w, h);
                                             p.begin(t.scale());
-                                            for (x, y, s) in icons {
+                                            for (x, y, s, sw, sh) in icons {
                                                 p.blit(
                                                     s,
                                                     x,
                                                     y,
-                                                    10.0,
-                                                    8.0,
+                                                    sw,
+                                                    sh,
                                                     [0.0, 0.0, 1.0, 1.0],
                                                     0xFFFFFFFF,
                                                 );
