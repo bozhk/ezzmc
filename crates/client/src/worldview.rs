@@ -2870,6 +2870,7 @@ impl WorldView {
                     (self.queue.version, self.queue.block_version),
                     &mut self.mobs,
                 );
+                crate::painting::bake(l, self.cam, &mut self.mobs);
                 self.tables.bake(
                     l,
                     self.cam,
@@ -2953,9 +2954,12 @@ impl WorldView {
                 let (rgba, tw, th) = if mask {
                     (vec![255u8; 4 * 16 * 16], 16, 16)
                 } else {
-                    let img = rm
-                        .read(&format!("assets/minecraft/textures/entity/{tex}.png"))
-                        .and_then(|d| Image::decode_png(&d).ok())?;
+                    // `@путь` — от textures/ (картины), иначе от textures/entity/.
+                    let path = match tex.strip_prefix('@') {
+                        Some(p) => format!("assets/minecraft/textures/{p}.png"),
+                        None => format!("assets/minecraft/textures/entity/{tex}.png"),
+                    };
+                    let img = rm.read(&path).and_then(|d| Image::decode_png(&d).ok())?;
                     (img.to_rgba8(), img.width, img.height)
                 };
                 let ctor = if mask {
@@ -2986,6 +2990,7 @@ impl WorldView {
         crate::mobs::prof_at(11, "t после bake_item_entities");
         let mut arrow_data = Vec::new();
         self.bake_projectiles(&mut item_data, &mut arrow_data);
+        self.bake_item_frames(&mut item_data);
         crate::mobs::prof_at(12, "t после bake_projectiles");
         self.arrow_draw
             .prepare_raw(&gpu.device, &gpu.queue, mv, &arrow_data);
@@ -3753,6 +3758,136 @@ impl WorldView {
                 crate::handitem::View::Ground,
                 p.light,
                 p.stack.as_ref().is_some_and(foil_of),
+                &mut item_data.0,
+                &mut item_data.1,
+            );
+            self.entity_item_visible = true;
+        }
+    }
+
+    /// Рамки (обычные и светящиеся) с предметом. VANILLA: ItemFrameRenderer#submit/extractRenderState
+    /// (26.3): модель блока `item_frame[_map]` (BlockModelResolver#updateForItemFrame), предмет FIXED
+    /// ×0.5 с поворотом rotation·45°; у светящейся — свет блока ≥5, предмет полной яркости.
+    fn bake_item_frames(&mut self, item_data: &mut (Vec<u8>, Vec<u8>)) {
+        use ezzmc_protocol::generated::r26_3::ENTITY_TYPE;
+        struct F {
+            pos: [f64; 3],
+            dir: i32,
+            glow: bool,
+            invisible: bool,
+            rotation: i32,
+            light: (u8, u8),
+            stack: Option<ezzmc_protocol::item::ItemStack>,
+        }
+        let mut list = Vec::new();
+        {
+            let Ok(guard) = self.net.level.lock() else {
+                return;
+            };
+            let Some(level) = guard.as_ref() else {
+                return;
+            };
+            for e in level.entities.iter() {
+                let glow = match ENTITY_TYPE.get(e.ty).copied() {
+                    Some("item_frame") => false,
+                    Some("glow_item_frame") => true,
+                    _ => continue,
+                };
+                let d2 = (e.pos[0] - self.cam[0]).powi(2)
+                    + (e.pos[1] - self.cam[1]).powi(2)
+                    + (e.pos[2] - self.cam[2]).powi(2);
+                if d2 > 64.0 * 64.0 {
+                    continue;
+                }
+                let (bl, sl) = crate::particles::light_at(level, e.pos[0], e.pos[1], e.pos[2]);
+                list.push(F {
+                    pos: e.pos,
+                    // VANILLA: HangingEntity#DATA_DIRECTION (#8), иначе data из add_entity.
+                    dir: e.int_meta(8).unwrap_or(e.data),
+                    glow,
+                    invisible: e.flags & 0x20 != 0,
+                    rotation: e.int_meta(10).unwrap_or(0),
+                    light: (if glow { bl.max(5) } else { bl }, sl),
+                    stack: e.item.clone().filter(|s| s.count > 0),
+                });
+            }
+        }
+        let Some(rm) = self.hand_rm.as_ref() else {
+            return;
+        };
+        for f in list {
+            let step = match f.dir {
+                0 => [0.0, -1.0, 0.0],
+                1 => [0.0, 1.0, 0.0],
+                2 => [0.0, 0.0, -1.0],
+                3 => [0.0, 0.0, 1.0],
+                4 => [-1.0, 0.0, 0.0],
+                _ => [1.0, 0.0, 0.0],
+            };
+            let (x_rot, y_rot) = match f.dir {
+                0 => (90.0f32, 180.0f32),
+                1 => (-90.0, 180.0),
+                // Direction#toYRot: S 0, W 90, N 180, E 270.
+                2 => (0.0, 180.0 - 180.0),
+                3 => (0.0, 180.0),
+                4 => (0.0, 180.0 - 90.0),
+                _ => (0.0, 180.0 - 270.0),
+            };
+            let o = 0.46875;
+            let mut m = Mat4::from_translation(Vec3::new(
+                (f.pos[0] - self.cam[0]) as f32 + step[0] * o,
+                (f.pos[1] - self.cam[1]) as f32 + step[1] * o,
+                (f.pos[2] - self.cam[2]) as f32 + step[2] * o,
+            )) * Mat4::from_rotation_x(x_rot.to_radians())
+                * Mat4::from_rotation_y(y_rot.to_radians());
+            let is_map = f.stack.as_ref().is_some_and(|s| {
+                crate::handitem::stack_ctx(s).is_some_and(|(n, _)| n == "filled_map")
+            });
+            if !f.invisible {
+                let model = match (f.glow, is_map) {
+                    (false, false) => "minecraft:block/item_frame",
+                    (false, true) => "minecraft:block/item_frame_map",
+                    (true, false) => "minecraft:block/glow_item_frame",
+                    (true, true) => "minecraft:block/glow_item_frame_map",
+                };
+                if let Some(mesh) = self
+                    .hand_items
+                    .as_mut()
+                    .and_then(|h| h.block_model(rm, model))
+                {
+                    mesh.bake(
+                        m,
+                        crate::handitem::View::Ground,
+                        f.light,
+                        false,
+                        &mut item_data.0,
+                        &mut item_data.1,
+                    );
+                    self.entity_item_visible = true;
+                }
+            }
+            m *=
+                Mat4::from_translation(Vec3::new(0.0, 0.0, if f.invisible { 0.5 } else { 0.4375 }));
+            let Some(stack) = f.stack else { continue };
+            if is_map {
+                // TODO-525: содержимое карты (MapRenderer) — пока не рисуется.
+                continue;
+            }
+            let Some((name, cx)) = crate::handitem::stack_ctx(&stack) else {
+                continue;
+            };
+            let Some(mesh) = self.hand_items.as_mut().and_then(|h| h.get(rm, name, &cx)) else {
+                continue;
+            };
+            let m = m
+                * Mat4::from_rotation_z((f.rotation as f32 * 45.0).to_radians())
+                * Mat4::from_scale(Vec3::splat(0.5));
+            let light = if f.glow { (15, 15) } else { f.light };
+            mesh.bake(
+                m,
+                crate::handitem::View::Fixed,
+                light,
+                foil_of(&stack),
                 &mut item_data.0,
                 &mut item_data.1,
             );

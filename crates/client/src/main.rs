@@ -57,6 +57,7 @@ mod mobs;
 mod music;
 mod netthread;
 mod packrepo;
+mod painting;
 mod particles;
 mod physics;
 #[allow(dead_code)] // face/hit/inside и дальности — для 185/186

@@ -39,6 +39,8 @@ pub struct HandMesh {
     first_person_left: Mat4,
     third_person_left: Mat4,
     ground: Mat4,
+    /// ItemDisplayContext.FIXED (рамка).
+    fixed: Mat4,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -49,6 +51,8 @@ pub enum View {
     ThirdPersonLeft,
     /// ItemDisplayContext.GROUND — предмет-сущность.
     Ground,
+    /// ItemDisplayContext.FIXED — предмет в рамке.
+    Fixed,
 }
 
 impl HandMesh {
@@ -139,6 +143,7 @@ impl HandMesh {
                 View::FirstPersonLeft => self.first_person_left,
                 View::ThirdPersonLeft => self.third_person_left,
                 View::Ground => self.ground,
+                View::Fixed => self.fixed,
             };
         // VANILLA: Lighting.Entry.LEVEL (core/entity.vsh minecraft_mix_light): max(0, dot) без abs,
         // нормаль — в мировом пространстве (предмет вращается → освещение меняется).
@@ -322,6 +327,61 @@ impl HandItems {
         m
     }
 
+    /// Блочная модель `model` (напр. `minecraft:block/item_frame`) как меш в координатах блока со
+    /// сдвигом −0.5 (центр в начале координат) во всех видах. Кэш — под ключом `#модель`.
+    pub fn block_model(&mut self, rm: &ResourceManager, model: &str) -> Option<Rc<HandMesh>> {
+        let key = (format!("#{model}"), Ctx::default());
+        if let Some(m) = self.cache.get(&key) {
+            return m.clone();
+        }
+        let m = (|| {
+            let mut loader = ModelLoader::new(rm);
+            let (resolved, _) = loader.resolve(&Identifier::parse(model))?;
+            let g = Getter {
+                items: &self.items.sprites,
+                blocks: &self.blocks,
+            };
+            let baked = bake_elements(
+                resolved.elements(),
+                &resolved.texture_slots(),
+                &g,
+                &ModelState::default(),
+                model,
+            );
+            let quads: Vec<Quad> = baked
+                .unculled
+                .iter()
+                .chain(baked.culled.iter().flatten())
+                .map(|q| {
+                    let a = Vec3::from(q.pos[1]) - Vec3::from(q.pos[0]);
+                    let b = Vec3::from(q.pos[2]) - Vec3::from(q.pos[0]);
+                    let n = a.cross(b).normalize_or_zero();
+                    Quad {
+                        pos: q.pos,
+                        uv: q.uv,
+                        color: tint_rgb(0xFF_FFFF, 1.0),
+                        tint: tint_rgb(0xFF_FFFF, 1.0),
+                        normal: n.to_array(),
+                        items: self.items.sprites.contains_key(&q.sprite),
+                    }
+                })
+                .collect();
+            let c = Mat4::from_translation(Vec3::splat(-0.5));
+            Some(HandMesh {
+                quads,
+                first_person: c,
+                third_person: c,
+                first_person_left: c,
+                third_person_left: c,
+                ground: c,
+                fixed: c,
+            })
+        })()
+        .map(Rc::new);
+        self.cache.insert(key, m.clone());
+        m
+    }
+
     fn build(&self, rm: &ResourceManager, name: &str, cx: &Ctx) -> Option<HandMesh> {
         if name.contains(':') && !name.starts_with("minecraft:") {
             return self.build_mod_block(rm, name);
@@ -421,6 +481,7 @@ impl HandItems {
             first_person_left: pick(DisplayContext::FirstPersonLeftHand),
             third_person_left: pick(DisplayContext::ThirdPersonLeftHand),
             ground: pick(DisplayContext::Ground),
+            fixed: pick(DisplayContext::Fixed),
         })
     }
 
@@ -478,6 +539,7 @@ impl HandItems {
             first_person_left: m(DisplayContext::FirstPersonLeftHand),
             third_person_left: m(DisplayContext::ThirdPersonLeftHand),
             ground: m(DisplayContext::Ground),
+            fixed: m(DisplayContext::Fixed),
         })
     }
 

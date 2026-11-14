@@ -205,9 +205,9 @@ pub struct Level {
 }
 
 impl Level {
-    /// Запоминает VarInt-метаданную моба (индекс ≥16) для вариантов/окрасов.
+    /// Запоминает VarInt-метаданную (индекс ≥8: варианты мобов, картина #9, поворот рамки #10).
     fn set_int_meta(&mut self, id: i32, idx: u8, v: i32) {
-        if idx < 16 {
+        if idx < 8 {
             return;
         }
         if let Some(e) = self.entities.map.get_mut(&id) {
@@ -941,7 +941,8 @@ impl Level {
                         }
                         7 => {
                             let st = ezzmc_protocol::item::read_stack(&mut r)?;
-                            if idx == 8 {
+                            // #8 — ItemEntity/снаряды; #9 — ItemFrame#DATA_ITEM (HangingEntity #8 — направление).
+                            if idx == 8 || idx == 9 {
                                 if let Some(e) = self.entities.map.get_mut(&id) {
                                     e.item = st;
                                 }

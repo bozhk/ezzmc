@@ -841,6 +841,17 @@ impl App {
                 if e.baby {
                     j["baby"] = json!(true);
                 }
+                if *name == "painting" {
+                    let reg = crate::painting::PAINTING_REG.lock().ok();
+                    j["variant"] = json!(e.int_meta(9).and_then(|i| reg
+                        .as_ref()
+                        .and_then(|r| r.get(usize::try_from(i - 1).ok()?).map(|v| format!("{} {}x{}", v.asset, v.width, v.height)))));
+                    j["direction"] = json!(e.data);
+                }
+                if *name == "item_frame" || *name == "glow_item_frame" {
+                    j["rotation"] = json!(e.int_meta(10).unwrap_or(0));
+                    j["direction"] = json!(e.data);
+                }
                 if e.flags & 1 != 0 {
                     j["sneaking"] = json!(true);
                 }

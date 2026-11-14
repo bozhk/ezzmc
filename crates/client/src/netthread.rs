@@ -402,6 +402,9 @@ fn run(
             })
             .collect();
     }
+    if let Some(r) = reg("minecraft:painting_variant") {
+        crate::painting::set_registry(&r.entries);
+    }
     let chat_types = crate::chatnet::chat_types(reg("minecraft:chat_type"));
     if let Ok(mut g) = crate::dialog::DIALOG_REG.lock() {
         *g = reg("minecraft:dialog").map_or_else(Vec::new, |r| r.entries.clone());
