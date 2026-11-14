@@ -321,6 +321,9 @@ pub struct WorldView {
     boss_darken_o: f32,
     /// Титры `/title` (VANILLA: Hud title/subtitle).
     pub titles: crate::titles::Titles,
+    pub subtitles: crate::subtitles::Subtitles,
+    /// Строки субтитров последнего кадра (текст, стрелка, яркость) — для агента.
+    pub subtitle_rows: Vec<(String, i8, u32)>,
     /// Scoreboard (цели/очки/команды). VANILLA: ClientPacketListener#scoreboard.
     pub scoreboard: crate::scoreboard::Scoreboard,
     /// Карты (TODO-525): данные и атлас `map_draw`.
@@ -1145,6 +1148,8 @@ impl WorldView {
             boss_darken: 0.0,
             boss_darken_o: 0.0,
             titles: Default::default(),
+            subtitles: Default::default(),
+            subtitle_rows: Vec::new(),
             scoreboard: Default::default(),
             maps: Default::default(),
             map_draw,

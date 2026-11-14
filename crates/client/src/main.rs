@@ -73,6 +73,7 @@ mod settings;
 mod shulkerbox;
 mod sign;
 mod skull;
+mod subtitles;
 mod support;
 mod tablist;
 mod threads;
@@ -174,6 +175,8 @@ struct App {
     overlay_anim: bool,
     chat: chat::Chat,
     chat_cfg: chat::Cfg,
+    /// Options#showSubtitles.
+    show_subtitles: bool,
     chat_colors: bool,
     chat_links: bool,
     /// Открыт серверный контейнер (не InventoryMenu).
@@ -2097,6 +2100,7 @@ impl ApplicationHandler for App {
                     self.chat_colors = o.get(&CHAT[0]) == "true";
                     self.chat.sg.auto = o.get(&CHAT[3]) == "true";
                     self.chat_links = o.get(&CHAT[1]) == "true";
+                    self.show_subtitles = o.raw("showSubtitles") == Some("true");
                     self.chat_cfg = chat::Cfg {
                         opacity: o.f32(&CHAT[4]),
                         bg: o.f32(&CHAT[5]),
@@ -2690,6 +2694,29 @@ impl ApplicationHandler for App {
                                                     cur.1 as f32 / t.scale() as f32,
                                                     gwf,
                                                     ghf,
+                                                );
+                                            }
+                                        }
+                                        {
+                                            // VANILLA: Hud — SubtitleOverlay (слушатель живёт, пока включена опция).
+                                            // VANILLA-UNSURE: notificationDisplayTime = 1.0 и фон 0.8
+                                            // (backgroundForChatOnly по умолчанию) — опций нет.
+                                            let (cam, yaw, pitch) = (v.cam, v.yaw, v.pitch);
+                                            v.subtitle_rows = v.subtitles.visible(
+                                                self.show_subtitles,
+                                                item_lang,
+                                                cam,
+                                                yaw,
+                                                pitch,
+                                                1.0,
+                                            );
+                                            if !hid {
+                                                subtitles::Subtitles::draw(
+                                                    t,
+                                                    &v.subtitle_rows,
+                                                    gwf,
+                                                    ghf,
+                                                    0.8,
                                                 );
                                             }
                                         }
@@ -3373,6 +3400,7 @@ fn main() {
         overlay_anim: false,
         chat: chat::Chat::default(),
         chat_cfg: chat::Cfg::default(),
+        show_subtitles: false,
         chat_colors: true,
         chat_links: true,
         cursor_px: (0.0, 0.0),

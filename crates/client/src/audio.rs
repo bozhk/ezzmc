@@ -122,6 +122,19 @@ struct Voice {
 
 static TX: OnceLock<Sender<Cmd>> = OnceLock::new();
 
+/// Событие для субтитров (VANILLA: SoundEventListener#onPlaySound).
+pub struct SubEvent {
+    /// Ключ перевода из sounds.json (`subtitle`).
+    pub key: String,
+    /// Дальность слышимости; бесконечность у звуков без позиции.
+    pub range: f32,
+    pub pos: [f64; 3],
+    pub looping: bool,
+}
+/// Слушатель субтитров включён (опция showSubtitles).
+pub static SUB_LISTEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static SUB_QUEUE: Mutex<Vec<SubEvent>> = Mutex::new(Vec::new());
+
 /// Запустить звуковой поток (идемпотентно). Без устройства вывода всё молча игнорируется.
 pub fn init() {
     TX.get_or_init(|| {
@@ -242,6 +255,8 @@ impl Rng {
 
 struct Registry {
     events: HashMap<String, Vec<Entry>>,
+    /// Событие → ключ субтитра (WeighedSoundEvents#getSubtitle).
+    subtitles: HashMap<String, String>,
     store: ezzmc_assets::source::ObjectStore,
 }
 
@@ -254,7 +269,11 @@ fn load_registry() -> Option<Registry> {
     let raw = store.read("assets/minecraft/sounds.json")?;
     let j: serde_json::Value = serde_json::from_slice(&raw).ok()?;
     let mut events = HashMap::new();
+    let mut subtitles = HashMap::new();
     for (k, v) in j.as_object()? {
+        if let Some(s) = v.get("subtitle").and_then(|x| x.as_str()) {
+            subtitles.insert(k.clone(), s.to_owned());
+        }
         let mut list = Vec::new();
         for s in v
             .get("sounds")
@@ -291,7 +310,11 @@ fn load_registry() -> Option<Registry> {
         }
         events.insert(k.clone(), list);
     }
-    Some(Registry { events, store })
+    Some(Registry {
+        events,
+        subtitles,
+        store,
+    })
 }
 
 struct Picked {
@@ -407,6 +430,25 @@ fn worker(rx: Receiver<Cmd>) {
                 };
                 // VANILLA: SimpleSoundInstance volume·=sound.volume, pitch·=sound.pitch.
                 let vol_inst = r.volume * p.volume;
+                // VANILLA: SoundEngine#play → notifyListeners (до проверки громкости);
+                // дальность = max(volume, 1)·attenuation_distance, у relative — бесконечность.
+                if SUB_LISTEN.load(Ordering::Relaxed) {
+                    if let (Some(key), Ok(mut q)) = (reg.subtitles.get(&r.event), SUB_QUEUE.lock())
+                    {
+                        if q.len() < 256 {
+                            q.push(SubEvent {
+                                key: key.clone(),
+                                range: if r.pos.is_some() {
+                                    vol_inst.max(1.0) * p.atten
+                                } else {
+                                    f32::INFINITY
+                                },
+                                pos: r.pos.unwrap_or([0.0; 3]),
+                                looping: r.gain.is_some(),
+                            });
+                        }
+                    }
+                }
                 // Громкость категории применяется в микшере на лету (VANILLA: updateSourceVolume).
                 let vol = vol_inst.clamp(0.0, 1.0);
                 let long = r.gain.is_some() || matches!(r.cat, Cat::Music | Cat::Records);

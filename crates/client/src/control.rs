@@ -297,6 +297,11 @@ impl App {
                     "name": n, "progress": p, "color": c, "overlay": o, "flags": f,
                 }))
                 .collect::<Vec<_>>());
+            s["subtitles"] = json!(v
+                .subtitle_rows
+                .iter()
+                .map(|(t, a, b)| json!({"text": t, "arrow": a, "brightness": b}))
+                .collect::<Vec<_>>());
             s["boss_darken"] = json!(v.boss_darken(1.0));
             s["sidebar"] =
                 json!(v
@@ -696,6 +701,19 @@ impl App {
                     self.pitch = (p as f32).clamp(-90.0, 90.0);
                 }
                 ok(json!({}))
+            }
+            // Опция options.txt: {key, value?} — без value только читает. Применяется со следующего кадра.
+            "option" => {
+                let Some(g) = &mut self.gui else {
+                    return Some(ok(json!({})));
+                };
+                let key = c["key"].as_str().unwrap_or("");
+                let was = g.opts.raw(key).map(str::to_owned);
+                if let Some(v) = c["value"].as_str() {
+                    g.opts.set(key, v.to_owned());
+                    g.opts.save();
+                }
+                ok(json!({"key": key, "was": was, "value": g.opts.raw(key)}))
             }
             // Не ваниль: compute ↔ ванильный путь (как key.renderMode); on=true/false или переключить.
             "render_mode" => {

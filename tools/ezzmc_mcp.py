@@ -204,6 +204,7 @@ TOOLS = {
     "game_render_mode": ("Switch compute <-> vanilla terrain path (like the renderMode key). on=true compute, false vanilla, omit = toggle.", S(on={"type": "boolean"}), "render_mode"),
     "game_turn": ("Turn the view by dyaw/dpitch degrees.", S(dyaw=N, dpitch=N), "turn"),
     "game_hotbar": ("Select hotbar slot 0-8.", S(slot=INT), "hotbar"),
+    "game_option": ("Read or set an options.txt key (e.g. key=showSubtitles value=true); omit value to read. Saved to disk: restore after tests.", S(key=STR, value=STR), "option"),
     "game_sound": ("Play a sound event (e.g. block.stone.break) at the listener; state.audio.started/active shows engine activity.", S(event=STR, volume=N, pitch=N), "sound"),
     "game_inventory": ("Non-empty inventory slots with item names and counts.", S(), "inventory"),
     "game_target": ("What the crosshair points at: block (name, props, face, hit point, dist, in_reach), far_block (20 blocks), fluid, entity. Use before mining/placing.", S(), "target"),
