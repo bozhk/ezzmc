@@ -244,6 +244,9 @@ impl crate::physics::Collider for NoClip<'_> {
     fn has_chunk(&self, x: i32, z: i32) -> bool {
         crate::physics::Collider::has_chunk(self.level, x, z)
     }
+    fn border_boxes(&self, x: f64, z: f64, xs: f64, zs: f64) -> Vec<[f64; 6]> {
+        crate::physics::Collider::border_boxes(self.level, x, z, xs, zs)
+    }
 }
 
 fn ov(a: &[f64; 6], b: &[f64; 6]) -> bool {

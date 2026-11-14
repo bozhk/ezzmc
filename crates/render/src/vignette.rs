@@ -173,9 +173,17 @@ impl VignetteDraw {
     }
 
     /// `brightness` = Hud#vignetteBrightness (0..1).
-    pub fn prepare(&self, queue: &wgpu::Queue, brightness: f32) {
+    /// `warn` — сила предупреждения границы мира (0..1). VANILLA: Hud#extractVignette.
+    pub fn prepare(&self, queue: &wgpu::Queue, brightness: f32, warn: f32) {
         let b = brightness.clamp(0.0, 1.0);
-        let c = [b, b, b, 1.0f32];
+        let c = if warn > 0.0 {
+            let w = warn.clamp(0.0, 1.0);
+            let red = b * (1.0 - w);
+            let gb = b + (1.0 - b) * w;
+            [red, gb, gb, 1.0f32]
+        } else {
+            [b, b, b, 1.0f32]
+        };
         // SAFETY: POD f32×4.
         let bytes = unsafe { std::slice::from_raw_parts(c.as_ptr().cast::<u8>(), 16) };
         queue.write_buffer(&self.color, 0, bytes);

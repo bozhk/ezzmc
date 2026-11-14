@@ -2,6 +2,7 @@
 pub mod audio_attr;
 pub mod biome_color;
 pub mod block;
+pub mod border;
 pub mod chunk;
 pub mod chunk_packet;
 pub mod dimension;

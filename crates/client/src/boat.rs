@@ -333,7 +333,15 @@ impl BoatSim {
         // AbstractBoat#checkFallDamage: lastYd = deltaMovement.y.
         self.last_yd = b.vel[1];
         let bb = b.aabb();
-        let shapes = gather(w, expand_towards(bb, delta));
+        let ex = expand_towards(bb, delta);
+        let mut shapes = gather(w, ex);
+        // VANILLA: Entity#collectColliders — граница мира.
+        shapes.extend(w.border_boxes(
+            (bb[0] + bb[3]) / 2.0,
+            (bb[2] + bb[5]) / 2.0,
+            ex[3] - ex[0],
+            ex[5] - ex[2],
+        ));
         let m = collide_with(delta, bb, &shapes);
         let len = m[0] * m[0] + m[1] * m[1] + m[2] * m[2];
         let dlen = delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2];

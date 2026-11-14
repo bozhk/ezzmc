@@ -36,10 +36,12 @@ pub enum Shader {
     Skinned,
     /// GPU-инстансинг предметов-сущностей (дропы)
     ItemInst,
+    /// `world_border.vsh/fsh`
+    WorldBorder,
 }
 
 impl Shader {
-    pub const ALL: [Shader; 12] = [
+    pub const ALL: [Shader; 13] = [
         Shader::Terrain,
         Shader::Sky,
         Shader::Stars,
@@ -52,6 +54,7 @@ impl Shader {
         Shader::Lightning,
         Shader::Skinned,
         Shader::ItemInst,
+        Shader::WorldBorder,
     ];
 
     fn body(self) -> &'static str {
@@ -68,6 +71,7 @@ impl Shader {
             Shader::Lightning => include_str!("shaders/lightning.wgsl"),
             Shader::Skinned => include_str!("shaders/skinned.wgsl"),
             Shader::ItemInst => include_str!("shaders/itemlit.wgsl"),
+            Shader::WorldBorder => include_str!("shaders/world_border.wgsl"),
         }
     }
 

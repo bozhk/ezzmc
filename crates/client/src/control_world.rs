@@ -365,6 +365,13 @@ impl App {
                     "thunder": l.thunder_level > 0.5,
                     "loaded_chunks": l.chunks.loaded_count(),
                     "own_id": l.own_id,
+                    "border": {
+                        "center": [l.border.center_x, l.border.center_z],
+                        "size": l.border.size(),
+                        "status": format!("{:?}", l.border.status()),
+                        "distance": l.border.distance_to(v.cam[0], v.cam[2]),
+                        "warning": l.border.warning_strength(v.cam[0], v.cam[2]),
+                    },
                 });
             }
         }

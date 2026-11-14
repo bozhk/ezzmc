@@ -140,6 +140,8 @@ pub struct Pickup {
 
 pub struct Level {
     pub chunks: ChunkCache,
+    /// VANILLA: Level#getWorldBorder (клиентская копия, пересоздаётся с уровнем).
+    pub border: crate::border::WorldBorder,
     /// VANILLA: Level#getGameTime / getDayTime / tickDayTime.
     pub game_time: i64,
     /// Число клиентских тиков (tick_time_at); в отличие от game_time не прыгает от set_time.
@@ -219,6 +221,7 @@ impl Level {
     pub fn new(format: ChunkFormat, view_radius: i32) -> Self {
         Level {
             chunks: ChunkCache::new(format, view_radius),
+            border: Default::default(),
             game_time: 0,
             client_ticks: 0,
             day_time: 0,
@@ -284,6 +287,8 @@ impl Level {
         if self.sky_flash_time > 0 {
             self.sky_flash_time -= 1;
         }
+        // VANILLA: ClientLevel#tick — getWorldBorder().tick().
+        self.border.tick();
         self.entities.tick();
         self.ride_tick();
         {
@@ -358,6 +363,9 @@ impl Level {
 
     /// Обработать пакет мира. Неизвестные имена → `LevelEvent::None`.
     pub fn handle(&mut self, name: &str, body: &[u8]) -> ProtocolResult<LevelEvent> {
+        if name.contains("border") && self.border.handle(name, body, self.game_time)? {
+            return Ok(LevelEvent::None);
+        }
         let mut r = Reader::new(body);
         Ok(match name {
             "level_chunk_with_light" => {

@@ -45,6 +45,11 @@ pub trait Collider {
     fn entity_boxes(&self, _region: [f64; 6]) -> Vec<[f64; 6]> {
         Vec::new()
     }
+    /// Форма границы мира (4 полупространства снаружи), если сущность у границы.
+    /// VANILLA: Entity#collectColliders — WorldBorder#isInsideCloseToBorder → getCollisionShape.
+    fn border_boxes(&self, _x: f64, _z: f64, _xs: f64, _zs: f64) -> Vec<[f64; 6]> {
+        Vec::new()
+    }
     /// Загружен ли чанк (для `travelInAir`).
     fn has_chunk(&self, x: i32, z: i32) -> bool;
     /// Высота воды в блоке (0 — воды нет; 1 — полный блок или вода сверху).
@@ -70,6 +75,9 @@ pub trait Collider {
 }
 
 impl Collider for Level {
+    fn border_boxes(&self, x: f64, z: f64, xs: f64, zs: f64) -> Vec<[f64; 6]> {
+        border_shape(&self.border, x, z, xs, zs)
+    }
     fn boxes(&self, x: i32, y: i32, z: i32) -> &'static [[f64; 6]] {
         let s = self.chunks.block(x, y, z);
         s.props()
@@ -1446,6 +1454,13 @@ impl Player {
         ];
         let mut colliders = gather(w, region);
         colliders.extend(w.entity_boxes(region));
+        let ex = expand_towards(bb, m);
+        colliders.extend(w.border_boxes(
+            (bb[0] + bb[3]) / 2.0,
+            (bb[2] + bb[5]) / 2.0,
+            ex[3] - ex[0],
+            ex[5] - ex[2],
+        ));
         tracing::debug!(target: "dbg", "collide bb={:.3?} m={:.6?} boxes={:.3?}", bb, m, colliders);
         let step = if len_sq(m) == 0.0 {
             m
@@ -1484,6 +1499,27 @@ impl Player {
         }
         step
     }
+}
+
+/// Граница мира как 4 бокса снаружи коробки floor(min)..ceil(max) (бесконечность → ±3e7).
+pub(crate) fn border_shape(
+    b: &ezzmc_world::border::WorldBorder,
+    x: f64,
+    z: f64,
+    xs: f64,
+    zs: f64,
+) -> Vec<[f64; 6]> {
+    if !b.inside_close(x, z, xs, zs) {
+        return Vec::new();
+    }
+    const F: f64 = 3.0e7;
+    let [x0, z0, x1, z1] = b.collision_box();
+    vec![
+        [-F, -F, -F, x0, F, F],
+        [x1, -F, -F, F, F, F],
+        [x0, -F, -F, x1, F, z0],
+        [x0, -F, z1, x1, F, F],
+    ]
 }
 
 /// VANILLA: LocalPlayer#modifyInput (0.98, подкрадывание, «квадратное» движение).
@@ -1752,6 +1788,21 @@ fn block_jump_factor(w: &dyn Collider, p: [f64; 3]) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn world_border_stops_movement() {
+        let mut b = ezzmc_world::border::WorldBorder::default();
+        b.set_size(20.0); // −10..10
+                          // Игрок у восточной стены (x 9.5, ширина 0.6), шаг +1 по X — упирается в x=10.
+        let bb = [9.2, 64.0, -0.3, 9.8, 65.8, 0.3];
+        let ex = super::expand_towards(bb, [1.0, 0.0, 0.0]);
+        let shapes = super::border_shape(&b, 9.5, 0.0, ex[3] - ex[0], ex[5] - ex[2]);
+        assert_eq!(shapes.len(), 4);
+        let m = super::collide_with([1.0, 0.0, 0.0], bb, &shapes);
+        assert!((m[0] - 0.2).abs() < 1e-9, "{m:?}");
+        // Вдали от стены граница не участвует.
+        assert!(super::border_shape(&b, 0.0, 0.0, 0.6, 0.6).is_empty());
+    }
+
     use super::*;
 
     /// Плоский мир: сплошной камень при y < 0 (верх на y=0), плюс дополнительные блоки.

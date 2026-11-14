@@ -1,5 +1,6 @@
 //! wgpu-рендер.
 pub mod animals;
+pub mod borderdraw;
 pub mod clouddraw;
 pub mod entitymodel;
 pub mod fog;

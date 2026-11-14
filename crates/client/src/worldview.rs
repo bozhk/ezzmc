@@ -144,6 +144,7 @@ pub struct WorldView {
     clouds: ezzmc_render::clouddraw::CloudDraw,
     weather: ezzmc_render::weatherdraw::WeatherDraw,
     lightning: ezzmc_render::lightningdraw::LightningDraw,
+    border_draw: ezzmc_render::borderdraw::BorderDraw,
     /// Модели сущностей (пока только аватар игрока от 3-го лица): скин Стива, слой одежды.
     entity_draw: ezzmc_render::particledraw::ParticleDraw,
     /// Броня игроков: отдельная текстура-атлас (`armor::ArmorKit`).
@@ -191,6 +192,8 @@ pub struct WorldView {
     vignette: ezzmc_render::vignette::VignetteDraw,
     /// Hud#vignetteBrightness и накопитель тиков.
     vignette_b: f32,
+    /// Сила красной виньетки у границы мира (0..1).
+    vignette_warn: f32,
     vignette_acc: f32,
     /// EnvironmentAttributeProbe: (прошлый, новый) тик цветов [небо, туман, туман воды] и прогресс тика.
     probe_pair: Option<([u32; 3], [u32; 3])>,
@@ -621,6 +624,18 @@ impl WorldView {
                 .map(|i| (i.to_rgba8(), i.width, i.height))
         };
         let (rain_img, snow_img) = (weather_img("rain"), weather_img("snow"));
+        let forcefield = rm
+            .read("assets/minecraft/textures/misc/forcefield.png")
+            .and_then(|d| Image::decode_png(&d).ok())
+            .map(|i| (i.to_rgba8(), i.width, i.height));
+        let border_draw = ezzmc_render::borderdraw::BorderDraw::new(
+            &gpu.device,
+            &gpu.queue,
+            color,
+            DEPTH_FORMAT,
+            &projection_buf,
+            forcefield.as_ref().map(|(d, w, h)| (d.as_slice(), *w, *h)),
+        );
         let weather = ezzmc_render::weatherdraw::WeatherDraw::new(
             &gpu.device,
             &gpu.queue,
@@ -935,6 +950,7 @@ impl WorldView {
             clouds,
             weather,
             lightning,
+            border_draw,
             entity_draw,
             armor_draw,
             armor_kit,
@@ -967,6 +983,7 @@ impl WorldView {
             fog_state: ezzmc_render::fog::FogState::default(),
             vignette,
             vignette_b: 1.0,
+            vignette_warn: 0.0,
             vignette_acc: 0.0,
             probe_pair: None,
             probe_acc: 0.0,
@@ -4163,6 +4180,21 @@ impl WorldView {
             self.lightning
                 .prepare(&gpu.device, &gpu.queue, mv, self.cam, &bolts);
         }
+        // VANILLA: WorldBorderRenderer#extract/prepare — renderDistance = опция·16, depthFar.
+        {
+            let rd = f64::from(self.view_radius.max(2)) * 16.0;
+            let st = match self.net.level.lock().as_deref() {
+                Ok(Some(l)) => {
+                    ezzmc_render::borderdraw::extract(&l.border, l.partial_tick(), self.cam, rd)
+                }
+                _ => Default::default(),
+            };
+            let millis = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            self.border_draw
+                .prepare(&gpu.queue, &st, self.cam, rd, far, mv, millis);
+        }
         crate::mobs::prof_at(7, "t до prepare_hand");
         self.prepare_hand(gpu, aspect, far);
         // VANILLA: AvatarRenderer — игрок виден только от 3-го лица (в 1-м лице камера в голове).
@@ -4696,8 +4728,11 @@ impl WorldView {
         self.lightning.draw(pass);
         self.clouds.draw(pass);
         self.weather.draw(pass);
+        // VANILLA: LevelRenderer — граница мира сразу после погоды.
+        self.border_draw.draw(pass);
         // VANILLA: Hud#extractVignette (опция vignette:true) — поверх мира.
-        self.vignette.prepare(queue, self.vignette_b);
+        self.vignette
+            .prepare(queue, self.vignette_b, self.vignette_warn);
         self.vignette.draw(pass);
     }
 
@@ -4774,6 +4809,8 @@ impl WorldView {
             self.vignette_acc -= 1.0;
             self.vignette_b = ezzmc_render::vignette::tick_brightness(self.vignette_b, raw, 0.0);
         }
+        // VANILLA: Hud#extractVignette — borderWarningStrength по расстоянию до границы мира.
+        self.vignette_warn = l.border.warning_strength(self.cam[0], self.cam[2]);
         // VANILLA-UNSURE: Biome#hasPrecipitation не разбирается из реестра → считаем true;
         // WATER_FOG_END ×0.85 у болот/мангров не применён; биомная интерполяция атрибутов не делалась.
         self.fog_state
