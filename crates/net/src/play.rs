@@ -779,6 +779,25 @@ impl PlayHandler {
         conn.send(self.sid("container_close")?, &w.buf)
     }
 
+    /// VANILLA: ServerboundSeenAdvancementsPacket — OPENED_TAB(0) + id вкладки или CLOSED_SCREEN(1).
+    pub fn send_seen_advancements(
+        &self,
+        conn: &mut Connection,
+        tab: Option<&str>,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        match tab {
+            Some(t) => {
+                w.var_int(0);
+                w.string(t);
+            }
+            None => {
+                w.var_int(1);
+            }
+        }
+        conn.send(self.sid("seen_advancements")?, &w.buf)
+    }
+
     /// VANILLA: ServerboundRenameItemPacket(String name).
     pub fn send_rename_item(&self, conn: &mut Connection, name: &str) -> NetResult<()> {
         let mut w = Writer::new();

@@ -302,6 +302,17 @@ impl App {
                 .iter()
                 .map(|(t, a, b)| json!({"text": t, "arrow": a, "brightness": b}))
                 .collect::<Vec<_>>());
+            s["toasts"] = json!(v
+                .toasts
+                .snapshot()
+                .iter()
+                .map(|(k, t, p)| json!({"kind": k, "title": t, "visible": p}))
+                .collect::<Vec<_>>());
+            s["advancements"] = json!({
+                "count": v.advancements.list.len(),
+                "done": v.advancements.list.iter().filter(|a| v.advancements.is_done(&a.id)).count(),
+                "selected_tab": v.advancements.selected,
+            });
             s["boss_darken"] = json!(v.boss_darken(1.0));
             s["sidebar"] =
                 json!(v

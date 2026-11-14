@@ -71,6 +71,8 @@ pub enum NetCmd {
     ContainerClose(i32),
     /// ServerboundRenameItemPacket (поле имени наковальни).
     RenameItem(String),
+    /// ServerboundSeenAdvancementsPacket: Some(вкладка) — OPENED_TAB, None — CLOSED_SCREEN.
+    SeenAdvancements(Option<String>),
     /// Правка таблички (экран закрыт): позиция, передняя сторона, 4 строки.
     SignUpdate([i32; 3], bool, [String; 4]),
     /// Кнопка меню (зачарование, камнерез, ткацкий станок, маяк): (id контейнера, кнопка).
@@ -144,6 +146,10 @@ pub enum NetEvt {
     Scoreboard(Box<crate::scoreboard::ScoreEvt>),
     /// map_item_data.
     Map(Box<crate::maps::MapEvt>),
+    /// update_advancements.
+    Advancements(Box<crate::advancements::Update>),
+    /// select_advancements_tab.
+    AdvTab(Option<String>),
     /// Список игроков (Tab): player_info_update/remove, tab_list.
     Tab(Box<crate::tablist::TabEvt>),
     /// boss_event: (uuid, операция).
@@ -729,6 +735,9 @@ fn run(
                     .send_sign_update(&mut c, p, front, &lines)
                     .map_err(|x| e(&x))?,
                 NetCmd::RenameItem(name) => h.send_rename_item(&mut c, &name).map_err(|x| e(&x))?,
+                NetCmd::SeenAdvancements(tab) => h
+                    .send_seen_advancements(&mut c, tab.as_deref())
+                    .map_err(|x| e(&x))?,
                 NetCmd::ContainerClose(id) => {
                     h.send_container_close(&mut c, id).map_err(|x| e(&x))?
                 }
@@ -1141,6 +1150,25 @@ fn run(
                                 let _ = tx.send(ev);
                             }
                             None => tracing::warn!("{pname}: не разобран [len={}]", body.len()),
+                        }
+                        continue;
+                    }
+                    if pname == "update_advancements" {
+                        // VANILLA: ClientPacketListener#handleUpdateAdvancementsPacket.
+                        match crate::advancements::parse(&body) {
+                            Ok(u) => {
+                                let _ = tx.send(NetEvt::Advancements(Box::new(u)));
+                            }
+                            Err(x) => tracing::warn!("update_advancements: {x}"),
+                        }
+                        continue;
+                    }
+                    if pname == "select_advancements_tab" {
+                        match crate::advancements::parse_select(&body) {
+                            Ok(tab) => {
+                                let _ = tx.send(NetEvt::AdvTab(tab));
+                            }
+                            Err(x) => tracing::warn!("select_advancements_tab: {x}"),
                         }
                         continue;
                     }

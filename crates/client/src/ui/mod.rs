@@ -1472,7 +1472,7 @@ fn wrap(t: &TextRenderer, s: &str, max: f32) -> Vec<String> {
 }
 
 /// Как `wrap`, но не больше `limit` строк.
-fn wrap_n(t: &TextRenderer, s: &str, max: f32, limit: usize) -> Vec<String> {
+pub(crate) fn wrap_n(t: &TextRenderer, s: &str, max: f32, limit: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut active = String::new();
     for para in s.split('\n') {

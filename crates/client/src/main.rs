@@ -1,3 +1,4 @@
+mod advancements;
 mod adventure;
 mod ambient;
 mod armor;
@@ -79,6 +80,7 @@ mod tablist;
 mod threads;
 mod timer;
 mod titles;
+mod toasts;
 mod toolspeed;
 mod tooltip;
 mod ui;
@@ -1347,6 +1349,7 @@ impl App {
             .chain(effectshud::SPRITES)
             .chain(tablist::SPRITES)
             .chain(bossbar::SPRITES)
+            .chain(toasts::SPRITES)
         {
             let full = format!("assets/minecraft/textures/gui/{path}.png");
             let from_store = if name.starts_with("panorama") {
@@ -3030,6 +3033,20 @@ impl ApplicationHandler for App {
                                             now_ms,
                                         );
                                     }
+                                    // VANILLA: ToastManager — поверх HUD и экранов, скрыт вместе с HUD (F1).
+                                    if let Some((p, rm)) = hud.as_mut() {
+                                        toasts::frame(
+                                            v,
+                                            !hid,
+                                            t,
+                                            p,
+                                            g,
+                                            view,
+                                            (w, h),
+                                            rm,
+                                            item_lang,
+                                        );
+                                    }
                                 }
                             });
                             match death_act {
@@ -3071,6 +3088,21 @@ impl ApplicationHandler for App {
                                 act = gui.render(
                                     &g.device, &g.queue, view, w, h, t, p, dt as f32, now_ms,
                                 );
+                                if let (Some(v), Some(rm)) = (world.as_mut(), self.hud_rm.as_ref())
+                                {
+                                    let show = !self.hud_hidden;
+                                    toasts::frame(
+                                        v,
+                                        show,
+                                        t,
+                                        p,
+                                        g,
+                                        view,
+                                        (w, h),
+                                        rm,
+                                        &self.item_lang,
+                                    );
+                                }
                             });
                             self.fps_limit
                                 .set_limit(gui.opts.f32(&ui::options::VIDEO[1]) as u32);

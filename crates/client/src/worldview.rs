@@ -322,6 +322,10 @@ pub struct WorldView {
     /// Титры `/title` (VANILLA: Hud title/subtitle).
     pub titles: crate::titles::Titles,
     pub subtitles: crate::subtitles::Subtitles,
+    pub advancements: crate::advancements::Advancements,
+    /// Достижения, по которым пора показать toast (язык есть только у main).
+    pub toast_in: Vec<String>,
+    pub toasts: crate::toasts::ToastManager,
     /// Строки субтитров последнего кадра (текст, стрелка, яркость) — для агента.
     pub subtitle_rows: Vec<(String, i8, u32)>,
     /// Scoreboard (цели/очки/команды). VANILLA: ClientPacketListener#scoreboard.
@@ -1149,6 +1153,9 @@ impl WorldView {
             boss_darken_o: 0.0,
             titles: Default::default(),
             subtitles: Default::default(),
+            advancements: Default::default(),
+            toast_in: Vec::new(),
+            toasts: Default::default(),
             subtitle_rows: Vec::new(),
             scoreboard: Default::default(),
             maps: Default::default(),
@@ -1498,6 +1505,11 @@ impl WorldView {
                 NetEvt::Title(e) => self.titles.apply(e),
                 NetEvt::Scoreboard(e) => self.scoreboard.apply(*e),
                 NetEvt::Map(e) => self.maps.apply(*e),
+                NetEvt::Advancements(u) => {
+                    let ids = self.advancements.apply(*u);
+                    self.toast_in.extend(ids);
+                }
+                NetEvt::AdvTab(tab) => self.advancements.select(tab),
                 NetEvt::Dialog(d) => self.dialog_in.push(d),
                 NetEvt::OpenSign(p, f) => self.sign_in.push((p, f)),
                 NetEvt::Suggestions(id, s, l, v) => self.sugg_in.push((id, s, l, v)),
