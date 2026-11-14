@@ -52,6 +52,7 @@ mod keymap;
 mod levelsound;
 mod log;
 mod loomscreen;
+mod maps;
 mod merchantscreen;
 mod mobs;
 mod music;

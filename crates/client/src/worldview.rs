@@ -320,6 +320,14 @@ pub struct WorldView {
     pub titles: crate::titles::Titles,
     /// Scoreboard (цели/очки/команды). VANILLA: ClientPacketListener#scoreboard.
     pub scoreboard: crate::scoreboard::Scoreboard,
+    /// Карты (TODO-525): данные и атлас `map_draw`.
+    pub maps: crate::maps::Maps,
+    map_draw: ezzmc_render::particledraw::ParticleDraw,
+    /// Карта в руке: свой атлас (`maps::HAND_ATLAS`), проекция руки.
+    hand_map_draw: ezzmc_render::particledraw::ParticleDraw,
+    hand_map_visible: bool,
+    /// (id, version) карт, залитых в `hand_map_draw` (основная, вторая рука).
+    hand_map_seen: [Option<(i32, u32)>; 2],
     /// Неймтеги кадра: (позиция якоря, текст, присед) и матрица проекции этого кадра.
     /// Неймтеги: якорь, имя (с оформлением команды), присед, строка очков below_name.
     nametags: Vec<NameTag>,
@@ -806,6 +814,21 @@ impl WorldView {
             &atlas_view,
             arrow_tex.as_ref().map(|d| (d.as_slice(), 32, 96)),
         );
+        // VANILLA: RenderTypes#text (MapRenderer) — без отсечения граней.
+        let map_draw = {
+            let px = crate::maps::Maps::atlas_init(Some(rm));
+            ezzmc_render::particledraw::ParticleDraw::new(
+                &gpu.device,
+                &gpu.queue,
+                color,
+                DEPTH_FORMAT,
+                &projection_buf,
+                &fog_buf,
+                &lightmap.view,
+                &atlas_view,
+                Some((px.as_slice(), crate::maps::ATLAS, crate::maps::ATLAS)),
+            )
+        };
         let piston_draw = ezzmc_render::particledraw::ParticleDraw::new_culled(
             &gpu.device,
             &gpu.queue,
@@ -856,9 +879,27 @@ impl WorldView {
         let hand_model = {
             let (mut m, parts) = ezzmc_render::humanoid::player_mesh(false);
             for part in &mut m.parts {
-                part.visible = matches!(part.name, "right_arm" | "right_sleeve");
+                part.visible = matches!(
+                    part.name,
+                    "right_arm" | "right_sleeve" | "left_arm" | "left_sleeve"
+                );
             }
             (m, parts)
+        };
+        let hand_map_draw = {
+            let px = crate::maps::Maps::hand_atlas_init(rm);
+            let (w, h) = crate::maps::HAND_ATLAS;
+            ezzmc_render::particledraw::ParticleDraw::new(
+                &gpu.device,
+                &gpu.queue,
+                color,
+                DEPTH_FORMAT,
+                &hand_proj_buf,
+                &fog_buf,
+                &lightmap.view,
+                &atlas_view,
+                Some((px.as_slice(), w, h)),
+            )
         };
         let hand_items = crate::handitem::HandItems::new(rm, &atlas.sprites);
         let hand_rm = ezzmc_assets::install::GameInstall::locate("26.3")
@@ -1097,6 +1138,11 @@ impl WorldView {
             boss: Default::default(),
             titles: Default::default(),
             scoreboard: Default::default(),
+            maps: Default::default(),
+            map_draw,
+            hand_map_draw,
+            hand_map_visible: false,
+            hand_map_seen: [None; 2],
             nametags: Vec::new(),
             own_name: String::new(),
             nt_view: (Mat4::IDENTITY, [0.0; 3], 1.0),
@@ -1436,6 +1482,7 @@ impl WorldView {
                 NetEvt::Boss(id, op) => self.boss.apply(id, *op),
                 NetEvt::Title(e) => self.titles.apply(e),
                 NetEvt::Scoreboard(e) => self.scoreboard.apply(*e),
+                NetEvt::Map(e) => self.maps.apply(*e),
                 NetEvt::Dialog(d) => self.dialog_in.push(d),
                 NetEvt::OpenSign(p, f) => self.sign_in.push((p, f)),
                 NetEvt::Suggestions(id, s, l, v) => self.sugg_in.push((id, s, l, v)),
@@ -2990,7 +3037,11 @@ impl WorldView {
         crate::mobs::prof_at(11, "t после bake_item_entities");
         let mut arrow_data = Vec::new();
         self.bake_projectiles(&mut item_data, &mut arrow_data);
-        self.bake_item_frames(&mut item_data);
+        let mut map_data = Vec::new();
+        self.bake_item_frames(&mut item_data, &mut map_data);
+        self.maps.upload(&gpu.queue, &self.map_draw);
+        self.map_draw
+            .prepare_raw(&gpu.device, &gpu.queue, mv, &map_data);
         crate::mobs::prof_at(12, "t после bake_projectiles");
         self.arrow_draw
             .prepare_raw(&gpu.device, &gpu.queue, mv, &arrow_data);
@@ -3120,6 +3171,7 @@ impl WorldView {
     fn prepare_hand(&mut self, gpu: &Gpu, aspect: f32, far: f32) {
         self.hand_visible = false;
         self.hand_item_visible = false;
+        self.hand_map_visible = false;
         if self.perspective != 0 || !self.walking || !self.have_pos {
             return;
         }
@@ -3155,7 +3207,19 @@ impl WorldView {
             Ok(Some(l)) => crate::particles::light_at(l, self.cam[0], self.cam[1], self.cam[2]),
             _ => (0, 15),
         };
-        let mesh = self.shown_mesh();
+        let (mut arm_data, mut map_data) = (Vec::new(), Vec::new());
+        let main_map = self.bake_hand_maps(
+            gpu,
+            pt,
+            inverse_h,
+            attack,
+            x_bob,
+            y_bob,
+            light,
+            &mut arm_data,
+            &mut map_data,
+        );
+        let mesh = if main_map { None } else { self.shown_mesh() };
         if let (Some(mesh), Some(_d)) = (mesh, self.hand_item_draw.as_mut()) {
             // VANILLA: ItemInHandRenderer#renderArmWithItem (одноручный предмет) + applyItemArmAttackTransform.
             let sa = attack.sqrt();
@@ -3237,15 +3301,10 @@ impl WorldView {
                 g.prepare_split(&gpu.device, &gpu.queue, Mat4::IDENTITY, &blocks, &items);
             }
             self.hand_item_visible = true;
-        } else if self.hand_shown.is_none() {
-            let (model, parts) = &mut self.hand_model;
-            model.reset_pose();
-            model.parts[parts.right_arm].pose.z_rot = 0.1;
-            let mut data = Vec::new();
-            model.bake(m, [255; 4], light, &mut data);
-            self.hand_draw
-                .prepare_raw(&gpu.device, &gpu.queue, Mat4::IDENTITY, &data);
-            self.hand_visible = true;
+        } else if self.hand_shown.is_none() || main_map {
+            if !main_map {
+                self.bake_arm(m, true, light, &mut arm_data);
+            }
             let (mut blocks, mut items) = (Vec::new(), Vec::new());
             self.bake_offhand_fp(light, x_bob, y_bob, &mut blocks, &mut items);
             if let Some(d) = self.hand_item_draw.as_mut() {
@@ -3257,12 +3316,192 @@ impl WorldView {
                 self.hand_item_visible = !blocks.is_empty() || !items.is_empty();
             }
         }
+        if !arm_data.is_empty() {
+            self.hand_draw
+                .prepare_raw(&gpu.device, &gpu.queue, Mat4::IDENTITY, &arm_data);
+            self.hand_visible = true;
+        }
+        if !map_data.is_empty() {
+            self.hand_map_draw
+                .prepare_raw(&gpu.device, &gpu.queue, Mat4::IDENTITY, &map_data);
+            self.hand_map_visible = true;
+        }
         let proj = Mat4::perspective_rh(70.0f32.to_radians(), aspect, NEAR, far) * self.bob(pt);
         gpu.queue.write_buffer(
             &self.hand_proj_buf,
             0,
             &ProjectionUniform { proj_mat: proj }.to_bytes(),
         );
+    }
+
+    /// Одна рука модели игрока. VANILLA: AvatarRenderer#renderHand (zRot ±0.1).
+    fn bake_arm(&mut self, m: Mat4, right: bool, light: (u8, u8), out: &mut Vec<u8>) {
+        let (model, parts) = &mut self.hand_model;
+        model.reset_pose();
+        model.parts[parts.right_arm].pose.z_rot = 0.1;
+        model.parts[parts.left_arm].pose.z_rot = -0.1;
+        let keep: &dyn Fn(&str) -> bool = if right {
+            &|n| matches!(n, "right_arm" | "right_sleeve")
+        } else {
+            &|n| matches!(n, "left_arm" | "left_sleeve")
+        };
+        model.bake_parts(m, [255; 4], light, out, keep);
+    }
+
+    /// Карты в руках от 1-го лица. VANILLA: FirstPersonHandsAndItemsRenderer#renderTwoHandedMap /
+    /// renderOneHandedMap / renderMapHand / renderMap (26.3). Возвращает true, если в основной руке карта.
+    #[allow(clippy::too_many_arguments)]
+    fn bake_hand_maps(
+        &mut self,
+        gpu: &Gpu,
+        pt: f32,
+        inverse_h: f32,
+        attack: f32,
+        x_bob: f32,
+        y_bob: f32,
+        light: (u8, u8),
+        arms: &mut Vec<u8>,
+        out: &mut Vec<u8>,
+    ) -> bool {
+        use crate::maps;
+        let has = |s: Option<&ezzmc_protocol::item::ItemStack>| {
+            s.filter(|s| s.count > 0).and_then(maps::map_id)
+        };
+        let main = has(self.hand_shown.as_ref().map(|(s, _)| s));
+        let off = has(self.off_shown.as_ref());
+        if main.is_none() && off.is_none() {
+            return false;
+        }
+        let pi = std::f32::consts::PI;
+        let look = Mat4::from_rotation_x(((self.pitch - x_bob) * 0.1).to_radians())
+            * Mat4::from_rotation_y(((self.yaw - y_bob) * 0.1).to_radians());
+        let l240 = (u16::from(light.0) * 16, u16::from(light.1) * 16);
+        // Заливка текстур карт в руке — только при смене карты или её содержимого.
+        for (slot, id) in [main, off].into_iter().enumerate() {
+            let cur = id.and_then(|id| self.maps.map.get(&id).map(|m| (id, m.version)));
+            if cur.is_some() && cur != self.hand_map_seen[slot] {
+                if let Some(px) = cur.and_then(|(id, _)| self.maps.rgba(id)) {
+                    self.hand_map_draw.write_region(
+                        &gpu.queue,
+                        slot as u32 * 128,
+                        0,
+                        128,
+                        128,
+                        &px,
+                    );
+                }
+                self.hand_map_seen[slot] = cur;
+            }
+        }
+        // VANILLA: renderMap.
+        let maps_ref = &self.maps;
+        let render_map = |m: Mat4, slot: usize, id: i32, out: &mut Vec<u8>| {
+            let m = m
+                * Mat4::from_rotation_y(pi)
+                * Mat4::from_rotation_z(pi)
+                * Mat4::from_scale(Vec3::splat(0.38))
+                * Mat4::from_translation(Vec3::new(-0.5, -0.5, 0.0))
+                * Mat4::from_scale(Vec3::splat(0.0078125));
+            let has_data = maps_ref.map.contains_key(&id);
+            let [u0, v0, u1, v1] = maps::hand_background(has_data);
+            for (p, uv) in [
+                ([-7.0, 135.0, 0.0], [u0, v1]),
+                ([135.0, 135.0, 0.0], [u1, v1]),
+                ([135.0, -7.0, 0.0], [u1, v0]),
+                ([-7.0, -7.0, 0.0], [u0, v0]),
+            ] {
+                let q = m.transform_point3(Vec3::from(p));
+                ezzmc_render::particledraw::push_vertex_raw(out, q.to_array(), uv, [255; 4], l240);
+            }
+            maps_ref.bake(id, m, false, l240, Some(maps::hand_layout(slot)), out);
+        };
+        // VANILLA: renderPlayerArm (invert = ±1).
+        let player_arm = |inv: f32, inv_h: f32, a: f32| {
+            let sq = a.sqrt();
+            Mat4::from_translation(Vec3::new(
+                inv * (-0.3 * (sq * pi).sin() + 0.640_000_05),
+                0.4 * (sq * pi * 2.0).sin() - 0.6 + inv_h * -0.6,
+                -0.4 * (a * pi).sin() - 0.719_999_97,
+            )) * Mat4::from_rotation_y((inv * 45.0).to_radians())
+                * Mat4::from_rotation_y((inv * (sq * pi).sin() * 70.0).to_radians())
+                * Mat4::from_rotation_z((inv * (a * a * pi).sin() * -20.0).to_radians())
+                * Mat4::from_translation(Vec3::new(-inv, 3.6, 3.5))
+                * Mat4::from_rotation_z((inv * 120.0).to_radians())
+                * Mat4::from_rotation_x(200.0f32.to_radians())
+                * Mat4::from_rotation_y((inv * -135.0).to_radians())
+                * Mat4::from_translation(Vec3::new(inv * 5.6, 0.0, 0.0))
+        };
+        let mut arm_list: Vec<(Mat4, bool)> = Vec::new();
+        // VANILLA: renderOneHandedMap.
+        let one_handed = |arm_list: &mut Vec<(Mat4, bool)>,
+                          inv: f32,
+                          inv_h: f32,
+                          a: f32,
+                          slot: usize,
+                          id: i32,
+                          out: &mut Vec<u8>| {
+            let b = look * Mat4::from_translation(Vec3::new(inv * 0.125, -0.125, 0.0));
+            arm_list.push((
+                b * Mat4::from_rotation_z((inv * 10.0).to_radians()) * player_arm(inv, inv_h, a),
+                inv > 0.0,
+            ));
+            let sq = a.sqrt();
+            let xs = (sq * pi).sin();
+            let m = b
+                * Mat4::from_translation(Vec3::new(inv * 0.51, -0.08 + inv_h * -1.2, -0.75))
+                * Mat4::from_translation(Vec3::new(
+                    inv * -0.5 * xs,
+                    0.4 * (sq * pi * 2.0).sin() - 0.3 * xs,
+                    -0.3 * (a * pi).sin(),
+                ))
+                * Mat4::from_rotation_x((xs * -45.0).to_radians())
+                * Mat4::from_rotation_y((inv * xs * -30.0).to_radians());
+            render_map(m, slot, id, out);
+        };
+        let main_inv = if self.cfg.left_handed { -1.0f32 } else { 1.0 };
+        if let Some(id) = main {
+            if self.off_shown.as_ref().is_none_or(|s| s.count <= 0) {
+                // VANILLA: renderTwoHandedMap + calculateMapTilt.
+                let sq = attack.sqrt();
+                let tilt = (1.0 - self.pitch / 45.0 + 0.1).clamp(0.0, 1.0);
+                let tilt = -(tilt * pi).cos() * 0.5 + 0.5;
+                let base =
+                    look * Mat4::from_translation(Vec3::new(
+                        0.0,
+                        0.2 * (attack * pi).sin() / 2.0,
+                        -0.4 * (sq * pi).sin(),
+                    )) * Mat4::from_translation(Vec3::new(
+                        0.0,
+                        0.04 + inverse_h * -1.2 + tilt * -0.5,
+                        -0.72,
+                    )) * Mat4::from_rotation_x((tilt * -85.0).to_radians());
+                for inv in [1.0f32, -1.0] {
+                    // VANILLA: renderMapHand.
+                    arm_list.push((
+                        base * Mat4::from_rotation_y(90f32.to_radians())
+                            * Mat4::from_rotation_y(92f32.to_radians())
+                            * Mat4::from_rotation_x(45f32.to_radians())
+                            * Mat4::from_rotation_z((inv * -41.0).to_radians())
+                            * Mat4::from_translation(Vec3::new(inv * 0.3, -1.1, 0.45)),
+                        inv > 0.0,
+                    ));
+                }
+                let m = base
+                    * Mat4::from_rotation_x(((sq * pi).sin() * 20.0).to_radians())
+                    * Mat4::from_scale(Vec3::splat(2.0));
+                render_map(m, 0, id, out);
+            } else {
+                one_handed(&mut arm_list, main_inv, inverse_h, attack, 0, id, out);
+            }
+        }
+        if let Some(id) = off {
+            let inv_h = 1.0 - (self.off_h.0 + (self.off_h.1 - self.off_h.0) * pt);
+            one_handed(&mut arm_list, -main_inv, inv_h, 0.0, 1, id, out);
+        }
+        for (m, right) in arm_list {
+            self.bake_arm(m, right, light, arms);
+        }
+        main.is_some()
     }
 
     /// VANILLA: renderArmWithItem(OFF_HAND): translate(−0.56, −0.52, −0.72), attack = 0.
@@ -3275,6 +3514,14 @@ impl WorldView {
         b: &mut Vec<u8>,
         i: &mut Vec<u8>,
     ) {
+        // Карта во второй руке рисуется в `bake_hand_maps`.
+        if self
+            .off_shown
+            .as_ref()
+            .is_some_and(|s| crate::maps::map_id(s).is_some())
+        {
+            return;
+        }
         if let Some(m) = self.offhand_mesh(false) {
             let pt = (self.tick_acc / 0.05).clamp(0.0, 1.0) as f32;
             let inv_h = 1.0 - (self.off_h.0 + (self.off_h.1 - self.off_h.0) * pt);
@@ -3768,7 +4015,7 @@ impl WorldView {
     /// Рамки (обычные и светящиеся) с предметом. VANILLA: ItemFrameRenderer#submit/extractRenderState
     /// (26.3): модель блока `item_frame[_map]` (BlockModelResolver#updateForItemFrame), предмет FIXED
     /// ×0.5 с поворотом rotation·45°; у светящейся — свет блока ≥5, предмет полной яркости.
-    fn bake_item_frames(&mut self, item_data: &mut (Vec<u8>, Vec<u8>)) {
+    fn bake_item_frames(&mut self, item_data: &mut (Vec<u8>, Vec<u8>), map_data: &mut Vec<u8>) {
         use ezzmc_protocol::generated::r26_3::ENTITY_TYPE;
         struct F {
             pos: [f64; 3],
@@ -3828,7 +4075,7 @@ impl WorldView {
                 0 => (90.0f32, 180.0f32),
                 1 => (-90.0, 180.0),
                 // Direction#toYRot: S 0, W 90, N 180, E 270.
-                2 => (0.0, 180.0 - 180.0),
+                2 => (0.0, 0.0),
                 3 => (0.0, 180.0),
                 4 => (0.0, 180.0 - 90.0),
                 _ => (0.0, 180.0 - 270.0),
@@ -3840,9 +4087,13 @@ impl WorldView {
                 (f.pos[2] - self.cam[2]) as f32 + step[2] * o,
             )) * Mat4::from_rotation_x(x_rot.to_radians())
                 * Mat4::from_rotation_y(y_rot.to_radians());
-            let is_map = f.stack.as_ref().is_some_and(|s| {
-                crate::handitem::stack_ctx(s).is_some_and(|(n, _)| n == "filled_map")
-            });
+            // VANILLA: ItemFrameRenderer#extractRenderState — карта только при MAP_ID и наличии данных.
+            let map_id = f
+                .stack
+                .as_ref()
+                .and_then(crate::maps::map_id)
+                .filter(|id| self.maps.map.contains_key(id));
+            let is_map = map_id.is_some();
             if !f.invisible {
                 let model = match (f.glow, is_map) {
                     (false, false) => "minecraft:block/item_frame",
@@ -3869,8 +4120,19 @@ impl WorldView {
             m *=
                 Mat4::from_translation(Vec3::new(0.0, 0.0, if f.invisible { 0.5 } else { 0.4375 }));
             let Some(stack) = f.stack else { continue };
-            if is_map {
-                // TODO-525: содержимое карты (MapRenderer) — пока не рисуется.
+            if let Some(id) = map_id {
+                // VANILLA: ItemFrameRenderer#submit — ветка mapId; свет светящейся рамки 15728850.
+                let mm = m
+                    * Mat4::from_rotation_z(((f.rotation % 4 * 2) as f32 * 45.0).to_radians())
+                    * Mat4::from_rotation_z(180f32.to_radians())
+                    * Mat4::from_scale(Vec3::splat(0.0078125))
+                    * Mat4::from_translation(Vec3::new(-64.0, -64.0, -1.0));
+                let light = if f.glow {
+                    (210, 240)
+                } else {
+                    (u16::from(f.light.0) * 16, u16::from(f.light.1) * 16)
+                };
+                self.maps.bake(id, mm, true, light, None, map_data);
                 continue;
             }
             let Some((name, cx)) = crate::handitem::stack_ctx(&stack) else {
@@ -4684,7 +4946,9 @@ impl WorldView {
                 l.draw(&mut pass);
             }
         }
-        if (self.hand_visible || self.hand_item_visible) && !self.hud_hidden {
+        if (self.hand_visible || self.hand_item_visible || self.hand_map_visible)
+            && !self.hud_hidden
+        {
             // VANILLA: рука рисуется после мира с очищенной глубиной.
             let hand_depth = self.hand_depth.as_ref().unwrap_or(&depth);
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4704,6 +4968,9 @@ impl WorldView {
             pass.set_bind_group(1, &self.group1, &[]);
             if self.hand_visible {
                 self.hand_draw.draw(&mut pass);
+            }
+            if self.hand_map_visible {
+                self.hand_map_draw.draw(&mut pass);
             }
             if let (true, Some(d)) = (self.hand_item_visible, &self.hand_item_draw) {
                 d.draw(&mut pass);
@@ -4839,6 +5106,7 @@ impl WorldView {
         self.glint_draw.draw(pass);
         self.mobs.draw(pass);
         self.arrow_draw.draw(pass);
+        self.map_draw.draw(pass);
         self.piston_draw.draw(pass);
         self.shadow_draw.draw(pass);
         if let (true, Some(d)) = (self.entity_item_visible, &self.entity_item_draw) {

@@ -100,6 +100,8 @@ pub struct ParticleDraw {
     l1: wgpu::BindGroupLayout,
     color_format: wgpu::TextureFormat,
     depth_format: wgpu::TextureFormat,
+    /// Текстура «частиц» (своя текстура draw) — для дозаписи участков (`write_region`).
+    ptex: wgpu::Texture,
 }
 
 /// Бит в `uv2.x` вершины: у предмета есть блеск (шейдер его маскирует `& 4095`).
@@ -414,7 +416,37 @@ impl ParticleDraw {
         };
         let white = [255u8; 4];
         let (d, w, h) = particles.unwrap_or((&white, 1, 1));
-        let pview = make_texture(device, queue, "particle.atlas", d, w, h);
+        let ptex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("particle.atlas"),
+            size: wgpu::Extent3d {
+                width: w.max(1),
+                height: h.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        if !d.is_empty() {
+            queue.write_texture(
+                ptex.as_image_copy(),
+                d,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(w * 4),
+                    rows_per_image: Some(h),
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let pview = ptex.create_view(&Default::default());
         let group_blocks = mk_group("particle.blocks", blocks);
         let group_particles = mk_group("particle.particles", &pview);
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -557,7 +589,34 @@ impl ParticleDraw {
             l1,
             color_format: color,
             depth_format: depth,
+            ptex,
         }
+    }
+
+    /// Перезаписать прямоугольник своей текстуры (RGBA8, `w`×`h` в точке `x`,`y`).
+    pub fn write_region(&self, queue: &wgpu::Queue, x: u32, y: u32, w: u32, h: u32, rgba: &[u8]) {
+        if w == 0 || h == 0 || rgba.len() < (w * h * 4) as usize {
+            return;
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.ptex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     /// Записывает `model_view` (поворот камеры) — для `SkinnedDraw`: `prepare_raw` при пустых данных его не пишет.

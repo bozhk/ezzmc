@@ -275,6 +275,20 @@ impl App {
                     .map(|x| x.text.as_str())
                     .collect::<String>()
             };
+            s["maps"] = json!(v
+                .maps
+                .map
+                .iter()
+                .map(|(id, m)| json!({
+                    "id": id,
+                    "filled": m.colors.iter().filter(|c| **c >= 4).count(),
+                    "decorations": m.decos.iter().map(|d| json!({
+                        "type": crate::maps::DECO_TYPES.get(d.ty).map(|t| t.0),
+                        "x": d.x, "y": d.y, "rot": d.rot,
+                        "name": d.name.as_ref().map(plain),
+                    })).collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>());
             s["sidebar"] =
                 json!(v
                     .scoreboard

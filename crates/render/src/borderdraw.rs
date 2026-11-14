@@ -35,10 +35,8 @@ pub fn extract(b: &WorldBorder, partial: f32, cam: [f64; 3], render_distance: f6
         ..Default::default()
     };
     let (x, z, d) = (cam[0], cam[2], render_distance);
-    let near_wall =
-        x >= s.max_x - d || x <= s.min_x + d || z >= s.max_z - d || z <= s.min_z + d;
-    let not_far_out =
-        x >= s.min_x - d && x <= s.max_x + d && z >= s.min_z - d && z <= s.max_z + d;
+    let near_wall = x >= s.max_x - d || x <= s.min_x + d || z >= s.max_z - d || z <= s.min_z + d;
+    let not_far_out = x >= s.min_x - d && x <= s.max_x + d && z >= s.min_z - d && z <= s.max_z + d;
     if near_wall && not_far_out {
         let a = 1.0 - b.distance_to(x, z) / d;
         s.alpha = a.powi(4).clamp(0.0, 1.0);

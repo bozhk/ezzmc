@@ -142,6 +142,8 @@ pub enum NetEvt {
     Title(crate::titles::TitleEvt),
     /// set_objective/set_display_objective/set_score/reset_score/set_player_team.
     Scoreboard(Box<crate::scoreboard::ScoreEvt>),
+    /// map_item_data.
+    Map(Box<crate::maps::MapEvt>),
     /// Список игроков (Tab): player_info_update/remove, tab_list.
     Tab(Box<crate::tablist::TabEvt>),
     /// boss_event: (uuid, операция).
@@ -1139,6 +1141,16 @@ fn run(
                                 let _ = tx.send(ev);
                             }
                             None => tracing::warn!("{pname}: не разобран [len={}]", body.len()),
+                        }
+                        continue;
+                    }
+                    if pname == "map_item_data" {
+                        // VANILLA: ClientPacketListener#handleMapItemData.
+                        match crate::maps::parse(&body) {
+                            Ok(ev) => {
+                                let _ = tx.send(NetEvt::Map(Box::new(ev)));
+                            }
+                            Err(x) => tracing::warn!("{pname}: {x} [len={}]", body.len()),
                         }
                         continue;
                     }
