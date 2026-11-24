@@ -165,3 +165,81 @@ pub fn thunder(p: [f64; 3]) {
         0.5 + rf() * 0.2,
     );
 }
+
+/// VANILLA: Mob#getHurtSound/getDeathSound + Entity#getSoundSource + getSoundVolume по имени типа.
+/// Имя события — `entity.<имя>.hurt|death` (у большинства мобов), несколько исключений — в таблице.
+/// Несуществующее событие аудио-движок молча пропускает.
+pub fn mob_hurt_sound(name: &str, death: bool) -> Option<(String, crate::audio::Cat, f32)> {
+    use crate::audio::Cat;
+    // Не LivingEntity-«стоны» или звук другой природы.
+    if matches!(
+        name,
+        "armor_stand" | "item" | "text_display" | "item_display" | "block_display" | "interaction"
+    ) {
+        return None;
+    }
+    let base = match name {
+        "mooshroom" => "cow",
+        "cave_spider" => "spider",
+        "giant" => "zombie",
+        "pufferfish" => "puffer_fish",
+        "trader_llama" => "llama",
+        n => n,
+    };
+    const HOSTILE: &[&str] = &[
+        "zombie",
+        "zombie_villager",
+        "zombified_piglin",
+        "husk",
+        "drowned",
+        "giant",
+        "skeleton",
+        "stray",
+        "bogged",
+        "wither_skeleton",
+        "creeper",
+        "spider",
+        "cave_spider",
+        "enderman",
+        "endermite",
+        "silverfish",
+        "witch",
+        "blaze",
+        "ghast",
+        "slime",
+        "magma_cube",
+        "phantom",
+        "shulker",
+        "ender_dragon",
+        "wither",
+        "guardian",
+        "elder_guardian",
+        "vex",
+        "vindicator",
+        "evoker",
+        "pillager",
+        "ravager",
+        "illusioner",
+        "hoglin",
+        "zoglin",
+        "piglin",
+        "piglin_brute",
+        "warden",
+        "breeze",
+        "creaking",
+    ];
+    let cat = if name == "player" {
+        Cat::Players
+    } else if HOSTILE.contains(&name) {
+        Cat::Hostile
+    } else {
+        Cat::Neutral
+    };
+    // VANILLA: EnderDragon#getSoundVolume = 5.
+    let vol = if name == "ender_dragon" { 5.0 } else { 1.0 };
+    Some((
+        format!("entity.{base}.{}", if death { "death" } else { "hurt" }),
+        cat,
+        vol,
+    ))
+}

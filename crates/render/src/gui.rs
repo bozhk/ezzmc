@@ -23,6 +23,8 @@ struct Tex {
 }
 
 pub struct GuiPainter {
+    /// Обрезка следующих `flush` в пикселях окна [x, y, w, h] (VANILLA: enableScissor).
+    scissor: Option<[u32; 4]>,
     sprite_pipe: wgpu::RenderPipeline,
     glint_pipe: wgpu::RenderPipeline,
     invert_pipe: wgpu::RenderPipeline,
@@ -306,6 +308,7 @@ impl GuiPainter {
             glint_pipe,
             invert_pipe,
             inverted: Vec::new(),
+            scissor: None,
             glint_bgl,
             glint_buf: ubuf("gui glint"),
             glint_group: None,
@@ -338,6 +341,11 @@ impl GuiPainter {
             batches: Vec::new(),
             scale: 1.0,
         }
+    }
+
+    /// Обрезка для следующих `flush` (пиксели окна); `None` — снять.
+    pub fn set_scissor(&mut self, r: Option<[u32; 4]>) {
+        self.scissor = r;
     }
 
     pub fn has(&self, name: &str) -> bool {
@@ -403,6 +411,12 @@ impl GuiPainter {
             _tex: tex,
         };
         self.texs.insert(name.to_owned(), t);
+    }
+
+    /// Как [`Self::begin`], но дробный масштаб (pose.scale у ванили, например 0.6 в RecipeToast).
+    pub fn begin_f(&mut self, scale: f32) {
+        self.begin(1);
+        self.scale = scale;
     }
 
     /// Начало кадра; `scale` — GUI scale (как у `TextRenderer`).
@@ -654,6 +668,10 @@ impl GuiPainter {
                 ..Default::default()
             });
             pass.set_index_buffer(self.ib.slice(..), wgpu::IndexFormat::Uint32);
+            if let Some([sx, sy, sw, sh]) = self.scissor {
+                let (sx, sy) = (sx.min(w), sy.min(h));
+                pass.set_scissor_rect(sx, sy, sw.min(w - sx), sh.min(h - sy));
+            }
             if pano.is_some() {
                 pass.set_pipeline(&self.pano_pipe);
                 pass.set_vertex_buffer(0, self.cube.slice(..));

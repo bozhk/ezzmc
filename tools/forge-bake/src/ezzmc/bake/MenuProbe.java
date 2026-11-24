@@ -76,6 +76,10 @@ final class MenuProbe {
     volatile boolean used;
     /** Экран, перехваченный в ScreenEvent.Opening (в игру не попал). */
     AbstractContainerScreen<?> pending;
+    /** TODO-519: экран мода падает при рендере, пока блок-сущность не досинхронизировалась —
+     * повторяем снимок до RENDER_RETRIES тиков. */
+    int renderTries;
+    static final int RENDER_RETRIES = 20;
     int tried;
     int failed;
 
@@ -145,7 +149,10 @@ final class MenuProbe {
                 AbstractContainerScreen<?> scr = pending;
                 pending = null;
                 try {
-                    capture(scr);
+                    if (!capture(scr)) {
+                        pending = scr; // повтор на следующем тике, экран не закрываем
+                        return false;
+                    }
                 } catch (Throwable t) {
                     System.out.println("[ezzmc-bake] capture failed: " + t);
                 }
@@ -186,6 +193,7 @@ final class MenuProbe {
         wait = 0;
         used = false;
         pending = null;
+        renderTries = 0;
         opened = false;
         placed = false;
         clicked = false;
@@ -248,16 +256,17 @@ final class MenuProbe {
         });
     }
 
-    void capture(AbstractContainerScreen<?> scr) {
+    /** false — рендер упал, стоит повторить на следующем тике. */
+    boolean capture(AbstractContainerScreen<?> scr) {
         AbstractContainerMenu menu = scr.getMenu();
         String name;
         try {
             name = BuiltInRegistries.MENU.getKey(menu.getType()).toString();
         } catch (Throwable t) {
-            return;
+            return true;
         }
         if (names.contains(name) || name.startsWith("minecraft:")) {
-            return;
+            return true;
         }
         String block = BuiltInRegistries.BLOCK.getKey(queue.get(qi)).toString();
         List<int[]> slots = new ArrayList<>();
@@ -269,6 +278,9 @@ final class MenuProbe {
         try {
             m = render(scr, name, slots, block);
         } catch (Throwable t) {
+            if (++renderTries < RENDER_RETRIES) {
+                return false;
+            }
             System.out.println("[ezzmc-bake] render failed " + name + ": " + t);
             m = new Menu(name, scr.getXSize(), scr.getYSize(), 0, 0, 0, 0, new byte[0], slots, block);
         }
@@ -283,6 +295,7 @@ final class MenuProbe {
         } catch (java.io.IOException e) {
             System.out.println("[ezzmc-bake] save failed " + name + ": " + e);
         }
+        return true;
     }
 
     Menu render(AbstractContainerScreen<?> scr, String name, List<int[]> slots, String block)

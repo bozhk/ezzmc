@@ -73,10 +73,28 @@ pub enum NetCmd {
     RenameItem(String),
     /// ServerboundSeenAdvancementsPacket: Some(вкладка) — OPENED_TAB, None — CLOSED_SCREEN.
     SeenAdvancements(Option<String>),
+    /// ServerboundClientCommandPacket(REQUEST_STATS) — при открытии экрана статистики.
+    RequestStats,
     /// Правка таблички (экран закрыт): позиция, передняя сторона, 4 строки.
     SignUpdate([i32; 3], bool, [String; 4]),
+    /// set_command_block: позиция, команда, режим (0 sequence/1 auto/2 redstone), флаги.
+    SetCommandBlock([i32; 3], String, u8, u8),
+    /// set_structure_block (см. `StructOut`).
+    SetStructureBlock(Box<crate::ui::structblock::StructOut>),
+    /// set_jigsaw_block (+ jigsaw_generate при `generate`).
+    SetJigsawBlock(Box<crate::ui::jigsaw::JigsawOut>),
+    /// change_game_mode (F3+N, F3+F4): id режима.
+    ChangeGameMode(i8),
+    /// set_test_block: позиция, режим, сообщение.
+    SetTestBlock([i32; 3], u8, String),
+    /// edit_book: слот, страницы, заголовок (Some — подписать).
+    EditBook(i32, Vec<String>, Option<String>),
     /// Кнопка меню (зачарование, камнерез, ткацкий станок, маяк): (id контейнера, кнопка).
     ContainerButton(i32, i32),
+    /// ServerboundPlaceRecipePacket (контейнер, id рецепта, shift).
+    PlaceRecipe(i32, i32, bool),
+    /// ServerboundRecipeBookChangeSettingsPacket (тип книги, open, filtering).
+    RecipeBookSettings(i32, bool, bool),
     /// ServerboundSetBeaconPacket (id реестра +1, 0 — пусто).
     SetBeacon(i32, i32),
     /// ServerboundSelectTradePacket (индекс предложения).
@@ -94,6 +112,8 @@ pub enum NetCmd {
     CreativeSlot(i16, Option<ezzmc_protocol::item::ItemStack>),
     /// 233: выбран слот хотбара (0–8).
     SetCarried(i16),
+    /// VANILLA: ServerboundPlayerCommandPacket(STOP_SLEEPING).
+    StopSleeping,
     /// TEMP-RAW-MOVE: один пакет движения с заданной позицией (A/B точного f64), физику не трогает.
     RawMove {
         pos: [f64; 3],
@@ -138,7 +158,14 @@ pub struct ExplosionEvt {
 
 pub enum NetEvt {
     /// Чат: оформленный текст и индикатор; overlay=true — action bar.
-    Chat(ezzmc_protocol::text::Component, crate::chat::Tag),
+    /// bool: сообщение игрока (player_chat/disguised_chat) — для фильтра chatVisibility;
+    /// Option — UUID отправителя player_chat (для скрытия игроков).
+    Chat(
+        ezzmc_protocol::text::Component,
+        crate::chat::Tag,
+        bool,
+        Option<u128>,
+    ),
     Overlay(ezzmc_protocol::text::Component),
     /// set_title_text/set_subtitle_text/set_titles_animation/clear_titles.
     Title(crate::titles::TitleEvt),
@@ -148,8 +175,14 @@ pub enum NetEvt {
     Map(Box<crate::maps::MapEvt>),
     /// update_advancements.
     Advancements(Box<crate::advancements::Update>),
+    /// recipe_book_add/remove/settings (ClientRecipeBook + RecipeToast).
+    RecipeBook(crate::recipebook::Update),
+    /// place_ghost_recipe: (containerId, RecipeDisplay) — призрак в сетке (TODO-323c).
+    GhostRecipe(i32, crate::recipebook::Ghost),
     /// select_advancements_tab.
     AdvTab(Option<String>),
+    /// award_stats.
+    Stats(crate::stats::Update),
     /// Список игроков (Tab): player_info_update/remove, tab_list.
     Tab(Box<crate::tablist::TabEvt>),
     /// boss_event: (uuid, операция).
@@ -177,6 +210,8 @@ pub enum NetEvt {
     Hardcore(bool),
     /// VANILLA: LocalPlayer#setShowDeathScreen (Login / game_event IMMEDIATE_RESPAWN).
     ShowDeathScreen(bool),
+    /// VANILLA: handleGameEvent ARROW_HIT_PLAYER (6) — «дзынь» при попадании своей стрелы.
+    ArrowHitPlayer,
     /// Пакет Respawn (VANILLA: handleRespawn закрывает DeathScreen).
     Respawned,
     /// VANILLA: handlePlayerCombatKill для локального игрока: причина смерти.
@@ -309,6 +344,7 @@ fn send_tick_action(h: &mut PlayHandler, c: &mut Connection, cmd: NetCmd) -> Res
             .send_interact(c, entity_id, loc, secondary)
             .map_err(|x| e(&x)),
         NetCmd::SetCarried(s) => h.send_set_carried_item(c, s).map_err(|x| e(&x)),
+        NetCmd::StopSleeping => h.send_stop_sleeping(c).map_err(|x| e(&x)),
         NetCmd::Swing => h.send_swing(c).map_err(|x| e(&x)),
         NetCmd::UseItem { seq, yaw, pitch } => {
             h.send_use_item(c, seq, yaw, pitch).map_err(|x| e(&x))
@@ -414,6 +450,8 @@ fn run(
         crate::painting::set_registry(&r.entries);
     }
     let chat_types = crate::chatnet::chat_types(reg("minecraft:chat_type"));
+    // VANILLA: ссылки сервера из Configuration (или пустой список).
+    crate::dialog::set_server_links(cfg.server_links.as_deref().unwrap_or(&[0]));
     if let Ok(mut g) = crate::dialog::DIALOG_REG.lock() {
         *g = reg("minecraft:dialog").map_or_else(Vec::new, |r| r.entries.clone());
     }
@@ -726,6 +764,12 @@ fn run(
                 NetCmd::ContainerButton(id, b) => {
                     h.send_container_button(&mut c, id, b).map_err(|x| e(&x))?
                 }
+                NetCmd::PlaceRecipe(id, r, max) => {
+                    h.send_place_recipe(&mut c, id, r, max).map_err(|x| e(&x))?
+                }
+                NetCmd::RecipeBookSettings(t, open, filt) => h
+                    .send_recipe_book_settings(&mut c, t, open, filt)
+                    .map_err(|x| e(&x))?,
                 NetCmd::SetBeacon(a, b) => h.send_set_beacon(&mut c, a, b).map_err(|x| e(&x))?,
                 NetCmd::SelectBundle(sl, i) => h
                     .send_select_bundle_item(&mut c, sl, i)
@@ -734,6 +778,56 @@ fn run(
                 NetCmd::SignUpdate(p, front, lines) => h
                     .send_sign_update(&mut c, p, front, &lines)
                     .map_err(|x| e(&x))?,
+                NetCmd::SetCommandBlock(p, cmd, mode, flags) => h
+                    .send_set_command_block(&mut c, p, &cmd, mode, flags)
+                    .map_err(|x| e(&x))?,
+                NetCmd::SetStructureBlock(o) => h
+                    .send_set_structure_block(
+                        &mut c,
+                        o.pos,
+                        o.update,
+                        o.mode,
+                        &o.name,
+                        o.offset,
+                        o.size,
+                        o.mirror,
+                        o.rot,
+                        &o.data,
+                        o.integrity,
+                        o.seed,
+                        o.flags,
+                    )
+                    .map_err(|x| e(&x))?,
+                NetCmd::ChangeGameMode(m) => {
+                    h.send_change_game_mode(&mut c, m).map_err(|x| e(&x))?
+                }
+                NetCmd::SetTestBlock(p, mode, msg) => h
+                    .send_set_test_block(&mut c, p, mode, &msg)
+                    .map_err(|x| e(&x))?,
+                NetCmd::SetJigsawBlock(o) => {
+                    h.send_set_jigsaw_block(
+                        &mut c,
+                        o.pos,
+                        [&o.name, &o.target, &o.pool],
+                        &o.final_state,
+                        o.joint,
+                        o.selection,
+                        o.placement,
+                    )
+                    .map_err(|x| e(&x))?;
+                    if let Some((levels, keep)) = o.generate {
+                        h.send_jigsaw_generate(&mut c, o.pos, levels, keep)
+                            .map_err(|x| e(&x))?;
+                    }
+                }
+                NetCmd::EditBook(slot, pages, title) => {
+                    // Grim ExploitB: use_item с пером должен дойти раньше edit_book — не ждём тика.
+                    for a in deferred.drain(..) {
+                        send_tick_action(&mut h, &mut c, a).map_err(|x| e(&x))?;
+                    }
+                    h.send_edit_book(&mut c, slot, &pages, title.as_deref())
+                        .map_err(|x| e(&x))?
+                }
                 NetCmd::RenameItem(name) => h.send_rename_item(&mut c, &name).map_err(|x| e(&x))?,
                 NetCmd::SeenAdvancements(tab) => h
                     .send_seen_advancements(&mut c, tab.as_deref())
@@ -744,6 +838,7 @@ fn run(
                 NetCmd::ClientInfo(i) => {
                     h.send_client_information(&mut c, &i).map_err(|x| e(&x))?
                 }
+                NetCmd::StopSleeping => h.send_stop_sleeping(&mut c).map_err(|x| e(&x))?,
                 NetCmd::SetCarried(_) => deferred.push(cmd),
                 // TEMP-RAW-MOVE: пишем позицию в h.player на время отправки и возвращаем обратно.
                 NetCmd::RawMove {
@@ -763,6 +858,7 @@ fn run(
                     r.map_err(|x| e(&x))?;
                 }
                 NetCmd::Respawn => h.send_respawn(&mut c).map_err(|x| e(&x))?,
+                NetCmd::RequestStats => h.send_request_stats(&mut c).map_err(|x| e(&x))?,
                 NetCmd::Swing => deferred.push(cmd),
                 NetCmd::UseItem { .. } => deferred.push(cmd),
                 NetCmd::UseItemOn { .. } => deferred.push(cmd),
@@ -900,6 +996,13 @@ fn run(
                             // После экрана загрузки ваниль снова шлёт Player Loaded.
                             loaded_sent = false;
                             player_dead = false;
+                            // VANILLA: handleRespawn создаёт нового LocalPlayer (поза STANDING).
+                            if let Ok(mut g) = shared.lock() {
+                                if let Some(l) = g.as_mut() {
+                                    l.own_pose = 0;
+                                    l.own_sleep_pos = None;
+                                }
+                            }
                             let _ = tx.send(NetEvt::Respawned);
                             let _ = tx.send(NetEvt::GameMode(spawn.game_type));
                             if !changed {
@@ -990,6 +1093,9 @@ fn run(
                     tracing::trace!("game_event {event} {param}");
                     if event == ezzmc_net::play::game_event::CHANGE_GAME_MODE {
                         let _ = tx.send(NetEvt::GameMode(param as i8));
+                    }
+                    if event == 6 {
+                        let _ = tx.send(NetEvt::ArrowHitPlayer);
                     }
                     // VANILLA: handleGameEvent IMMEDIATE_RESPAWN (11) → setShowDeathScreen(param == 0).
                     if event == 11 {
@@ -1088,13 +1194,13 @@ fn run(
                                 if o {
                                     NetEvt::Overlay(c)
                                 } else {
-                                    NetEvt::Chat(c, Tag::System)
+                                    NetEvt::Chat(c, Tag::System, false, None)
                                 }
                             }),
                             "player_chat" => crate::chatnet::parse_player(&body, &chat_types)
-                                .map(|c| NetEvt::Chat(c, Tag::NotSecure)),
+                                .map(|(c, id)| NetEvt::Chat(c, Tag::NotSecure, true, Some(id))),
                             _ => crate::chatnet::parse_disguised(&body, &chat_types)
-                                .map(|c| NetEvt::Chat(c, Tag::System)),
+                                .map(|c| NetEvt::Chat(c, Tag::Player, true, None)),
                         };
                         match r {
                             Ok(ev) => {
@@ -1163,6 +1269,44 @@ fn run(
                         }
                         continue;
                     }
+                    if matches!(
+                        pname,
+                        "recipe_book_add" | "recipe_book_remove" | "recipe_book_settings"
+                    ) {
+                        // VANILLA: ClientPacketListener#handleRecipeBookAdd/Remove/Settings.
+                        let r = match pname {
+                            "recipe_book_add" => crate::recipebook::parse_add(&body),
+                            "recipe_book_remove" => crate::recipebook::parse_remove(&body),
+                            _ => crate::recipebook::parse_settings(&body),
+                        };
+                        match r {
+                            Ok(u) => {
+                                let _ = tx.send(NetEvt::RecipeBook(u));
+                            }
+                            Err(x) => tracing::warn!("{pname}: {x}"),
+                        }
+                        continue;
+                    }
+                    if pname == "place_ghost_recipe" {
+                        // VANILLA: ClientPacketListener#handlePlaceRecipe.
+                        match crate::recipebook::parse_ghost(&body) {
+                            Ok((c, g)) => {
+                                let _ = tx.send(NetEvt::GhostRecipe(c, g));
+                            }
+                            Err(x) => tracing::warn!("place_ghost_recipe: {x}"),
+                        }
+                        continue;
+                    }
+                    if pname == "award_stats" {
+                        // VANILLA: ClientPacketListener#handleAwardStats.
+                        match crate::stats::parse(&body) {
+                            Ok(u) => {
+                                let _ = tx.send(NetEvt::Stats(u));
+                            }
+                            Err(x) => tracing::warn!("award_stats: {x}"),
+                        }
+                        continue;
+                    }
                     if pname == "select_advancements_tab" {
                         match crate::advancements::parse_select(&body) {
                             Ok(tab) => {
@@ -1198,6 +1342,10 @@ fn run(
                             }
                             Err(x) => tracing::warn!("boss_event: {x}"),
                         }
+                        continue;
+                    }
+                    if pname == "server_links" {
+                        crate::dialog::set_server_links(&body);
                         continue;
                     }
                     if pname == "show_dialog" {

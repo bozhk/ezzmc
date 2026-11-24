@@ -188,6 +188,37 @@ fn load_version(game: &Path, id: &str, p: Progress) -> R<Value> {
     Ok(v)
 }
 
+/// Для ezzmc: только json версии, client.jar и ассеты (без библиотек и natives).
+pub fn prepare_resources(game: &Path, id: &str, p: Progress) -> R<()> {
+    let v = load_version(game, id, p)?;
+    let jar = game.join("versions").join(id).join(format!("{id}.jar"));
+    if let Some(c) = v["downloads"]["client"].as_object() {
+        p("Клиент Minecraft", 0.02);
+        download(
+            c["url"].as_str().unwrap_or_default(),
+            &jar,
+            c["sha1"].as_str(),
+        )?;
+    } else if !jar.is_file() {
+        return Err(format!("нет client.jar для {id}"));
+    }
+    let ai = &v["assetIndex"];
+    let ai_id = ai["id"]
+        .as_str()
+        .or(v["assets"].as_str())
+        .unwrap_or("legacy");
+    let idx_path = game.join("assets/indexes").join(format!("{ai_id}.json"));
+    if let Some(url) = ai["url"].as_str() {
+        p("Индекс ассетов", 0.3);
+        download(url, &idx_path, ai["sha1"].as_str())?;
+    }
+    if let Ok(b) = std::fs::read(&idx_path) {
+        let idx: Value = serde_json::from_slice(&b).map_err(|e| e.to_string())?;
+        download_assets(game, &idx, p)?;
+    }
+    Ok(())
+}
+
 /// Скачать недостающее и вернуть всё нужное для запуска.
 pub fn prepare(game: &Path, id: &str, p: Progress) -> R<Prepared> {
     let v = load_version(game, id, p)?;
@@ -553,9 +584,63 @@ pub fn java_major(java: &str) -> Option<u32> {
 /// Найденные Java: PATH, /usr/lib/jvm, TLauncher/Mojang JRE.
 pub fn find_javas() -> Vec<(String, u32)> {
     let mut cands: Vec<String> = vec!["java".into()];
+    if let Some(h) = std::env::var_os("JAVA_HOME") {
+        cands.push(java_bin(Path::new(&h)));
+    }
+    if cfg!(windows) {
+        for var in ["ProgramFiles", "ProgramFiles(x86)"] {
+            let Some(pf) = std::env::var_os(var).map(PathBuf::from) else {
+                continue;
+            };
+            for vendor in [
+                "Java",
+                "Eclipse Adoptium",
+                "Microsoft",
+                "Zulu",
+                "BellSoft",
+                "Amazon Corretto",
+                "Semeru",
+            ] {
+                for e in std::fs::read_dir(pf.join(vendor))
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
+                    cands.push(java_bin(&e.path()));
+                }
+            }
+        }
+        // Mojang JRE лаунчера: %APPDATA%\.minecraft\runtime, %LOCALAPPDATA%\Packages\...\runtime
+        if let Some(a) = std::env::var_os("APPDATA").map(PathBuf::from) {
+            for e in std::fs::read_dir(a.join(".minecraft/runtime"))
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                cands.extend(walk_java(&e.path(), 4));
+            }
+        }
+        if let Some(l) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+            for e in std::fs::read_dir(l.join("Packages"))
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                if e.file_name().to_string_lossy().contains("Minecraft") {
+                    for r in std::fs::read_dir(e.path().join("LocalCache/Local/runtime"))
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                    {
+                        cands.extend(walk_java(&r.path(), 4));
+                    }
+                }
+            }
+        }
+    }
     for d in ["/usr/lib/jvm", "/usr/lib64/jvm"] {
         for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
-            cands.push(e.path().join("bin/java").to_string_lossy().into_owned());
+            cands.push(java_bin(&e.path()));
         }
     }
     let home = crate::config::home();
@@ -586,11 +671,18 @@ pub fn find_javas() -> Vec<(String, u32)> {
         .collect()
 }
 
+fn java_bin(home: &Path) -> String {
+    home.join("bin")
+        .join(if cfg!(windows) { "java.exe" } else { "java" })
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn walk_java(dir: &Path, depth: u32) -> Vec<String> {
     let mut out = Vec::new();
-    let j = dir.join("bin/java");
-    if j.is_file() {
-        out.push(j.to_string_lossy().into_owned());
+    let j = java_bin(dir);
+    if Path::new(&j).is_file() {
+        out.push(j);
         return out;
     }
     if depth == 0 {

@@ -32,6 +32,12 @@ const fn d(key: &'static str, lang: &'static str, kind: Kind, default: &'static 
 
 use Kind::{Cycle, Log, Slider, Toggle};
 
+const CHAT_VIS: &[(&str, &str)] = &[
+    ("0", "options.chat.visibility.full"),
+    ("1", "options.chat.visibility.system"),
+    ("2", "options.chat.visibility.hidden"),
+];
+
 const HOLD_TOGGLE: &[(&str, &str)] = &[
     ("false", "options.key.hold"),
     ("true", "options.key.toggle"),
@@ -40,6 +46,13 @@ const HOLD_TOGGLE: &[(&str, &str)] = &[
 pub const FOV: Def = d("fov", "options.fov", Slider(30.0, 110.0, 1.0), "70.0");
 
 pub const VIDEO: &[Def] = &[
+    // VANILLA: VideoSettingsScreen — порядок «Quality & Performance» → «Display» → «Preferences».
+    d(
+        "biomeBlendRadius",
+        "options.biomeBlendRadius",
+        Slider(0.0, 7.0, 1.0),
+        "2",
+    ),
     d(
         "renderDistance",
         "options.renderDistance",
@@ -47,25 +60,31 @@ pub const VIDEO: &[Def] = &[
         "12",
     ),
     d(
-        "maxFps",
-        "options.framerateLimit",
-        Slider(10.0, 260.0, 10.0),
-        "120",
-    ),
-    d("enableVsync", "options.vsync", Toggle, "true"),
-    d("guiScale", "options.guiScale", Slider(0.0, 8.0, 1.0), "0"),
-    d("gamma", "options.gamma", Slider(0.0, 1.0, 0.0), "0.5"),
-    d("fullscreen", "options.fullscreen", Toggle, "false"),
-    d("bobView", "options.viewBobbing", Toggle, "true"),
-    d(
-        "graphicsMode",
-        "options.graphics",
+        "prioritizeChunkUpdates",
+        "options.prioritizeChunkUpdates",
         Cycle(&[
-            ("0", "options.graphics.fast"),
-            ("1", "options.graphics.fancy"),
-            ("2", "options.graphics.fabulous"),
+            ("0", "options.prioritizeChunkUpdates.none"),
+            ("1", "options.prioritizeChunkUpdates.byPlayer"),
+            ("2", "options.prioritizeChunkUpdates.nearby"),
         ]),
-        "1",
+        "0",
+    ),
+    d(
+        "simulationDistance",
+        "options.simulationDistance",
+        Slider(5.0, 32.0, 1.0),
+        "12",
+    ),
+    d("ao", "options.ao", Toggle, "true"),
+    d(
+        "renderClouds",
+        "options.renderClouds",
+        Cycle(&[
+            ("false", "options.off"),
+            ("fast", "options.clouds.fast"),
+            ("true", "options.clouds.fancy"),
+        ]),
+        "true",
     ),
     d(
         "particles",
@@ -78,6 +97,93 @@ pub const VIDEO: &[Def] = &[
         "0",
     ),
     d(
+        "mipmapLevels",
+        "options.mipmapLevels",
+        Slider(0.0, 4.0, 1.0),
+        "4",
+    ),
+    d("entityShadows", "options.entityShadows", Toggle, "true"),
+    d(
+        "entityDistanceScaling",
+        "options.entityDistanceScaling",
+        Slider(0.5, 5.0, 0.25),
+        "1.0",
+    ),
+    d(
+        "menuBackgroundBlurriness",
+        "options.accessibility.menu_background_blurriness",
+        Slider(0.0, 10.0, 1.0),
+        "5",
+    ),
+    d(
+        "cloudRange",
+        "options.renderCloudsDistance",
+        Slider(2.0, 128.0, 1.0),
+        "128",
+    ),
+    // VANILLA: Options#cutoutLeaves («See-Through Leaves»).
+    d("cutoutLeaves", "options.cutoutLeaves", Toggle, "true"),
+    d(
+        "improvedTransparency",
+        "options.improvedTransparency",
+        Toggle,
+        "false",
+    ),
+    d(
+        "textureFiltering",
+        "options.textureFiltering",
+        Cycle(&[
+            ("0", "options.textureFiltering.none"),
+            ("1", "options.textureFiltering.rgss"),
+            ("2", "options.textureFiltering.anisotropic"),
+        ]),
+        "0",
+    ),
+    d(
+        "maxAnisotropyBit",
+        "options.maxAnisotropy",
+        Slider(1.0, 3.0, 1.0),
+        "2",
+    ),
+    d(
+        "weatherRadius",
+        "options.weatherRadius",
+        Slider(3.0, 10.0, 1.0),
+        "10",
+    ),
+    d(
+        "maxFps",
+        "options.framerateLimit",
+        Slider(10.0, 260.0, 10.0),
+        "120",
+    ),
+    d("enableVsync", "options.vsync", Toggle, "true"),
+    d(
+        "inactivityFpsLimit",
+        "options.inactivityFpsLimit",
+        Cycle(&[
+            ("minimized", "options.inactivityFpsLimit.minimized"),
+            ("afk", "options.inactivityFpsLimit.afk"),
+        ]),
+        "afk",
+    ),
+    d("guiScale", "options.guiScale", Slider(0.0, 8.0, 1.0), "0"),
+    d("fullscreen", "options.fullscreen", Toggle, "false"),
+    d(
+        "exclusiveFullscreen",
+        "options.exclusiveFullscreen",
+        Toggle,
+        "false",
+    ),
+    d("gamma", "options.gamma", Slider(0.0, 1.0, 0.0), "0.5"),
+    d(
+        "showAutosaveIndicator",
+        "options.autosaveIndicator",
+        Toggle,
+        "true",
+    ),
+    d("vignette", "options.vignette", Toggle, "true"),
+    d(
         "attackIndicator",
         "options.attackIndicator",
         Cycle(&[
@@ -87,9 +193,23 @@ pub const VIDEO: &[Def] = &[
         ]),
         "1",
     ),
-    d("entityShadows", "options.entityShadows", Toggle, "true"),
-    // VANILLA: Options#cutoutLeaves («See-Through Leaves»).
-    d("cutoutLeaves", "options.cutoutLeaves", Toggle, "true"),
+    d(
+        "chunkSectionFadeInTime",
+        "options.chunkFade",
+        Slider(0.0, 2.0, 0.05),
+        "0.75",
+    ),
+    d("bobView", "options.viewBobbing", Toggle, "true"),
+    d(
+        "graphicsMode",
+        "options.graphics",
+        Cycle(&[
+            ("0", "options.graphics.fast"),
+            ("1", "options.graphics.fancy"),
+            ("2", "options.graphics.fabulous"),
+        ]),
+        "1",
+    ),
     // Не ваниль: путь отрисовки кубов (compute: куллинг/Hi-Z на GPU + MDI; выкл — ванильный Packed).
     d(
         "computeRenderer",
@@ -99,11 +219,18 @@ pub const VIDEO: &[Def] = &[
     ),
 ];
 
+/// Индексы в [`VIDEO`] (порядок ванильный, см. тест `video_indices`).
+pub const RENDER_DISTANCE: usize = 1;
+pub const MAX_FPS: usize = 17;
+pub const VSYNC: usize = 18;
+pub const GUI_SCALE: usize = 20;
+pub const FULLSCREEN: usize = 21;
+
 /// Индекс «Compute Renderer» в [`VIDEO`].
-pub const COMPUTE_RENDERER: usize = 12;
+pub const COMPUTE_RENDERER: usize = 30;
 
 /// Индекс «See-Through Leaves» в [`VIDEO`].
-pub const CUTOUT_LEAVES: usize = 11;
+pub const CUTOUT_LEAVES: usize = 12;
 
 pub const SOUND: &[Def] = &[
     d(
@@ -166,6 +293,41 @@ pub const SOUND: &[Def] = &[
         Slider(0.0, 1.0, 0.0),
         "1.0",
     ),
+    // VANILLA: SoundOptionsScreen#addOptions — устройство, субтитры+направленный звук, частота музыки+toast.
+    // Выбор устройства не реализован (cpal берёт системное): единственное значение «по умолчанию».
+    d(
+        "soundDevice",
+        "options.audioDevice",
+        Cycle(&[("", "options.audioDevice.default")]),
+        "",
+    ),
+    d("showSubtitles", "options.showSubtitles", Toggle, "false"),
+    d(
+        "directionalAudio",
+        "options.directionalAudio",
+        Toggle,
+        "false",
+    ),
+    d(
+        "musicFrequency",
+        "options.music_frequency",
+        Cycle(&[
+            ("DEFAULT", "options.music_frequency.default"),
+            ("FREQUENT", "options.music_frequency.frequent"),
+            ("CONSTANT", "options.music_frequency.constant"),
+        ]),
+        "DEFAULT",
+    ),
+    d(
+        "musicToast",
+        "options.musicToast",
+        Cycle(&[
+            ("never", "options.musicToast.never"),
+            ("pause", "options.musicToast.pauseMenu"),
+            ("pause_and_toast", "options.musicToast.pauseMenuAndToast"),
+        ]),
+        "never",
+    ),
 ];
 
 pub const SKIN: &[Def] = &[
@@ -213,6 +375,13 @@ pub const SKIN: &[Def] = &[
 ];
 
 pub const CHAT: &[Def] = &[
+    // VANILLA: Options#chatVisibility (ChatVisiblity: FULL/SYSTEM/HIDDEN, в файле — id).
+    d(
+        "chatVisibility",
+        "options.chat.visibility",
+        Cycle(CHAT_VIS),
+        "0",
+    ),
     d("chatColors", "options.chat.color", Toggle, "true"),
     d("chatLinks", "options.chat.links", Toggle, "true"),
     d(
@@ -324,7 +493,90 @@ pub const CONTROLS: &[Def] = &[
 ];
 
 pub const ACCESSIBILITY: &[Def] = &[
+    // VANILLA: AccessibilityOptionsScreen#options (без narrator/highContrast/narratorHotkey — нет озвучки и пака).
     d("showSubtitles", "options.showSubtitles", Toggle, "false"),
+    d(
+        "menuBackgroundBlurriness",
+        "options.accessibility.menu_background_blurriness",
+        Slider(0.0, 10.0, 1.0),
+        "5",
+    ),
+    d(
+        "textBackgroundOpacity",
+        "options.accessibility.text_background_opacity",
+        Slider(0.0, 1.0, 0.0),
+        "0.5",
+    ),
+    d(
+        "backgroundForChatOnly",
+        "options.accessibility.text_background",
+        Cycle(&[
+            ("true", "options.accessibility.text_background.chat"),
+            ("false", "options.accessibility.text_background.everywhere"),
+        ]),
+        "true",
+    ),
+    d(
+        "chatOpacity",
+        "options.chat.opacity",
+        Slider(0.0, 1.0, 0.0),
+        "1.0",
+    ),
+    d(
+        "chatLineSpacing",
+        "options.chat.line_spacing",
+        Slider(0.0, 1.0, 0.0),
+        "0.0",
+    ),
+    d(
+        "chatDelay",
+        "options.chat.delay_instant",
+        Slider(0.0, 6.0, 0.1),
+        "0.0",
+    ),
+    d(
+        "notificationDisplayTime",
+        "options.notifications.display_time",
+        Slider(0.5, 10.0, 0.1),
+        "1.0",
+    ),
+    d("bobView", "options.viewBobbing", Toggle, "true"),
+    d(
+        "screenEffectScale",
+        "options.screenEffectScale",
+        Slider(0.0, 1.0, 0.0),
+        "1.0",
+    ),
+    d(
+        "fovEffectScale",
+        "options.fovEffectScale",
+        Slider(0.0, 1.0, 0.0),
+        "1.0",
+    ),
+    d(
+        "darknessEffectScale",
+        "options.darknessEffectScale",
+        Slider(0.0, 1.0, 0.0),
+        "1.0",
+    ),
+    d(
+        "damageTiltStrength",
+        "options.damageTiltStrength",
+        Slider(0.0, 1.0, 0.0),
+        "1.0",
+    ),
+    d(
+        "glintSpeed",
+        "options.glintSpeed",
+        Slider(0.0, 1.0, 0.0),
+        "0.5",
+    ),
+    d(
+        "glintStrength",
+        "options.glintStrength",
+        Slider(0.0, 1.0, 0.0),
+        "0.75",
+    ),
     d(
         "hideLightningFlashes",
         "options.hideLightningFlashes",
@@ -342,6 +594,24 @@ pub const ACCESSIBILITY: &[Def] = &[
         "options.accessibility.panorama_speed",
         Slider(0.0, 1.0, 0.0),
         "1.0",
+    ),
+    d(
+        "hideSplashTexts",
+        "options.hideSplashTexts",
+        Toggle,
+        "false",
+    ),
+    d(
+        "rotateWithMinecart",
+        "options.rotateWithMinecart",
+        Toggle,
+        "false",
+    ),
+    d(
+        "highContrastBlockOutline",
+        "options.accessibility.high_contrast_block_outline",
+        Toggle,
+        "false",
     ),
 ];
 
@@ -407,6 +677,21 @@ impl Options {
         }
     }
 
+    /// Значение опции из ACCESSIBILITY по ключу.
+    pub fn acc(&self, key: &str) -> f32 {
+        ACCESSIBILITY
+            .iter()
+            .find(|d| d.key == key)
+            .map_or(0.0, |d| self.f32(d))
+    }
+
+    pub fn acc_bool(&self, key: &str) -> bool {
+        ACCESSIBILITY
+            .iter()
+            .find(|d| d.key == key)
+            .is_some_and(|d| self.get(d) == "true")
+    }
+
     pub fn f32(&self, def: &Def) -> f32 {
         self.get(def)
             .parse()
@@ -439,14 +724,27 @@ mod tests {
         let p = std::env::temp_dir().join("ezzmc_opts_test.txt");
         std::fs::write(&p, "foo:bar\nmaxFps:60\n").unwrap();
         let mut o = Options::load(&p);
-        assert_eq!(o.f32(&VIDEO[1]), 60.0);
-        assert_eq!(o.get(&VIDEO[0]), "12");
+        assert_eq!(o.f32(&VIDEO[MAX_FPS]), 60.0);
+        assert_eq!(o.get(&VIDEO[RENDER_DISTANCE]), "12");
         o.set("renderDistance", "8".into());
         o.save();
         let o2 = Options::load(&p);
-        assert_eq!(o2.get(&VIDEO[0]), "8");
+        assert_eq!(o2.get(&VIDEO[RENDER_DISTANCE]), "8");
         assert_eq!(o2.kv[0].0, "foo");
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn video_indices() {
+        for (i, k) in [
+            (RENDER_DISTANCE, "renderDistance"),
+            (MAX_FPS, "maxFps"),
+            (VSYNC, "enableVsync"),
+            (GUI_SCALE, "guiScale"),
+            (FULLSCREEN, "fullscreen"),
+        ] {
+            assert_eq!(VIDEO[i].key, k);
+        }
     }
 
     #[test]

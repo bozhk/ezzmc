@@ -108,8 +108,12 @@ pub enum BakeTint {
     None,
     /// Константный цвет 0xRRGGBB (старший байт игнорируется).
     Color(u32),
-    /// Обработчик требует уровень/позицию (обычно биомный цвет) — TODO-509.
+    /// Обработчик требует уровень/позицию, вид цвета не распознан.
     NeedsLevel,
+    /// Биомный цвет травы / листвы / воды (дампер узнал по пробному уровню, TODO-509).
+    Grass,
+    Foliage,
+    Water,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -396,6 +400,9 @@ impl ModBake {
                 tints.push(match status {
                     1 => BakeTint::Color(c & 0xFF_FFFF),
                     2 => BakeTint::NeedsLevel,
+                    3 => BakeTint::Grass,
+                    4 => BakeTint::Foliage,
+                    5 => BakeTint::Water,
                     _ => BakeTint::None,
                 });
             }

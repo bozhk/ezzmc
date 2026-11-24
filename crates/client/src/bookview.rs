@@ -77,6 +77,26 @@ pub fn pages(s: &ItemStack) -> Vec<Component> {
         .unwrap_or_default()
 }
 
+/// Страницы пера (writable_book_content) как строки. VANILLA: WritableBookContent#getPages.
+pub fn writable_pages(s: &ItemStack) -> Vec<String> {
+    let Some(b) = comp(s, "writable_book_content") else {
+        return Vec::new();
+    };
+    let mut r = Reader::new(b);
+    let mut out = Vec::new();
+    let n = r.var_int().unwrap_or(0).max(0);
+    for _ in 0..n {
+        match r.string(1024) {
+            Ok(p) => out.push(p),
+            Err(_) => break,
+        }
+        if r.optional(|r| r.string(1024)).is_err() {
+            break;
+        }
+    }
+    out
+}
+
 /// Текущая страница, зажатая в пределы книги.
 fn current(o: &OpenMenu, count: usize) -> usize {
     (o.data[0].max(0) as usize).min(count.saturating_sub(1))

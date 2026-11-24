@@ -37,6 +37,8 @@ pub enum Scr {
 pub enum Out {
     Command(String),
     Custom(String, Option<Tag>),
+    /// open_url — подтверждение показывает ui/mod.rs (ConfirmLinkScreen).
+    OpenUrl(String),
 }
 
 impl Ds {
@@ -163,7 +165,7 @@ fn run(ds: &Ds, act: &Act, out: &mut Vec<Out>, clip: &mut Option<String>) -> Opt
             Click::Custom(id, p) => out.push(Out::Custom(id.clone(), p.clone())),
             Click::CopyToClipboard(s) => *clip = Some(s.clone()),
             Click::ShowDialog(d) => return Some(d.clone()),
-            Click::OpenUrl(u) => tracing::info!("диалог: open_url {u} (не поддержано)"),
+            Click::OpenUrl(u) => out.push(Out::OpenUrl(u.clone())),
             Click::SuggestCommand(s) => {
                 tracing::info!("диалог: suggest_command {s} (не поддержано)")
             }

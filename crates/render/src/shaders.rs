@@ -38,10 +38,14 @@ pub enum Shader {
     ItemInst,
     /// `world_border.vsh/fsh`
     WorldBorder,
+    /// `rendertype_end_portal.vsh/fsh`
+    EndPortal,
+    /// `rendertype_beacon_beam.vsh/fsh`
+    BeaconBeam,
 }
 
 impl Shader {
-    pub const ALL: [Shader; 13] = [
+    pub const ALL: [Shader; 15] = [
         Shader::Terrain,
         Shader::Sky,
         Shader::Stars,
@@ -55,6 +59,8 @@ impl Shader {
         Shader::Skinned,
         Shader::ItemInst,
         Shader::WorldBorder,
+        Shader::EndPortal,
+        Shader::BeaconBeam,
     ];
 
     fn body(self) -> &'static str {
@@ -72,6 +78,8 @@ impl Shader {
             Shader::Skinned => include_str!("shaders/skinned.wgsl"),
             Shader::ItemInst => include_str!("shaders/itemlit.wgsl"),
             Shader::WorldBorder => include_str!("shaders/world_border.wgsl"),
+            Shader::EndPortal => include_str!("shaders/end_portal.wgsl"),
+            Shader::BeaconBeam => include_str!("shaders/beacon_beam.wgsl"),
         }
     }
 

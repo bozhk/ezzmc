@@ -27,7 +27,10 @@ pub fn minecraft_dirs() -> Vec<PathBuf> {
     {
         v.push(d);
     }
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+    {
         v.push(home.join(".minecraft"));
         v.push(home.join(".var/app/com.mojang.Minecraft/data/minecraft"));
         v.push(home.join("Library/Application Support/minecraft"));

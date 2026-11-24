@@ -69,7 +69,11 @@ impl Connection {
     pub fn connect(address: &str) -> NetResult<Self> {
         let (host, port) = srv::parse_address(address);
         let (thost, tport) = srv::resolve_target(&host, port);
-        let addrs = srv::resolve_addrs(&thost, tport)?;
+        // VANILLA: ConnectScreen — пустой/неразрешённый адрес → «Unknown host».
+        let addrs = srv::resolve_addrs(&thost, tport)
+            .ok()
+            .filter(|a| !a.is_empty())
+            .ok_or_else(|| NetError::Disconnected("Unknown host".into()))?;
         let mut last: Option<std::io::Error> = None;
         for a in addrs {
             match TcpStream::connect_timeout(&a, CONNECT_TIMEOUT) {
@@ -77,9 +81,18 @@ impl Connection {
                 Err(e) => last = Some(e),
             }
         }
-        Err(last
-            .map(NetError::Io)
-            .unwrap_or(NetError::Timeout("нет адресов для подключения")))
+        // VANILLA: ConnectScreen#connect — текст исключения Netty без «host:port»
+        // (VANILLA-UNSURE: формулировки Java для типовых ошибок).
+        Err(NetError::Disconnected(match last.map(|e| e.kind()) {
+            Some(std::io::ErrorKind::ConnectionRefused) => {
+                "Connection refused: no further information".into()
+            }
+            Some(std::io::ErrorKind::TimedOut) => {
+                "Connection timed out: no further information".into()
+            }
+            Some(k) => format!("{k}"),
+            None => "Unknown host".into(),
+        }))
     }
 
     pub fn from_stream(stream: TcpStream) -> NetResult<Self> {

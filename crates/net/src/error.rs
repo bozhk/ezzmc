@@ -14,7 +14,7 @@ pub enum NetError {
     Closed,
     #[error("таймаут: {0}")]
     Timeout(&'static str),
-    #[error("сервер отключил: {0}")]
+    #[error("{0}")]
     Disconnected(String),
 }
 

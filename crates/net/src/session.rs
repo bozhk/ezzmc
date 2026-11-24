@@ -119,6 +119,8 @@ pub struct ServerConfig {
     pub tag_sets: Vec<TagSet>,
     pub enabled_features: Vec<String>,
     pub server_known_packs: Vec<KnownPack>,
+    /// Тело последнего пакета `server_links` из Configuration (разбирает клиент).
+    pub server_links: Option<Vec<u8>>,
 }
 
 impl ServerConfig {
@@ -232,6 +234,10 @@ pub fn login_online(
     login(conn, ids, &session.name, uuid, Some(session))
 }
 
+/// Статус входа для ConnectScreen: 0 — connecting, 1 — authorizing, 2 — encrypting.
+// VANILLA: ClientHandshakePacketListenerImpl#handleHello (updateStatus)
+pub static LOGIN_STATUS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 // VANILLA: ClientHandshakePacketListenerImpl#handleHello
 fn answer_hello(
     conn: &mut Connection,
@@ -249,10 +255,12 @@ fn answer_hello(
     let should_auth = r.bool().unwrap_or(true);
     let secret = crate::crypt::random_secret();
     if should_auth {
+        LOGIN_STATUS.store(1, std::sync::atomic::Ordering::Relaxed);
         let hash = ezzmc_auth::session::server_hash(&server_id, &secret, &key);
         ezzmc_auth::session::join_server(&session.access_token, &session.uuid, &hash)
             .map_err(|e| fail(format!("вход в сессию Mojang: {e}")))?;
     }
+    LOGIN_STATUS.store(2, std::sync::atomic::Ordering::Relaxed);
     let enc_secret = crate::crypt::rsa_encrypt(&key, &secret).map_err(fail)?;
     let enc_chal = crate::crypt::rsa_encrypt(&key, &challenge).map_err(fail)?;
     let mut w = Writer::new();
@@ -274,6 +282,7 @@ fn login(
     online: Option<&ezzmc_auth::GameSession>,
 ) -> NetResult<GameProfile> {
     use Direction::{Clientbound as C, Serverbound as S};
+    LOGIN_STATUS.store(0, std::sync::atomic::Ordering::Relaxed);
     let mut w = Writer::new();
     w.string(name).uuid(uuid);
     conn.send(ids.get(State::Login, S, "hello")?, &w.buf)?;
@@ -411,7 +420,8 @@ pub fn configure(
                 conn.set_state(State::Play)?;
                 return Ok(ConfigOutcome::Play(Box::new(cfg)));
             }
-            // reset_chat, resource_pack_pop, store_cookie, custom_report_details, server_links,
+            "server_links" => cfg.server_links = Some(p.body.clone()),
+            // reset_chat, resource_pack_pop, store_cookie, custom_report_details,
             // clear_dialog, show_dialog — для M1 не нужны
             _ => {}
         }

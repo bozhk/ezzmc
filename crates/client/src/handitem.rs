@@ -10,7 +10,7 @@ use ezzmc_render::particledraw::push_vertex_raw;
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc as Rc;
 
 struct Quad {
     pos: [[f32; 3]; 4],

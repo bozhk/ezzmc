@@ -19,6 +19,9 @@ const SNEAKING_SPEED: f32 = 0.3;
 /// Размеры хранятся как f32, как в ванили (EntityDimensions: float width/height);
 /// в f64 переводим только при расчёте AABB, иначе полуширина расходится с сервером.
 const WIDTH: f32 = 0.6;
+/// VANILLA: LivingEntity#SLEEPING_DIMENSIONS — 0.2×0.2, глаза 0.2.
+const SLEEP_SIZE: f32 = 0.2;
+const EYE_SLEEPING: f64 = 0.2;
 const HEIGHT_STANDING: f32 = 1.8;
 const HEIGHT_CROUCHING: f32 = 1.5;
 const EYE_STANDING: f64 = 1.62;
@@ -52,6 +55,10 @@ pub trait Collider {
     }
     /// Загружен ли чанк (для `travelInAir`).
     fn has_chunk(&self, x: i32, z: i32) -> bool;
+    /// Нижняя граница мира измерения (`Level#getMinY`).
+    fn min_y(&self) -> i32 {
+        -64
+    }
     /// Высота воды в блоке (0 — воды нет; 1 — полный блок или вода сверху).
     fn water_height(&self, _x: i32, _y: i32, _z: i32) -> f32 {
         0.0
@@ -138,6 +145,9 @@ impl Collider for Level {
     }
     fn has_chunk(&self, x: i32, z: i32) -> bool {
         self.chunks.get(x >> 4, z >> 4).is_some()
+    }
+    fn min_y(&self) -> i32 {
+        self.chunks.format().min_y
     }
     /// VANILLA: FluidState#getHeight (FlowingFluid: жидкость сверху → 1).
     fn water_height(&self, x: i32, y: i32, z: i32) -> f32 {
@@ -278,6 +288,8 @@ pub struct Player {
     pub using_item: bool,
     /// VANILLA: Pose.SWIMMING вне воды — ползание под 1.5-блочным потолком (isVisuallyCrawling).
     pub crawling: bool,
+    /// VANILLA: Pose.SLEEPING (Entity#isSleeping): нет ввода, хитбокс 0.2.
+    pub sleeping: bool,
     /// VANILLA: Entity#hasPose(SWIMMING) на конце прошлого тика (Player#updatePlayerPose идёт после aiStep).
     pose_swimming: bool,
     pub sprinting: bool,
@@ -308,6 +320,8 @@ pub struct Player {
     pub fall_distance: f64,
     /// VANILLA: Entity#stuckSpeedMultiplier.
     stuck: [f64; 3],
+    /// VANILLA: NetherPortalBlock#entityInside → Entity#setAsInsidePortal (бокс игрока пересекает nether_portal в этом тике).
+    pub inside_portal: bool,
     piston_deltas: [f64; 3],
     piston_time: i64,
     no_jump_delay: u8,
@@ -338,6 +352,8 @@ pub struct Player {
     pub hurt_dir: f32,
     pub death_time: i32,
     pub dead: bool,
+    /// Отладка агента (команда `hurt`): держать hurt_time, чтобы успеть снять кадр.
+    pub hurt_hold: bool,
     /// VANILLA: Camera#eyeHeight/eyeHeightOld — плавная высота глаз (присед).
     eye_h: f64,
     eye_h_o: f64,
@@ -377,6 +393,7 @@ impl Player {
             fly_speed: 0.05,
             fall_distance: 0.0,
             stuck: [0.0; 3],
+            inside_portal: false,
             piston_deltas: [0.0; 3],
             piston_time: i64::MIN,
             no_jump_delay: 0,
@@ -399,6 +416,8 @@ impl Player {
             hurt_dir: 0.0,
             death_time: 0,
             dead: false,
+            hurt_hold: false,
+            sleeping: false,
             eye_h: EYE_STANDING,
             eye_h_o: EYE_STANDING,
             anim: crate::avatar::AvatarAnim::default(),
@@ -413,7 +432,10 @@ impl Player {
     }
 
     pub fn eye_height(&self) -> f64 {
-        if self.swimming || self.crawling {
+        if self.sleeping {
+            // VANILLA: LivingEntity#SLEEPING_DIMENSIONS — eyeHeight 0.2.
+            EYE_SLEEPING
+        } else if self.swimming || self.crawling {
             EYE_SWIMMING
         } else if self.crouching {
             EYE_CROUCHING
@@ -423,7 +445,9 @@ impl Player {
     }
 
     fn height(&self) -> f64 {
-        if self.swimming || self.crawling {
+        if self.sleeping {
+            f64::from(SLEEP_SIZE)
+        } else if self.swimming || self.crawling {
             f64::from(HEIGHT_SWIMMING)
         } else if self.crouching {
             f64::from(HEIGHT_CROUCHING)
@@ -459,7 +483,11 @@ impl Player {
     }
 
     pub(crate) fn aabb(&self) -> [f64; 6] {
-        aabb_at(self.pos, self.height())
+        aabb_w(
+            self.pos,
+            self.height(),
+            if self.sleeping { SLEEP_SIZE } else { WIDTH },
+        )
     }
 
     /// VANILLA: GameRenderer#bobView — матрица в пространстве вида (T·Rz·Rx).
@@ -513,7 +541,7 @@ impl Player {
         self.anim.in_water = self.in_water;
         self.anim.tick(self.pos, self.prev_pos, yaw, pitch);
         // VANILLA: LivingEntity#aiStep (hurtTime--) и tickDeath (deathTime++ до 20, пока здоровье ≤ 0).
-        if self.hurt_time > 0 {
+        if self.hurt_time > 0 && !self.hurt_hold {
             self.hurt_time -= 1;
         }
         if self.dead && self.death_time < 20 {
@@ -546,6 +574,12 @@ impl Player {
     /// VANILLA: LocalPlayer#aiStep (порядок как в ванили).
     pub fn tick(&mut self, w: &dyn Collider, input: Input, yaw: f32) {
         let mut input = input;
+        // VANILLA: Player#isImmobile → LivingEntity#aiStep обнуляет jumping/xxa/zza во сне.
+        if self.sleeping {
+            input = Input::default();
+            self.auto_jump_time = 0;
+            self.sprinting = false;
+        }
         // VANILLA: LocalPlayer#aiStep — autoJumpTime → input.makeJump().
         let mut was_auto_jump = false;
         if self.auto_jump_time > 0 {
@@ -593,6 +627,10 @@ impl Player {
                 && !stand_fits
                 && !self.fits(w, f64::from(HEIGHT_CROUCHING));
             self.crouching = want && !self.crawling;
+        }
+        if self.sleeping {
+            self.crouching = false;
+            self.crawling = false;
         }
 
         // спринт
@@ -996,7 +1034,8 @@ impl Player {
             my += (0.05 * f64::from(self.fx.levitation) - self.vel[1]) * 0.2;
         } else if w.has_chunk(below[0], below[2]) {
             my -= self.effective_gravity();
-        } else if self.pos[1] > -64.0 {
+        } else if self.pos[1] > f64::from(w.min_y()) {
+            // VANILLA: LivingEntity#travelInAir — getY() > level.getMinY()
             my = -0.1;
         } else {
             my = 0.0;
@@ -1194,6 +1233,7 @@ impl Player {
         }
         self.honey_slide(w);
         self.stuck = self.inside_stuck(w);
+        self.inside_portal = self.inside_block(w, "nether_portal");
         self.update_auto_jump(w, auto_delta.0, auto_delta.1);
     }
 
@@ -1363,6 +1403,22 @@ impl Player {
                 }
             }
         }
+    }
+
+    /// VANILLA: Entity#checkInsideBlocks — блок с формой `Shapes.block()` внутри AABB (−1e-5).
+    fn inside_block(&self, w: &dyn Collider, name: &str) -> bool {
+        let b = self.aabb();
+        let e = 1.0e-5;
+        for x in (b[0] + e).floor() as i32..=(b[3] - e).floor() as i32 {
+            for y in (b[1] + e).floor() as i32..=(b[4] - e).floor() as i32 {
+                for z in (b[2] + e).floor() as i32..=(b[5] - e).floor() as i32 {
+                    if w.name(x, y, z) == name {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// VANILLA: Block#entityInside → makeStuckInBlock для блоков в AABB (паутина, ягодный куст).
@@ -1601,8 +1657,12 @@ pub(crate) fn len_sq(v: [f64; 3]) -> f64 {
 }
 
 fn aabb_at(p: [f64; 3], h: f64) -> [f64; 6] {
+    aabb_w(p, h, WIDTH)
+}
+
+fn aabb_w(p: [f64; 3], h: f64, width: f32) -> [f64; 6] {
     // VANILLA: EntityDimensions#makeBoundingBox — w = width / 2.0F (float), затем x ± w.
-    let half = f64::from(WIDTH / 2.0);
+    let half = f64::from(width / 2.0);
     [
         p[0] - half,
         p[1],
@@ -2239,6 +2299,27 @@ mod tests {
                 0.0
             }
         }
+    }
+
+    #[test]
+    fn sleeping_player_ignores_input_and_has_small_box() {
+        // VANILLA: Player#isImmobile = isSleeping; SLEEPING_DIMENSIONS 0.2×0.2, глаза 0.2.
+        let mut p = Player::new([0.5, 1.0, 0.5]);
+        p.sleeping = true;
+        let x0 = p.pos[0];
+        let inp = Input {
+            forward: true,
+            sprint: true,
+            jump: true,
+            ..Input::default()
+        };
+        for _ in 0..10 {
+            p.tick(&Pool, inp, 0.0);
+        }
+        assert_eq!(p.eye_height(), EYE_SLEEPING);
+        let bb = p.aabb();
+        assert!((bb[3] - bb[0] - 0.2).abs() < 1e-6 && (bb[4] - bb[1] - 0.2).abs() < 1e-6);
+        assert!((p.pos[0] - x0).abs() < 1e-9 && !p.sprinting);
     }
 
     #[test]

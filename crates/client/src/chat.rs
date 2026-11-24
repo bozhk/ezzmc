@@ -14,11 +14,23 @@ const COLORS: [u32; 16] = [
 /// Индикатор слева (GuiMessageTag). VANILLA: система/not_secure — 0xD0D0D0.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Tag {
+    /// GuiMessageTag#systemSinglePlayer (системные сообщения клиента и сервера).
     System,
+    /// GuiMessageTag#system (disguised_chat).
+    Player,
     NotSecure,
 }
 
 impl Tag {
+    /// Ключ перевода подсказки индикатора (GuiMessageTag#text).
+    fn lang_key(self) -> &'static str {
+        match self {
+            Tag::System => "chat.tag.system_single_player",
+            Tag::Player => "chat.tag.system",
+            Tag::NotSecure => "chat.tag.not_secure",
+        }
+    }
+
     fn color(self) -> u32 {
         0xD0D0D0
     }
@@ -67,7 +79,79 @@ impl Span {
     }
 }
 
-fn merge(p: &Span, s: &Style) -> Span {
+/// "minecraft:foo" → ("minecraft", "foo") → ключ `<kind>.minecraft.foo`.
+fn id_key(kind: &str, id: &str) -> String {
+    let (ns, n) = id.split_once(':').unwrap_or(("minecraft", id));
+    format!("{kind}.{ns}.{}", n.replace('/', "."))
+}
+
+/// VANILLA: HoverEvent.ItemStackInfo — подсказка предмета. VANILLA-UNSURE: только название и
+/// количество (полный тултип с компонентами в чате не строим).
+fn hover_item(v: &serde_json::Value, lang: &Lang) -> Option<Box<Component>> {
+    let id = v.get("id")?.as_str()?;
+    let item = id_key("item", id);
+    let name = lang
+        .get(&item)
+        .or_else(|| lang.get(&id_key("block", id)))
+        .map_or_else(|| lang.tr(&item), str::to_owned);
+    let count = v
+        .get("count")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(1);
+    let text = if count > 1 {
+        format!("{name} x{count}")
+    } else {
+        name
+    };
+    Some(Box::new(Component::text(text)))
+}
+
+/// VANILLA: HoverEvent.EntityTooltipInfo#getTooltipLines — имя, «Тип: …», UUID.
+fn hover_entity(v: &serde_json::Value, lang: &Lang) -> Option<Box<Component>> {
+    let ty = v.get("id").or_else(|| v.get("type"))?.as_str()?;
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(n) = v.get("name") {
+        if let Ok(c) = Component::from_json(n) {
+            lines.push(
+                flatten(&c, lang, false)
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect(),
+            );
+        }
+    }
+    lines.push(lang.fmt(
+        "gui.entity_tooltip.type",
+        &[&lang.tr(&id_key("entity", ty))],
+    ));
+    if let Some(u) = v.get("uuid").or_else(|| v.get("id_uuid")) {
+        match u {
+            serde_json::Value::String(s) => lines.push(s.clone()),
+            serde_json::Value::Array(a) if a.len() == 4 => {
+                let w: Vec<u32> = a
+                    .iter()
+                    .filter_map(|x| x.as_i64())
+                    .map(|x| x as u32)
+                    .collect();
+                if w.len() == 4 {
+                    let h = format!("{:08x}{:08x}{:08x}{:08x}", w[0], w[1], w[2], w[3]);
+                    lines.push(format!(
+                        "{}-{}-{}-{}-{}",
+                        &h[0..8],
+                        &h[8..12],
+                        &h[12..16],
+                        &h[16..20],
+                        &h[20..32]
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(Box::new(Component::text(lines.join("\n"))))
+}
+
+fn merge(p: &Span, s: &Style, lang: &Lang) -> Span {
     Span {
         text: String::new(),
         color: s.color.unwrap_or(p.color),
@@ -80,6 +164,8 @@ fn merge(p: &Span, s: &Style) -> Span {
         insertion: s.insertion.clone().or_else(|| p.insertion.clone()),
         hover: match &s.hover {
             Some(HoverEvent::ShowText(c)) => Some(c.clone()),
+            Some(HoverEvent::ShowItem(v)) => hover_item(v, lang).or_else(|| p.hover.clone()),
+            Some(HoverEvent::ShowEntity(v)) => hover_entity(v, lang).or_else(|| p.hover.clone()),
             _ => p.hover.clone(),
         },
     }
@@ -132,7 +218,7 @@ fn push_text(out: &mut Vec<Span>, text: &str, base: &Span) {
 }
 
 fn walk(c: &Component, lang: &Lang, parent: &Span, out: &mut Vec<Span>) {
-    let st = merge(parent, &c.style);
+    let st = merge(parent, &c.style, lang);
     match &c.content {
         Content::Text(s) => push_text(out, s, &st),
         Content::Translatable {
@@ -637,6 +723,14 @@ impl Chat {
         }
     }
 
+    /// VANILLA: ChatComponent#clearMessages(false) — F3+D (история ввода остаётся).
+    pub fn clear_messages(&mut self) {
+        self.msgs.clear();
+        self.lines.clear();
+        self.scroll = 0;
+        self.new_since_scroll = false;
+    }
+
     /// Текст последних строк (для управления агентом): от старых к новым.
     pub fn plain_lines(&self, n: usize) -> Vec<String> {
         let k = self.msgs.len().saturating_sub(n);
@@ -892,6 +986,26 @@ impl Chat {
         t.set_transform(None);
     }
 
+    /// Тег строки, если мышь над индикатором слева.
+    fn tag_at(&mut self, t: &TextRenderer, gh: f32, mx: f32, my: f32, cfg: &Cfg) -> Option<Tag> {
+        self.layout(t, cfg);
+        let scale = cfg.scale.max(0.01);
+        let (x, y) = (mx / scale, my / scale);
+        if !(0.0..2.0).contains(&x) {
+            return None;
+        }
+        let bottom = ((gh - 40.0) / scale).floor();
+        let eh = cfg.entry_h() as f32;
+        let vis = self.visible(cfg, u64::MAX);
+        for (i, l, _) in vis {
+            let eb = bottom - i as f32 * eh;
+            if y >= eb - eh && y < eb {
+                return Some(l.tag);
+            }
+        }
+        None
+    }
+
     /// Спан под курсором (координаты GUI).
     pub fn span_at(
         &mut self,
@@ -935,6 +1049,22 @@ impl Chat {
         cfg: &Cfg,
         lang: &Lang,
     ) -> Vec<(String, u32)> {
+        // VANILLA: ChatComponent.DrawingBackend#handleTag — мышь над полоской (x −4..−2): подсказка тега, перенос 210.
+        if let Some(tag) = self.tag_at(t, gh, mx, my, cfg) {
+            let spans = flatten(&Component::text(lang.tr(tag.lang_key())), lang, false);
+            return Self::wrap(t, &spans, 210.0)
+                .into_iter()
+                .enumerate()
+                .map(|(i, segs)| {
+                    let it: Vec<Span> = segs
+                        .into_iter()
+                        .skip(usize::from(i > 0))
+                        .map(|g| g.span)
+                        .collect();
+                    (spans_to_legacy(&it, 0xFFFFFF), 0xFFFFFF)
+                })
+                .collect();
+        }
         let Some(h) = self.span_at(t, gh, mx, my, cfg).and_then(|s| s.hover) else {
             return Vec::new();
         };

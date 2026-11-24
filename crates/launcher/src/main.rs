@@ -182,6 +182,23 @@ fn print_session() -> i32 {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    // Без окна: `--prepare <версия>` докачивает json/jar/ассеты в game_dir (для проверки и CI).
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--prepare") {
+        let Some(ver) = args.get(i + 1) else {
+            eprintln!("--prepare <версия>");
+            std::process::exit(2);
+        };
+        let game = std::path::PathBuf::from(&Config::load().settings.game_dir);
+        let r = java::prepare_resources(&game, ver, &|s, p| eprintln!("[{:>3.0}%] {s}", p * 100.0));
+        std::process::exit(match r {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("ошибка: {e}");
+                1
+            }
+        });
+    }
     if std::env::args().any(|a| a == "--print-session") {
         std::process::exit(print_session());
     }
@@ -545,6 +562,14 @@ fn run_game(
             launch::build_java(&snap, &session, &|s, p| status(s, p))?,
             if both { "[java] " } else { "" },
         ));
+    }
+    if !both && snap.settings.target == 0 {
+        let v = snap.settings.java_version.trim();
+        if !v.is_empty() {
+            java::prepare_resources(std::path::Path::new(&snap.settings.game_dir), v, &|s, p| {
+                status(s, p)
+            })?;
+        }
     }
     if both || snap.settings.target == 0 {
         cmds.push((

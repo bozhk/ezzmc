@@ -73,6 +73,8 @@ enum Kind {
     Glow,
     /// DragonBreathParticle (фиолетовое дыхание дракона).
     DragonBreath,
+    /// EndRodParticle (SimpleAnimatedParticle с затуханием цвета).
+    EndRod,
 }
 
 /// VANILLA: DripParticle.* — стадия капли.
@@ -474,6 +476,19 @@ impl Particle {
                     self.zd *= f64::from(self.friction);
                 }
             }
+            // VANILLA: SimpleAnimatedParticle#tick (EndRodParticle: fade 0xF2DEC9, без коллизий).
+            Kind::EndRod => {
+                self.base_tick(level);
+                self.sprite_from_age();
+                if self.age > self.lifetime / 2 {
+                    self.alpha =
+                        1.0 - (self.age as f32 - (self.lifetime / 2) as f32) / self.lifetime as f32;
+                    let fade = [242.0 / 255.0, 222.0 / 255.0, 201.0 / 255.0];
+                    for (c, f) in self.rgb.iter_mut().zip(fade) {
+                        *c += (f - *c) * 0.2;
+                    }
+                }
+            }
             Kind::Flame => self.base_tick(level),
             // VANILLA: GlowParticle#tick.
             Kind::Glow => {
@@ -661,6 +676,8 @@ impl Particle {
         let (b, sky) = (u16::from(b) * 16, u16::from(sky) * 16);
         match self.kind {
             Kind::Lava => (240, sky),
+            // VANILLA: SimpleAnimatedParticle#getLightCoords = 15728880.
+            Kind::EndRod => (240, 240),
             // VANILLA: HugeExplosionParticle#getLightCoords = 15728880.
             Kind::Huge => (240, 240),
             // VANILLA: GlowParticle#getLightCoords — addSmoothBlockEmission(age/lifetime).
@@ -1136,6 +1153,26 @@ impl ParticleEngine {
                 {
                     // VANILLA: RedStoneOreBlock#animateTick → spawnParticles
                     self.ore_particles(level, x, y, z);
+                } else if name == "end_rod" {
+                    // VANILLA: EndRodBlock#animateTick.
+                    let r = &mut self.rng;
+                    let px = fx + 0.55 - f64::from(r.next_float() * 0.1);
+                    let py = fy + 0.55 - f64::from(r.next_float() * 0.1);
+                    let pz = fz + 0.55 - f64::from(r.next_float() * 0.1);
+                    let o = f64::from(0.4_f32 - (r.next_float() + r.next_float()) * 0.4);
+                    if r.next_int_bound(5) == 0 {
+                        let (sx, sy, sz) = match st.property("facing") {
+                            Some("north") => (0.0, 0.0, -1.0),
+                            Some("south") => (0.0, 0.0, 1.0),
+                            Some("west") => (-1.0, 0.0, 0.0),
+                            Some("east") => (1.0, 0.0, 0.0),
+                            Some("down") => (0.0, -1.0, 0.0),
+                            _ => (0.0, 1.0, 0.0),
+                        };
+                        let g = |e: &mut Self| e.rng.next_gaussian() * 0.005;
+                        let (a, b, c) = (g(self), g(self), g(self));
+                        self.add_end_rod(px + sx * o, py + sy * o, pz + sz * o, a, b, c);
+                    }
                 } else if name == "fire" || name == "soul_fire" {
                     self.fire_tick(level, name == "soul_fire", x, y, z);
                 } else if (name == "campfire" || name == "soul_campfire")
@@ -1506,6 +1543,29 @@ impl ParticleEngine {
         ];
         p.quad_size *= 0.75;
         p.lifetime = (20.0 / (f64::from(p.rng.next_float()) * 0.8 + 0.2)) as i32;
+        p.has_physics = false;
+        p.set = Some(set);
+        p.sprite_from_age();
+        self.add(p);
+    }
+
+    /// VANILLA: EndRodParticle (gravity 0.0125, friction 0.91, lifetime 60..71, quadSize·0.75).
+    pub fn add_end_rod(&mut self, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+        if !self.allow() {
+            return;
+        }
+        let Some(set) = self.sets.get("end_rod").cloned() else {
+            return;
+        };
+        let seed = self.seed();
+        let mut p = Particle::base(Kind::EndRod, x, y, z, seed);
+        p.quad_size = 0.1 * (p.rng.next_float() * 0.5 + 0.5) * 2.0 * 0.75;
+        p.friction = 0.91;
+        p.gravity = 0.0125;
+        p.xd = xa;
+        p.yd = ya;
+        p.zd = za;
+        p.lifetime = 60 + p.rng.next_int_bound(12);
         p.has_physics = false;
         p.set = Some(set);
         p.sprite_from_age();
@@ -1980,6 +2040,7 @@ impl ParticleEngine {
                 "portal" => e.add_portal(x, y, z, xa, ya, za),
                 // VANILLA-UNSURE: power из пакета не читаем (=1.0).
                 "dragon_breath" => e.add_dragon_breath(x, y, z, xa, ya, za),
+                "end_rod" => e.add_end_rod(x, y, z, xa, ya, za),
                 // VANILLA: NoteParticle — xa = цвет (JukeboxSongPlayer#spawnMusicParticles).
                 "note" => e.add_note(x, y, z, xa),
                 "block" => {

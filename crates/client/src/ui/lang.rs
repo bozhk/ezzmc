@@ -18,6 +18,13 @@ impl Lang {
         Self(m)
     }
 
+    /// VANILLA: ClientLanguage#loadFrom — языки стопкой, выбранный перекрывает en_us.
+    pub fn merge(&mut self, json: &[u8]) {
+        if let Ok(m) = serde_json::from_slice::<HashMap<String, String>>(json) {
+            self.0.extend(m);
+        }
+    }
+
     pub fn get(&self, key: &str) -> Option<&str> {
         self.0.get(key).map(String::as_str)
     }

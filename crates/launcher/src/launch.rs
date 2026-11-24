@@ -57,6 +57,12 @@ pub fn resolve_session(acc: &mut Account, client_id: &str) -> Result<Session, St
     })
 }
 
+const CLIENT_BIN: &str = if cfg!(windows) {
+    "ezzmc-client.exe"
+} else {
+    "ezzmc-client"
+};
+
 pub fn find_client(cfg: &Config) -> Result<PathBuf, String> {
     let s = cfg.settings.client_path.trim();
     if !s.is_empty() {
@@ -71,11 +77,11 @@ pub fn find_client(cfg: &Config) -> Result<PathBuf, String> {
         .and_then(|e| e.parent().map(Path::to_path_buf));
     let mut c = Vec::new();
     if let Some(d) = &exe_dir {
-        c.push(d.join("ezzmc-client"));
+        c.push(d.join(CLIENT_BIN));
         // target/<профиль>/ezzmc-launcher → соседние профили
         if let Some(t) = d.parent() {
             for prof in ["fast", "release", "debug"] {
-                c.push(t.join(prof).join("ezzmc-client"));
+                c.push(t.join(prof).join(CLIENT_BIN));
             }
         }
     }

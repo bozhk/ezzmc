@@ -189,10 +189,10 @@ pub fn parse_disguised(body: &[u8], types: &[Decoration]) -> ProtocolResult<Comp
 }
 
 /// `player_chat`: оформленный текст (подписи и фильтры пропускаются — клиент без ключей).
-pub fn parse_player(body: &[u8], types: &[Decoration]) -> ProtocolResult<Component> {
+pub fn parse_player(body: &[u8], types: &[Decoration]) -> ProtocolResult<(Component, u128)> {
     let mut r = Reader::new(body);
     r.var_int()?; // globalIndex
-    r.uuid()?; // sender
+    let sender = r.uuid()?;
     r.var_int()?; // index
     if r.bool()? {
         r.bytes(256)?; // signature
@@ -221,7 +221,7 @@ pub fn parse_player(body: &[u8], types: &[Decoration]) -> ProtocolResult<Compone
     }
     let b = read_bound(&mut r, types)?;
     let msg = unsigned.unwrap_or_else(|| Component::text(content));
-    Ok(decorate(&b, msg))
+    Ok((decorate(&b, msg), sender))
 }
 
 /// VANILLA: ClientboundCommandSuggestionsPacket — varint id, start, length, список (строка + необязательный тултип).
@@ -259,7 +259,7 @@ mod tests {
         w.var_int(1); // chat_type id 0 + 1
         nbt_str(&mut w, "Bob");
         w.bool(false);
-        let c = parse_player(&w.buf, &types).unwrap();
+        let (c, _) = parse_player(&w.buf, &types).unwrap();
         let s = c.to_plain(&|k| (k == "chat.type.text").then(|| "<%s> %s".to_owned()));
         assert_eq!(s, "<Bob> hello");
     }
@@ -272,5 +272,31 @@ mod tests {
         let (c, o) = parse_system(&w.buf).unwrap();
         assert!(o);
         assert_eq!(c.to_plain(&|_| None), "hi");
+    }
+
+    #[test]
+    fn decorate_whisper_team_emote() {
+        let lang = |k: &str| match k {
+            "commands.message.display.incoming" => Some("%s whispers to you: %s".to_owned()),
+            "commands.message.display.outgoing" => Some("You whisper to %s: %s".to_owned()),
+            "chat.type.team.text" => Some("%s <%s> %s".to_owned()),
+            "chat.type.emote" => Some("* %s %s".to_owned()),
+            _ => None,
+        };
+        let mk = |n: &str| Bound {
+            deco: default_decoration(n),
+            name: Component::text("Bob"),
+            target: Some(Component::text("Red")),
+        };
+        let c = || Component::text("hi");
+        let plain = |n: &str| decorate(&mk(n), c()).to_plain(&lang);
+        assert_eq!(plain("msg_command_incoming"), "Bob whispers to you: hi");
+        assert_eq!(plain("msg_command_outgoing"), "You whisper to Red: hi");
+        assert_eq!(plain("team_msg_command_incoming"), "Red <Bob> hi");
+        assert_eq!(plain("emote_command"), "* Bob hi");
+        assert_eq!(
+            decorate(&mk("msg_command_incoming"), c()).style.italic,
+            Some(true)
+        );
     }
 }

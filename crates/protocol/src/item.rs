@@ -742,7 +742,7 @@ fn read_template_at(r: &mut Reader, depth: u32) -> ProtocolResult<ItemStack> {
 /// имя — снимок реестра FML (`ezzmc_world::modded::server_name`).
 pub const MOD_ITEM_BASE: u32 = 1 << 20;
 
-fn read_item(r: &mut Reader) -> ProtocolResult<u32> {
+pub fn read_item(r: &mut Reader) -> ProtocolResult<u32> {
     let item = r.var_int()? as u32;
     if (MOD_ITEM_BASE..MOD_ITEM_BASE * 2).contains(&item) {
         return Ok(item);

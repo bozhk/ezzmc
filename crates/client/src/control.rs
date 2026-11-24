@@ -118,6 +118,10 @@ impl App {
         }
         // Та же логика F3 / F3+H, что в `WindowEvent::KeyboardInput` (main.rs): агентский ввод её обходит.
         if let Input::Key(KeyCode::F3) = input {
+            self.f3_held = down;
+            if !down {
+                self.close_gms();
+            }
             if down {
                 self.f3_pending = true;
             } else if self.f3_pending {
@@ -127,18 +131,8 @@ impl App {
             return;
         }
         if down {
-            if let Input::Key(KeyCode::KeyH) = input {
-                if self.f3_pending {
-                    crate::tooltip::ADVANCED.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-            // F3+B — хитбоксы сущностей (как в main.rs).
-            if let Input::Key(KeyCode::KeyB) = input {
-                if self.f3_pending {
-                    if let Some(v) = &mut self.view {
-                        v.toggle_hitboxes();
-                    }
-                }
+            if let Input::Key(k) = input {
+                self.f3_combo(k);
             }
             self.f3_pending = false;
         }
@@ -148,9 +142,37 @@ impl App {
             if is(self, "key.toggleGui") && !self.menu_active {
                 self.hud_hidden = !self.hud_hidden;
             }
+            if self.stats_screen.is_some() && matches!(input, Input::Key(KeyCode::Escape)) {
+                self.close_stats();
+                return;
+            }
+            if self.adv.is_some()
+                && (matches!(input, Input::Key(KeyCode::Escape)) || is(self, "key.advancements"))
+            {
+                self.close_adv();
+                return;
+            }
             if let Input::Key(KeyCode::Escape) = input {
                 if self.inv_open {
                     self.close_inv(true);
+                    return;
+                }
+            }
+            // VANILLA: Esc закрывает текущий экран (чат, книга, табличка, меню), а не открывает паузу поверх.
+            if let Input::Key(KeyCode::Escape) = input {
+                if self.chat.open {
+                    // VANILLA: InBedChatScreen#onClose → sendWakeUp (экран закроется сам по sync_in_bed).
+                    if self.in_bed {
+                        self.stop_sleeping();
+                    } else {
+                        self.close_chat();
+                    }
+                    return;
+                }
+                if self.menu_active {
+                    if let Some(g) = &mut self.gui {
+                        g.on_key(crate::ui::UiKey::Escape);
+                    }
                     return;
                 }
             }
@@ -175,6 +197,9 @@ impl App {
                 }
             } else if is(self, "key.inventory") {
                 self.open_inv();
+                return;
+            } else if is(self, "key.advancements") && !self.menu_active {
+                self.open_adv();
                 return;
             } else if is(self, "key.drop") {
                 let all = self.input.key_down(KeyCode::ControlLeft);
@@ -202,12 +227,24 @@ impl App {
     fn control_state(&self) -> Value {
         let screen = if self.view.is_none() {
             "menu"
+        } else if self.connect_phase == 1 {
+            "connecting"
+        } else if self.connect_phase == 2 {
+            "loading"
         } else if self.menu_active && self.gui.as_ref().is_some_and(|g| g.dialog_info().is_some()) {
             "dialog"
         } else if self.dead_screen {
             "death"
+        } else if self.menu_active && self.gui.as_ref().is_some_and(|g| g.is_book()) {
+            "book"
+        } else if self.menu_active && self.gui.as_ref().is_some_and(|g| g.is_social()) {
+            "social"
         } else if self.menu_active {
             "pause"
+        } else if self.stats_screen.is_some() {
+            "stats"
+        } else if self.adv.is_some() {
+            "advancements"
         } else if self.inv_open {
             "inventory"
         } else if self.chat.open {
@@ -313,6 +350,21 @@ impl App {
                 "done": v.advancements.list.iter().filter(|a| v.advancements.is_done(&a.id)).count(),
                 "selected_tab": v.advancements.selected,
             });
+            if let Some(a) = &self.adv {
+                let (tabs, sel, widgets) = a.snapshot(&v.advancements);
+                s["adv_screen"] = json!({
+                    "tabs": tabs.iter().map(|(id, t)| json!({"id": id, "title": t})).collect::<Vec<_>>(),
+                    "selected": sel,
+                    "widgets": widgets,
+                });
+            }
+            if let Some(sc) = &self.stats_screen {
+                let (tab, rows, scroll, sort_col, sort_order, received) = sc.snapshot(&v.stats);
+                s["stats_screen"] = json!({
+                    "tab": tab, "rows": rows, "scroll": scroll,
+                    "sort_col": sort_col, "sort_order": sort_order, "received": received,
+                });
+            }
             s["boss_darken"] = json!(v.boss_darken(1.0));
             s["sidebar"] =
                 json!(v
@@ -404,7 +456,10 @@ impl App {
     fn control_command(&mut self, c: &Value, reply: &Sender<Value>) -> Option<Value> {
         let cmd = c["cmd"].as_str().unwrap_or("");
         let ms = c["ms"].as_u64().unwrap_or(100);
-        let f = |k: &str| c[k].as_f64();
+        let f = |k: &str| {
+            c[k].as_f64()
+                .or_else(|| c[k].as_str().and_then(|v| v.parse().ok()))
+        };
         let later = |app: &mut Self, what: Wait, reply: Option<Sender<Value>>, ms: u64| {
             app.control_pending.push(Pending {
                 reply,
@@ -458,10 +513,24 @@ impl App {
                     }
                     "pageup" => self.chat.page(true, &cfg),
                     "pagedown" => self.chat.page(false, &cfg),
+                    "esc" if self.in_bed => self.stop_sleeping(),
                     "esc" => self.close_chat(),
                     _ => return Some(err("bad key or chat closed")),
                 }
                 ok(json!({}))
+            }
+            "chat_click" => {
+                // Агент: ЛКМ по чат-экрану в GUI-пикселях (x,y) — кнопка Leave Bed, ссылки, подсказки.
+                if !self.chat.open {
+                    return Some(err("chat closed"));
+                }
+                let (Some(x), Some(y), Some(t)) = (f("x"), f("y"), self.text.as_ref()) else {
+                    return Some(err("need x,y"));
+                };
+                let k = f64::from(t.scale());
+                self.cursor_px = (x * k, y * k);
+                self.chat_click();
+                ok(json!({"in_bed": self.in_bed}))
             }
             "state" => ok(self.control_state()),
             "visible" => {
@@ -530,7 +599,11 @@ impl App {
                     return Some(err("inventory screen not open"));
                 }
                 // `menu_x`/`menu_y` — точка в GUI-px от левого верхнего угла меню (кнопки зачарования и т. п.).
-                let px = if let (Some(mx), Some(my)) = (num(&c["menu_x"]), num(&c["menu_y"])) {
+                // `x`/`y` — абсолютная точка в GUI-px (кнопка книги рецептов и т. п.).
+                let px = if let (Some(ax), Some(ay)) = (num(&c["x"]), num(&c["y"])) {
+                    let k = self.text.as_ref().map_or(1.0, |t| f64::from(t.scale()));
+                    Some((ax * k, ay * k))
+                } else if let (Some(mx), Some(my)) = (num(&c["menu_x"]), num(&c["menu_y"])) {
                     self.menu_px(mx as f32, my as f32)
                 } else {
                     c["slot"].as_u64().and_then(|s| self.slot_px(s as usize))
@@ -660,6 +733,73 @@ impl App {
                     .type_text(c["text"].as_str().unwrap_or(""), &self.item_lang);
                 ok(json!({"search": self.creative.search}))
             }
+            "recipes" => {
+                // Агент: известные рецепты книги (id, вид, результат, категория) и настройки.
+                let Some(v) = self.view.as_ref() else {
+                    return Some(err("not joined"));
+                };
+                let lim = c["limit"].as_u64().unwrap_or(40) as usize;
+                let want = c["result"].as_u64();
+                let total = v.recipes.known.len();
+                let list: Vec<_> = v
+                    .recipes
+                    .known
+                    .values()
+                    .filter(|e| {
+                        want.is_none_or(|w| {
+                            e.result
+                                .stack
+                                .as_ref()
+                                .is_some_and(|r| u64::from(r.item) == w)
+                        })
+                    })
+                    .take(lim)
+                    .map(|e| {
+                        json!({
+                            "id": e.id,
+                            "ingredients": e.ingredients.iter()
+                                .map(|i| i.stack.as_ref().map(|s| s.item)).collect::<Vec<_>>(),
+                            "kind": format!("{:?}", e.kind),
+                            "result": e.result.stack.as_ref().map(|r| r.item),
+                            "category": e.category,
+                            "highlight": v.recipes.highlight.contains(&e.id),
+                        })
+                    })
+                    .collect();
+                ok(json!({"count": total, "recipes": list,
+                          "settings": format!("{:?}", v.recipes.settings)}))
+            }
+            "place_recipe" => {
+                // Агент: ServerboundPlaceRecipe для рецепта `id` (`shift` — useMaxItems).
+                let Some(v) = self.view.as_ref() else {
+                    return Some(err("not joined"));
+                };
+                let id = c["recipe"].as_i64().unwrap_or(-1) as i32;
+                if !v.recipes.known.contains_key(&id) {
+                    return Some(err("unknown recipe id"));
+                }
+                v.send_place_recipe(id, c["shift"].as_bool() == Some(true));
+                ok(json!({}))
+            }
+            "recipe_search" => {
+                // Агент: ввод в поле поиска книги рецептов (`clear`: true — сначала стереть).
+                let Some(v) = self.view.as_mut() else {
+                    return Some(err("not joined"));
+                };
+                if !self.inv_open || !crate::invscreen::layout(&v.inv).book {
+                    return Some(err("recipe book not open"));
+                }
+                let r = &mut v.recipes;
+                r.search.max = 50;
+                r.search_focus = true;
+                if c["clear"].as_bool() == Some(true) {
+                    r.search.select_all();
+                    r.search.erase(-1, false);
+                }
+                r.search.type_text(c["text"].as_str().unwrap_or(""));
+                r.page = 0;
+                ok(json!({"text": r.search.text}))
+            }
             "anvil_type" => {
                 // Агент: ввод в поле имени наковальни (`clear`: true — сначала стереть всё).
                 let Some(v) = self.view.as_ref() else {
@@ -713,6 +853,39 @@ impl App {
                 }
                 ok(json!({}))
             }
+            // Отладка: {ticks?=5, dir?, hold?=true} — ставит hurt_time и (hold) замораживает его; hold=false отпускает.
+            "hurt" => {
+                let hold = c["hold"].as_bool().unwrap_or(true);
+                let Some(v) = &mut self.view else {
+                    return Some(err("hurt: нет вида"));
+                };
+                v.player.hurt(f("dir").map(|d| d as f32));
+                v.player.hurt_time = f("ticks").unwrap_or(5.0) as i32;
+                v.player.hurt_hold = hold;
+                ok(json!({}))
+            }
+            // Ввод в экран GUI (книга/табличка): {text?, key?: enter|up|down|left|right|backspace|escape|tab}.
+            "gui_type" => {
+                use crate::editbox::Move;
+                use crate::ui::UiKey;
+                let Some(g) = &mut self.gui else {
+                    return Some(ok(json!({})));
+                };
+                if let Some(t) = c["text"].as_str() {
+                    g.on_text(t);
+                }
+                match c["key"].as_str().unwrap_or("") {
+                    "enter" => g.on_key(UiKey::Enter),
+                    "up" => g.on_key(UiKey::Up),
+                    "down" => g.on_key(UiKey::Down),
+                    "left" => g.on_key(UiKey::Move(Move::Left, false, false)),
+                    "right" => g.on_key(UiKey::Move(Move::Right, false, false)),
+                    "backspace" => g.on_key(UiKey::Erase(-1, false)),
+                    "escape" => g.on_key(UiKey::Escape),
+                    _ => {}
+                }
+                ok(json!({}))
+            }
             // Опция options.txt: {key, value?} — без value только читает. Применяется со следующего кадра.
             "option" => {
                 let Some(g) = &mut self.gui else {
@@ -725,6 +898,100 @@ impl App {
                     g.opts.save();
                 }
                 ok(json!({"key": key, "was": was, "value": g.opts.raw(key)}))
+            }
+            // Экран достижений: {action: open|close|tab(id)|scroll(dx,dy)}.
+            "adv_screen" => {
+                match c["action"].as_str().unwrap_or("open") {
+                    "open" => self.open_adv(),
+                    "close" => self.close_adv(),
+                    "tab" => {
+                        let (Some(v), Some(id)) = (&mut self.view, c["id"].as_str()) else {
+                            return Some(err("adv_screen tab: нужен id"));
+                        };
+                        v.advancements.select(Some(id.to_owned()));
+                        v.send(crate::netthread::NetCmd::SeenAdvancements(Some(
+                            id.to_owned(),
+                        )));
+                    }
+                    "scroll" => {
+                        if let (Some(a), Some(v)) = (&mut self.adv, &self.view) {
+                            a.scroll_by(
+                                &v.advancements,
+                                f("dx").unwrap_or(0.0),
+                                f("dy").unwrap_or(0.0),
+                            );
+                        }
+                    }
+                    other => return Some(err(format!("adv_screen: неизвестное действие {other}"))),
+                }
+                ok(json!({"open": self.adv.is_some()}))
+            }
+            // Скрытие игроков (PlayerSocialManager): {action: hide|show|list, name}.
+            "social" => {
+                if c["action"] == "open" {
+                    self.open_social();
+                    return Some(ok(json!({"open": true})));
+                }
+                let Some(v) = &mut self.view else {
+                    return Some(err("social: нет мира"));
+                };
+                let id = c["name"].as_str().and_then(|n| {
+                    v.tab
+                        .entries
+                        .iter()
+                        .find(|(_, e)| e.name.eq_ignore_ascii_case(n))
+                        .map(|(u, _)| *u)
+                });
+                match c["action"].as_str().unwrap_or("list") {
+                    "hide" | "show" => {
+                        let Some(id) = id else {
+                            return Some(err("social: игрок не найден в табе"));
+                        };
+                        if c["action"] == "hide" {
+                            v.hidden_players.insert(id);
+                        } else {
+                            v.hidden_players.remove(&id);
+                        }
+                    }
+                    "list" => {}
+                    other => return Some(err(format!("social: неизвестное действие {other}"))),
+                }
+                let names: Vec<_> = v
+                    .hidden_players
+                    .iter()
+                    .filter_map(|u| v.tab.entries.get(u).map(|e| e.name.clone()))
+                    .collect();
+                ok(json!({"hidden": names}))
+            }
+            // Экран статистики: {action: open|close|tab(tab 0..2)|sort(col 0..5)|scroll(dy)}.
+            "stats_screen" => {
+                match c["action"].as_str().unwrap_or("open") {
+                    "open" => self.open_stats(),
+                    "close" => self.close_stats(),
+                    "tab" => {
+                        if let (Some(sc), Some(v)) = (&mut self.stats_screen, &self.view) {
+                            let ok_tab = sc.select_tab(&v.stats, f("tab").unwrap_or(0.0) as usize);
+                            if !ok_tab {
+                                return Some(err("stats_screen tab: вкладка недоступна"));
+                            }
+                        }
+                    }
+                    "sort" => {
+                        if let (Some(sc), Some(v)) = (&mut self.stats_screen, &self.view) {
+                            sc.sort(&v.stats, f("col").unwrap_or(0.0) as usize);
+                        }
+                    }
+                    "scroll" => {
+                        let gh = self.gui_cursor().map(|c| c.1);
+                        if let (Some(sc), Some(gh)) = (&mut self.stats_screen, gh) {
+                            sc.wheel(gh, f("dy").unwrap_or(0.0) as f32);
+                        }
+                    }
+                    other => {
+                        return Some(err(format!("stats_screen: неизвестное действие {other}")))
+                    }
+                }
+                ok(json!({"open": self.stats_screen.is_some()}))
             }
             // Не ваниль: compute ↔ ванильный путь (как key.renderMode); on=true/false или переключить.
             "render_mode" => {
@@ -878,6 +1145,17 @@ impl App {
                     err("no dialog")
                 }
             }
+            "cursor" => {
+                // Агент: поставить курсор в пиксели окна без клика (hover: тултипы чата, слоты).
+                let (Some(x), Some(y)) = (f("x"), f("y")) else {
+                    return Some(err("x, y required"));
+                };
+                self.cursor_px = (x, y);
+                if let Some(g) = &mut self.gui {
+                    g.on_cursor(x, y);
+                }
+                ok(json!({}))
+            }
             "ui_click" => {
                 // Агент: клик по экрану меню (координаты в пикселях окна).
                 let (Some(x), Some(y)) = (c["x"].as_f64(), c["y"].as_f64()) else {
@@ -896,9 +1174,15 @@ impl App {
                     return Some(err("addr required"));
                 };
                 self.connect = Some(addr.to_string());
-                self.menu_active = false;
+                if let Some(g) = &mut self.gui {
+                    g.open_connecting();
+                    self.menu_active = true;
+                } else {
+                    self.menu_active = false;
+                }
                 self.world_pending = false;
                 self.join_pending = true;
+                self.join_delay = 2;
                 ok(json!({}))
             }
             "wait" => {

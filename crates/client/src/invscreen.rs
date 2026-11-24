@@ -39,6 +39,8 @@ pub struct Layout {
     pub h: f32,
     /// Позиция слота (None — слот не показывается).
     pub slots: Vec<Option<(f32, f32)>>,
+    /// Книга рецептов раскрыта (только окна с книгой крафта).
+    pub book: bool,
 }
 
 const H_MERCHANT: f32 = crate::merchantscreen::H;
@@ -93,6 +95,7 @@ fn snap_layout(o: &crate::inventory::OpenMenu) -> Option<Layout> {
         return None;
     }
     Some(Layout {
+        book: false,
         kind: Kind::Snap(idx),
         w: f32::from(m.img_w),
         h: f32::from(m.img_h),
@@ -106,6 +109,13 @@ fn snap_layout(o: &crate::inventory::OpenMenu) -> Option<Layout> {
 
 /// Раскладка для текущего состояния (открытое меню или InventoryMenu).
 pub fn layout(inv: &Inventory) -> Layout {
+    let mut l = layout_base(inv);
+    // VANILLA: InventoryScreen/CraftingScreen — книга крафта только в окнах инвентаря и верстака.
+    l.book = l.book_kind().is_some_and(|k| inv.book_open[k.idx()]);
+    l
+}
+
+fn layout_base(inv: &Inventory) -> Layout {
     let Some(o) = &inv.open else {
         // VANILLA: InventoryMenu.
         let mut s = vec![Some((154.0, 28.0))];
@@ -121,6 +131,7 @@ pub fn layout(inv: &Inventory) -> Layout {
         player_inv_rows(&mut s, 84.0, 142.0);
         s.push(Some((77.0, 62.0)));
         return Layout {
+            book: false,
             kind: Kind::Player,
             w: 176.0,
             h: 166.0,
@@ -143,6 +154,7 @@ pub fn layout(inv: &Inventory) -> Layout {
     if name == "lectern" {
         // VANILLA: LecternScreen — слот 0 = книга (не показывается), инвентарь не рисуется.
         return Layout {
+            book: false,
             kind: Kind::Lectern,
             w: 192.0,
             h: 192.0,
@@ -168,6 +180,7 @@ pub fn layout(inv: &Inventory) -> Layout {
         let main_y = 31.0 + rows as f32 * 18.0;
         player_inv_rows(&mut s, main_y, main_y + 58.0);
         return Layout {
+            book: false,
             kind: Kind::Modded(rows),
             w: 176.0,
             h: 114.0 + rows as f32 * 18.0,
@@ -186,6 +199,7 @@ pub fn layout(inv: &Inventory) -> Layout {
         let off = (rows as f32 - 4.0) * 18.0;
         player_inv_rows(&mut s, 103.0 + off, 161.0 + off);
         return Layout {
+            book: false,
             kind: Kind::Chest(rows),
             w: 176.0,
             h: 114.0 + rows as f32 * 18.0,
@@ -204,6 +218,7 @@ pub fn layout(inv: &Inventory) -> Layout {
     if name == "merchant" && n == 39 {
         // VANILLA: MerchantMenu / MerchantScreen 276×166, villager.png 512×256.
         return Layout {
+            book: false,
             kind: Kind::Tex("container_villager", H_MERCHANT),
             w: crate::merchantscreen::W,
             h: H_MERCHANT,
@@ -215,6 +230,7 @@ pub fn layout(inv: &Inventory) -> Layout {
         let mut s = vec![Some((136.0, 110.0))];
         player_inv_rows_x(&mut s, 36.0, 137.0, 195.0);
         return Layout {
+            book: false,
             kind: Kind::Tex("container_beacon", 219.0),
             w: 230.0,
             h: 219.0,
@@ -287,6 +303,7 @@ pub fn layout(inv: &Inventory) -> Layout {
         player_inv_rows(&mut s, main_y, hot_y);
         debug_assert_eq!(s.len(), total);
         return Layout {
+            book: false,
             kind: Kind::Tex(tex, h),
             w: 176.0,
             h,
@@ -297,6 +314,7 @@ pub fn layout(inv: &Inventory) -> Layout {
     let mut s = vec![None; n - 36];
     player_inv_rows(&mut s, 84.0, 142.0);
     Layout {
+        book: false,
         kind: Kind::Other,
         w: 176.0,
         h: 166.0,
@@ -337,7 +355,28 @@ impl Layout {
     pub fn is_beacon(&self) -> bool {
         matches!(self.kind, Kind::Tex("container_beacon", _))
     }
+    /// Окно с книгой рецептов крафта (инвентарь игрока и верстак).
+    pub fn has_crafting_book(&self) -> bool {
+        self.book_kind().is_some()
+    }
+    /// Тип книги рецептов, которую показывает это окно.
+    pub fn book_kind(&self) -> Option<crate::recipebook::BookKind> {
+        use crate::recipebook::BookKind as B;
+        match self.kind {
+            Kind::Player | Kind::Tex("container_crafting", _) => Some(B::Crafting),
+            // TODO-323c: книга печей — модель готова, экран ещё крафтовый; пока отключена.
+            Kind::Tex("container_furnace" | "container_blast_furnace" | "container_smoker", _) => {
+                let _ = (B::Furnace, B::Blast, B::Smoker);
+                None
+            }
+            _ => None,
+        }
+    }
     pub fn left(&self, gw: f32) -> f32 {
+        // VANILLA: RecipeBookComponent#updateScreenPosition; widthTooNarrow = width < 379.
+        if self.book && gw >= 379.0 {
+            return (177.0 + ((gw - self.w - 200.0) / 2.0).trunc()).floor();
+        }
         ((gw - self.w) / 2.0).floor()
     }
     pub fn top(&self, gh: f32) -> f32 {

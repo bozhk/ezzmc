@@ -1,5 +1,5 @@
 //! Всплывающие уведомления справа вверху. VANILLA: ToastManager, Toast, AdvancementToast (26.3).
-//! Не портировано: RecipeToast (TODO-527), SystemToast, TutorialToast, NowPlayingToast.
+//! Не портировано: SystemToast, TutorialToast. NowPlayingToast — `NowPlaying`.
 use crate::advancements::{Display, Kind};
 use crate::audio::{self, Cat};
 use crate::chat;
@@ -10,7 +10,12 @@ use ezzmc_render::gui::GuiPainter;
 use ezzmc_render::text::TextRenderer;
 use std::time::Instant;
 
-pub const SPRITES: &[(&str, &str)] = &[("toast_adv", "sprites/toast/advancement")];
+pub const SPRITES: &[(&str, &str)] = &[
+    ("toast_adv", "sprites/toast/advancement"),
+    ("toast_recipe", "sprites/toast/recipe"),
+    ("toast_np", "sprites/toast/now_playing"),
+    ("music_notes", "sprites/icon/music_notes"),
+];
 
 /// VANILLA: ToastInstance.SLIDE_ANIMATION_DURATION_MS.
 const SLIDE_MS: f32 = 600.0;
@@ -22,6 +27,12 @@ pub enum Toast {
         title: String,
         kind: Kind,
         icon: ItemStack,
+    },
+    /// VANILLA: RecipeToast — одно на все новые рецепты, дополняется (addOrUpdate).
+    Recipe {
+        items: Vec<(Option<ItemStack>, Option<ItemStack>)>,
+        changed: bool,
+        last_changed: f32,
     },
 }
 
@@ -36,7 +47,7 @@ impl Toast {
 
     fn height(&self) -> f32 {
         match self {
-            Toast::Advancement { .. } => 32.0,
+            Toast::Advancement { .. } | Toast::Recipe { .. } => 32.0,
         }
     }
 
@@ -45,9 +56,24 @@ impl Toast {
         (self.height() / 32.0).ceil().max(1.0) as usize
     }
 
-    /// Время показа, мс (×notificationDisplayTime = 1).
-    fn display_ms(&self) -> f32 {
-        5000.0
+    /// VANILLA: Toast#update + getWantedVisibility (SHOW?), время показа 5000 мс
+    /// (×notificationDisplayTime = 1).
+    fn wanted(&mut self, full_for: f32) -> bool {
+        let t = 5000.0 * display_mult();
+        match self {
+            Toast::Advancement { .. } => full_for < t,
+            Toast::Recipe {
+                items,
+                changed,
+                last_changed,
+            } => {
+                if *changed {
+                    *last_changed = full_for;
+                    *changed = false;
+                }
+                !items.is_empty() && full_for - *last_changed < t
+            }
+        }
     }
 
     /// VANILLA: AdvancementToast#getSoundEvent.
@@ -97,7 +123,7 @@ impl Instance {
         let p = (since / SLIDE_MS).clamp(0.0, 1.0);
         let p = p * p;
         self.portion = if self.show { p } else { 1.0 - p };
-        let wanted = self.full_for < self.toast.display_ms();
+        let wanted = self.toast.wanted(self.full_for);
         let mut start = start;
         if wanted != self.show {
             let back = std::time::Duration::from_millis(((1.0 - self.portion) * SLIDE_MS) as u64);
@@ -122,6 +148,26 @@ impl ToastManager {
         self.queued.push_back(t);
     }
 
+    /// VANILLA: RecipeToast#addOrUpdate.
+    pub fn add_recipe(&mut self, station: Option<ItemStack>, result: Option<ItemStack>) {
+        let found = self
+            .visible
+            .iter_mut()
+            .map(|i| &mut i.toast)
+            .chain(self.queued.iter_mut())
+            .find(|t| matches!(t, Toast::Recipe { .. }));
+        if let Some(Toast::Recipe { items, changed, .. }) = found {
+            items.push((station, result));
+            *changed = true;
+        } else {
+            self.queued.push_back(Toast::Recipe {
+                items: vec![(station, result)],
+                changed: true,
+                last_changed: 0.0,
+            });
+        }
+    }
+
     pub fn clear(&mut self) {
         self.visible.clear();
         self.occupied = [false; SLOTS];
@@ -134,6 +180,7 @@ impl ToastManager {
             .iter()
             .map(|i| match &i.toast {
                 Toast::Advancement { title, .. } => ("advancement", title.clone(), i.portion),
+                Toast::Recipe { items, .. } => ("recipe", format!("{}", items.len()), i.portion),
             })
             .collect()
     }
@@ -252,15 +299,14 @@ impl ToastManager {
         for i in self.visible.iter().filter(|i| !i.finished) {
             let (x, y) = origin(i);
             match &i.toast {
-                Toast::Advancement { .. } => p.blit(
-                    "toast_adv",
-                    x,
-                    y,
-                    160.0,
-                    32.0,
-                    [0.0, 0.0, 1.0, 1.0],
-                    0xFFFF_FFFF,
-                ),
+                Toast::Advancement { .. } | Toast::Recipe { .. } => {
+                    let sprite = if matches!(i.toast, Toast::Recipe { .. }) {
+                        "toast_recipe"
+                    } else {
+                        "toast_adv"
+                    };
+                    p.blit(sprite, x, y, 160.0, 32.0, [0.0, 0.0, 1.0, 1.0], 0xFFFF_FFFF)
+                }
             }
         }
         p.flush(dev, q, view, w, h, None);
@@ -268,6 +314,23 @@ impl ToastManager {
         for i in self.visible.iter().filter(|i| !i.finished) {
             let (x, y) = origin(i);
             match &i.toast {
+                Toast::Recipe { .. } => {
+                    // VANILLA: RecipeToast#extractRenderState — -11534256 / чёрный, без тени.
+                    t.draw(
+                        &lang.tr("recipe.toast.title"),
+                        x + 30.0,
+                        y + 7.0,
+                        0x500050,
+                        false,
+                    );
+                    t.draw(
+                        &lang.tr("recipe.toast.description"),
+                        x + 30.0,
+                        y + 18.0,
+                        0x000000,
+                        false,
+                    );
+                }
                 Toast::Advancement { title, kind, .. } => {
                     let lines = crate::ui::wrap_n(t, title, 125.0, 16);
                     // VANILLA: -30465 (0xFF88FF) у испытания, иначе -256 (жёлтый).
@@ -302,11 +365,260 @@ impl ToastManager {
         p.begin(t.scale());
         for i in self.visible.iter().filter(|i| !i.finished) {
             let (x, y) = origin(i);
-            let Toast::Advancement { icon, .. } = &i.toast;
-            // VANILLA: graphics.fakeItem(iconItem, 8, 8).
-            crate::hud::stack_icon(p, dev, q, rm, icon, x + 8.0, y + 8.0);
+            match &i.toast {
+                // VANILLA: graphics.fakeItem(iconItem, 8, 8).
+                Toast::Advancement { icon, .. } => {
+                    crate::hud::stack_icon(p, dev, q, rm, icon, x + 8.0, y + 8.0)
+                }
+                Toast::Recipe { items, .. } => {
+                    let n = items.len().max(1);
+                    let idx = (i.full_for / (5000.0 / n as f32).max(1.0)) as usize % n;
+                    if let Some((_, Some(res))) = items.get(idx) {
+                        crate::hud::stack_icon(p, dev, q, rm, res, x + 8.0, y + 8.0);
+                    }
+                }
+            }
         }
         p.flush(dev, q, view, w, h, None);
+        // RecipeToast: значок станции в масштабе 0.6 в точке (3, 3).
+        p.begin_f(t.scale() as f32 * 0.6);
+        let mut any = false;
+        for i in self.visible.iter().filter(|i| !i.finished) {
+            if let Toast::Recipe { items, .. } = &i.toast {
+                let (x, y) = origin(i);
+                let n = items.len().max(1);
+                let idx = (i.full_for / (5000.0 / n as f32).max(1.0)) as usize % n;
+                if let Some((Some(st), _)) = items.get(idx) {
+                    crate::hud::stack_icon(p, dev, q, rm, st, (x + 1.8) / 0.6, (y + 1.8) / 0.6);
+                    any = true;
+                }
+            }
+        }
+        if any {
+            p.flush(dev, q, view, w, h, None);
+        }
+    }
+}
+
+/// VANILLA: ColorLerper.MUSIC_NOTE_COLORS — textureDiffuseColor DyeColor (WHITE — особый случай).
+const NOTE_DIFFUSE: [u32; 12] = [
+    0xF9FFFE, // WHITE (не используется: -1644826)
+    0x9D9D97, // LIGHT_GRAY
+    0x3AB3DA, // LIGHT_BLUE
+    0x3C44AA, // BLUE
+    0x169C9C, // CYAN
+    0x5E7C16, // GREEN
+    0x80C71F, // LIME
+    0xFED83D, // YELLOW
+    0xF9801D, // ORANGE
+    0xF38BAA, // PINK
+    0xB02E26, // RED
+    0xC74EBD, // MAGENTA
+];
+
+/// VANILLA: ColorLerper.Type.MUSIC_NOTE (colorDuration 30, brightness 1.25).
+fn note_color(tick: i32) -> u32 {
+    let modified = |i: usize| -> u32 {
+        if i == 0 {
+            return 0xFFE6_E6E6;
+        }
+        let c = NOTE_DIFFUSE[i];
+        let f = |v: u32| ((v as f32 * 1.25).floor() as i32).clamp(0, 255) as u32;
+        0xFF00_0000 | (f(c >> 16 & 255) << 16) | (f(c >> 8 & 255) << 8) | f(c & 255)
+    };
+    let value = (tick / 30) as usize;
+    let (c1, c2) = (value % 12, (value + 1) % 12);
+    let sub = (tick % 30) as f32 / 30.0;
+    let (a, b) = (modified(c1), modified(c2));
+    let ch = |sh: u32| {
+        let (x, y) = ((a >> sh & 255) as i32, (b >> sh & 255) as i32);
+        (x + (sub * (y - x) as f32).floor() as i32) as u32
+    };
+    0xFF00_0000 | (ch(16) << 16) | (ch(8) << 8) | ch(0)
+}
+
+/// VANILLA: NowPlayingToast + его ToastInstance (анимация выезда 600 мс, показ 5 с).
+pub struct NowPlaying {
+    /// updateToast: wanted пересчитывается, пока тост «жив».
+    active: bool,
+    wanted: bool,
+    show: bool,
+    anim_start: Option<Instant>,
+    became_full: Instant,
+    full_for: f32,
+    portion: f32,
+    finished: bool,
+    note_tick: i32,
+    note_last: Instant,
+    note_color: u32,
+}
+
+impl Default for NowPlaying {
+    fn default() -> Self {
+        let now = Instant::now();
+        NowPlaying {
+            active: false,
+            wanted: false,
+            show: false,
+            anim_start: None,
+            became_full: now,
+            full_for: 0.0,
+            portion: 0.0,
+            finished: true,
+            note_tick: 0,
+            note_last: now,
+            note_color: 0xFFFF_FFFF,
+        }
+    }
+}
+
+impl NowPlaying {
+    /// VANILLA: ToastManager#showNowPlayingToast (resetToast + showToast).
+    pub fn show_toast(&mut self) {
+        self.anim_start = None;
+        self.finished = false;
+        self.active = true;
+        self.wanted = true;
+    }
+
+    /// VANILLA: ToastManager#hideNowPlayingToast.
+    pub fn hide(&mut self) {
+        self.wanted = false;
+    }
+
+    /// VANILLA: NowPlayingToast#tickMusicNotes (раз в 25 мс меняет тик цвета).
+    pub fn tick_notes(&mut self, playing: bool) {
+        if !playing {
+            return;
+        }
+        let now = Instant::now();
+        if now.duration_since(self.note_last).as_millis() > 25 {
+            self.note_tick += 1;
+            self.note_last = now;
+            self.note_color = note_color(self.note_tick);
+        }
+    }
+
+    /// VANILLA: ToastInstance#update + NowPlayingToast#update (`mult` = notificationDisplayTime).
+    pub fn update(&mut self, playing: bool, mult: f32) {
+        if self.finished {
+            return;
+        }
+        let now = Instant::now();
+        let start = *self.anim_start.get_or_insert_with(|| {
+            self.show = true;
+            now
+        });
+        let since = now.duration_since(start).as_secs_f32() * 1000.0;
+        if self.show && since <= SLIDE_MS {
+            self.became_full = now;
+        }
+        self.full_for = now.duration_since(self.became_full).as_secs_f32() * 1000.0;
+        let p = (since / SLIDE_MS).clamp(0.0, 1.0);
+        let p = p * p;
+        self.portion = if self.show { p } else { 1.0 - p };
+        if self.active {
+            self.wanted = self.full_for < 5000.0 * mult;
+            self.tick_notes(playing);
+        }
+        let mut since = since;
+        if self.wanted != self.show {
+            let back = std::time::Duration::from_millis(((1.0 - self.portion) * SLIDE_MS) as u64);
+            self.anim_start = Some(now.checked_sub(back).unwrap_or(now));
+            since = back.as_secs_f32() * 1000.0;
+            self.show = self.wanted;
+        }
+        if !self.show && since > SLIDE_MS {
+            self.finished = true;
+            self.active = false;
+        }
+    }
+
+    /// Ширина по тексту: 30 + width + 7.
+    fn width(t: &TextRenderer, name: &str) -> f32 {
+        30.0 + t.text_width(name) + 7.0
+    }
+
+    /// VANILLA: NowPlayingToast#extractToast в точке (x, 0).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_at(
+        &self,
+        x: f32,
+        name: &str,
+        t: &mut TextRenderer,
+        p: &mut GuiPainter,
+        dev: &wgpu::Device,
+        q: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        (w, h): (u32, u32),
+    ) {
+        let bw = Self::width(t, name);
+        p.begin(t.scale());
+        p.nine_slice(
+            "toast_np",
+            x,
+            0.0,
+            bw,
+            30.0,
+            [160.0, 32.0],
+            [4.0; 4],
+            0xFFFF_FFFF,
+        );
+        // music_notes.png 16×128 — 8 кадров, frametime 2 тика (100 мс).
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        let f = (ms / 100 % 8) as f32;
+        p.blit(
+            "music_notes",
+            x + 7.0,
+            7.0,
+            16.0,
+            16.0,
+            [0.0, f / 8.0, 1.0, (f + 1.0) / 8.0],
+            self.note_color,
+        );
+        p.flush(dev, q, view, w, h, None);
+        t.begin(w, h);
+        // TEXT_COLOR = DyeColor.LIGHT_GRAY.getTextColor().
+        t.draw(name, x + 30.0, 15.0 - 4.0, 0xD3D3D3, true);
+        t.flush(dev, q, view, w, h);
+    }
+}
+
+/// Кадр NowPlayingToast. `mode` — опция musicToast (never/pause/pause_and_toast).
+/// В паузе — постоянно у (0,0) (PauseScreen), иначе — выезжающий тост (ToastManager).
+#[allow(clippy::too_many_arguments)]
+pub fn now_playing_frame(
+    np: &mut NowPlaying,
+    key: Option<&str>,
+    mode: &str,
+    in_pause: bool,
+    show_hud: bool,
+    t: &mut TextRenderer,
+    p: &mut GuiPainter,
+    g: &ezzmc_render::Gpu,
+    view: &wgpu::TextureView,
+    size: (u32, u32),
+    lang: &Lang,
+) {
+    let mode = mode.trim_matches('"');
+    let (pause_ok, toast_ok) = (
+        mode != "never" && !mode.is_empty(),
+        mode == "pause_and_toast",
+    );
+    np.update(key.is_some(), display_mult());
+    let Some(key) = key else { return };
+    let name = lang.tr(key);
+    if in_pause {
+        if pause_ok && audio::music_volume() > 0.0 {
+            np.tick_notes(true);
+            np.draw_at(0.0, &name, t, p, &g.device, &g.queue, view, size);
+        }
+    } else if show_hud && toast_ok && !np.finished {
+        let bw = NowPlaying::width(t, &name);
+        let x = bw * np.portion - bw;
+        np.draw_at(x, &name, t, p, &g.device, &g.queue, view, size);
     }
 }
 
@@ -367,4 +679,15 @@ mod tests {
         assert_eq!(m.find_free(1), Some(2));
         assert_eq!(m.find_free(2), None);
     }
+}
+
+static DISPLAY_MULT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3F80_0000); // 1.0
+
+/// VANILLA: Options#notificationDisplayTime.
+pub fn set_display_mult(v: f32) {
+    DISPLAY_MULT.store(v.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn display_mult() -> f32 {
+    f32::from_bits(DISPLAY_MULT.load(std::sync::atomic::Ordering::Relaxed))
 }

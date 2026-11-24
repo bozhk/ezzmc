@@ -41,6 +41,10 @@ struct Glyph {
 }
 
 pub struct TextRenderer {
+    /// Обрезка следующих `flush` в пикселях окна [x, y, w, h] (VANILLA: enableScissor).
+    scissor: Option<[u32; 4]>,
+    /// Программная обрезка глифов по X (GUI-пиксели), см. `set_clip_x`.
+    clip_x: Option<(f32, f32)>,
     pipeline: wgpu::RenderPipeline,
     /// Вариант с depth-тестом (создаётся при первом `flush_depth`).
     depth_pipeline: Option<wgpu::RenderPipeline>,
@@ -255,6 +259,8 @@ impl TextRenderer {
             vb_depth,
             depth_verts: Vec::new(),
             depth_z: None,
+            scissor: None,
+            clip_x: None,
             bind_group,
             screen,
             vb,
@@ -291,6 +297,17 @@ impl TextRenderer {
     /// координаты рисования — относительно этой точки. `None` — сброс.
     pub fn set_transform(&mut self, xf: Option<(f32, f32, f32, f32)>) {
         self.xf = xf;
+    }
+
+    /// Обрезка для следующих `flush` (пиксели окна); `None` — снять.
+    pub fn set_scissor(&mut self, r: Option<[u32; 4]>) {
+        self.scissor = r;
+    }
+
+    /// Обрезка глифов по X `[left, right]` (GUI-пиксели) для следующих `draw`; `None` — снять.
+    /// VANILLA: ActiveTextCollector.Parameters#withScissor (бегущая строка кнопок).
+    pub fn set_clip_x(&mut self, r: Option<(f32, f32)>) {
+        self.clip_x = r;
     }
 
     /// Текст после этого вызова пишется в слой с depth-тестом (`flush_depth`) на глубине `z` (NDC 0..1).
@@ -519,8 +536,24 @@ impl TextRenderer {
                 if let Some(g) = self.glyph(c).copied() {
                     let passes: &[f32] = if bold { &[0.0, 1.0] } else { &[0.0] };
                     for off in passes {
-                        let (x0, x1) = (cx + off, cx + off + g.w);
+                        let (mut x0, mut x1) = (cx + off, cx + off + g.w);
                         let (y0, y1) = (y + g.top, y + g.top + g.h);
+                        let (mut u0, mut u1) = (g.u0, g.u1);
+                        if let Some((cl, cr)) = self.clip_x {
+                            if x1 <= cl || x0 >= cr {
+                                continue;
+                            }
+                            let (ox0, ox1) = (x0, x1);
+                            let k = |v: f32| (v - ox0) / (ox1 - ox0);
+                            if x0 < cl {
+                                u0 = g.u0 + (g.u1 - g.u0) * k(cl);
+                                x0 = cl;
+                            }
+                            if x1 > cr {
+                                u1 = g.u0 + (g.u1 - g.u0) * k(cr);
+                                x1 = cr;
+                            }
+                        }
                         let sh = |rel: f32| {
                             if italic {
                                 1.0 - 0.25 * (rel - 3.0)
@@ -530,10 +563,10 @@ impl TextRenderer {
                         };
                         let (s0, s1) = (sh(g.top), sh(g.top + g.h));
                         for (p, uv) in [
-                            ([x0 + s0, y0], [g.u0, g.v0]),
-                            ([x1 + s0, y0], [g.u1, g.v0]),
-                            ([x1 + s1, y1], [g.u1, g.v1]),
-                            ([x0 + s1, y1], [g.u0, g.v1]),
+                            ([x0 + s0, y0], [u0, g.v0]),
+                            ([x1 + s0, y0], [u1, g.v0]),
+                            ([x1 + s1, y1], [u1, g.v1]),
+                            ([x0 + s1, y1], [u0, g.v1]),
                         ] {
                             self.emit(Vertex {
                                 pos: self.tf3(p),
@@ -678,6 +711,10 @@ impl TextRenderer {
                 ..Default::default()
             });
             pass.set_pipeline(&self.pipeline);
+            if let Some([sx, sy, sw, sh]) = self.scissor {
+                let (sx, sy) = (sx.min(w), sy.min(h));
+                pass.set_scissor_rect(sx, sy, sw.min(w - sx), sh.min(h - sy));
+            }
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.vb.slice(..));
             pass.set_index_buffer(self.ib.slice(..), wgpu::IndexFormat::Uint32);

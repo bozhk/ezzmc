@@ -565,7 +565,7 @@ pub fn glint_matrix(scale: f32) -> Mat4 {
     let ms = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64) as f64
-        * 0.5
+        * f64::from(glint_speed())
         * 8.0) as u64;
     let o0 = (ms % 110_000) as f32 / 110_000.0;
     let o1 = (ms % 30_000) as f32 / 30_000.0;
@@ -584,4 +584,15 @@ fn set_visible(model: &mut Model, slot: usize) {
             _ => matches!(part.name, "right_leg" | "left_leg"),
         };
     }
+}
+
+static GLINT_SPEED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3F00_0000); // 0.5
+
+/// VANILLA: Options#glintSpeed.
+pub fn set_glint_speed(v: f32) {
+    GLINT_SPEED.store(v.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn glint_speed() -> f32 {
+    f32::from_bits(GLINT_SPEED.load(std::sync::atomic::Ordering::Relaxed))
 }

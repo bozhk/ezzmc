@@ -145,9 +145,12 @@ pub fn toggle_fullscreen(w: &Window, state: &mut WindowState) {
 }
 
 pub fn create(event_loop: &ActiveEventLoop, cfg: &WindowConfig) -> Result<Window, WindowError> {
-    event_loop
+    let w = event_loop
         .create_window(cfg.attributes())
-        .map_err(|e| WindowError::Create(e.to_string()))
+        .map_err(|e| WindowError::Create(e.to_string()))?;
+    // TODO-272: IME (CJK/эмодзи-панель) отдаёт текст событием Ime::Commit.
+    w.set_ime_allowed(true);
+    Ok(w)
 }
 
 #[derive(Debug, thiserror::Error)]

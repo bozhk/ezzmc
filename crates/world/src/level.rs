@@ -180,6 +180,14 @@ pub struct Level {
     pub riders: crate::riding::Riders,
     /// id сущности локального игрока (выставляет сетевой поток).
     pub own_id: i32,
+    /// Флаги (#0 shared flags) локального игрока: бит 0 — горит (Entity#isOnFire).
+    pub own_flags: u8,
+    /// Entity#DATA_POSE локального игрока (ordinal Pose; 0 = STANDING).
+    pub own_pose: i32,
+    /// VANILLA: LivingEntity#SLEEPING_POS (#14, OPTIONAL_BLOCK_POS) локального игрока.
+    pub own_sleep_pos: Option<[i32; 3]>,
+    /// Ticks frozen (#7) локального игрока — powder snow.
+    pub own_frozen: i32,
     /// Сервер переставил управляемый транспорт (teleport_entity): сетевой поток шлёт move_vehicle.
     pub vehicle_resync: bool,
     /// VANILLA: ItemPickupParticle — анимация подбора (3 тика).
@@ -188,8 +196,8 @@ pub struct Level {
     pub pearl_hits: Vec<[f64; 3]>,
     /// VANILLA: LivingEntity#makePoofParticles (entity_event 60): (позиция, ширина, высота).
     pub death_poofs: Vec<([f64; 3], f64, f64)>,
-    /// Позиции дракона, получившего урон (damage_event) — звук `entity.ender_dragon.hurt`.
-    pub dragon_hurts: Vec<[f64; 3]>,
+    /// VANILLA: LivingEntity#handleDamageEvent (hurt) / handleEntityEvent 3 (death): (тип, позиция, смерть?).
+    pub mob_sounds: Vec<(usize, [f64; 3], bool)>,
     /// Урон локальному игроку (damage_event/hurt_animation на own_id): `Some(yaw)` для hurt_animation — hurtDir.
     pub own_hurts: Vec<Option<f32>>,
     /// VANILLA: ClientLevel#skyFlashTime (молния ставит 2, каждый тик −1).
@@ -246,10 +254,14 @@ impl Level {
             pickups: Vec::new(),
             riders: Default::default(),
             own_id: -1,
+            own_flags: 0,
+            own_pose: 0,
+            own_sleep_pos: None,
+            own_frozen: 0,
             vehicle_resync: false,
             pearl_hits: Vec::new(),
             death_poofs: Vec::new(),
-            dragon_hurts: Vec::new(),
+            mob_sounds: Vec::new(),
             own_hurts: Vec::new(),
             sky_flash_time: 0,
             skybox: crate::dimension::Skybox::Overworld,
@@ -613,6 +625,7 @@ impl Level {
                             e.hurt_dur = 0.5;
                         }
                         3 => {
+                            self.mob_sounds.push((e.ty, e.pos, true));
                             e.hurt_at = Some(std::time::Instant::now());
                             e.hurt_dur = 1.0;
                             e.death_at.get_or_insert_with(std::time::Instant::now);
@@ -646,11 +659,8 @@ impl Level {
                 if let Some(e) = self.entities.map.get_mut(&id) {
                     e.hurt_at = Some(std::time::Instant::now());
                     e.hurt_dur = 0.5;
-                    if name == "damage_event"
-                        && ezzmc_protocol::generated::r26_3::ENTITY_TYPE.get(e.ty)
-                            == Some(&"ender_dragon")
-                    {
-                        self.dragon_hurts.push(e.pos);
+                    if name == "damage_event" {
+                        self.mob_sounds.push((e.ty, e.pos, false));
                     }
                 }
                 LevelEvent::None
@@ -780,6 +790,9 @@ impl Level {
                         0 => {
                             let v = r.u8()?;
                             if idx == 0 {
+                                if id == self.own_id {
+                                    self.own_flags = v;
+                                }
                                 if let Some(e) = self.entities.map.get_mut(&id) {
                                     e.flags = v;
                                 }
@@ -812,12 +825,19 @@ impl Level {
                         1 | 20 => {
                             let v = r.var_int()?;
                             if ty == 20 && idx == 6 {
+                                if id == self.own_id {
+                                    self.own_pose = v;
+                                }
                                 if let Some(e) = self.entities.map.get_mut(&id) {
                                     e.pose = v;
                                 }
                             }
                             if ty == 1 {
                                 self.set_int_meta(id, idx, v);
+                            }
+                            // VANILLA: Entity#DATA_TICKS_FROZEN (#7) локального игрока.
+                            if ty == 1 && idx == 7 && id == self.own_id {
+                                self.own_frozen = v;
                             }
                             if ty == 1 && idx == 8 {
                                 if let Some(e) = self.entities.map.get_mut(&id) {
@@ -875,8 +895,27 @@ impl Level {
                             r.bytes(8)?;
                         }
                         11 => {
-                            if r.bool()? {
-                                r.bytes(8)?;
+                            let pos = if r.bool()? {
+                                // BlockPos#asLong: x 26 бит (<<38), z 26 бит (<<12), y 12 бит.
+                                let b = r.bytes(8)?;
+                                let v = i64::from_be_bytes([
+                                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                                ]);
+                                Some([
+                                    (v >> 38) as i32,
+                                    (v << 52 >> 52) as i32,
+                                    (v << 26 >> 38) as i32,
+                                ])
+                            } else {
+                                None
+                            };
+                            if idx == 14 {
+                                if id == self.own_id {
+                                    self.own_sleep_pos = pos;
+                                }
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    e.sleep_pos = pos;
+                                }
                             }
                         }
                         // VANILLA: EntityDataSerializers#VILLAGER_DATA — holder(type), holder(profession), level (VarInt ×3).

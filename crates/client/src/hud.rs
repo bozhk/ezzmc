@@ -354,6 +354,246 @@ fn ensure_icon(
     false
 }
 
+/// VANILLA: Hud#extractSleepOverlay — заливка 0x101020, альфа 220·amount.
+pub fn draw_sleep_overlay(
+    p: &mut GuiPainter,
+    dev: &wgpu::Device,
+    q: &wgpu::Queue,
+    gw: f32,
+    gh: f32,
+    sleep_timer: i32,
+) {
+    if sleep_timer <= 0 {
+        return;
+    }
+    let t = sleep_timer as f32;
+    let mut amount = t / 100.0;
+    if amount > 1.0 {
+        amount = 1.0 - (t - 100.0) / 10.0;
+    }
+    let a = (220.0 * amount) as u32;
+    const KEY: &str = "white_1x1";
+    if !p.has(KEY) {
+        p.add_texture(dev, q, KEY, &[255; 4], 1, 1, false);
+    }
+    p.blit(
+        KEY,
+        0.0,
+        0.0,
+        gw,
+        gh,
+        [0.0, 0.0, 1.0, 1.0],
+        (a << 24) | 0x0010_1020,
+    );
+}
+
+/// VANILLA: Hud#extractPortalOverlay — спрайт nether_portal на весь экран, альфа по интенсивности.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_portal_overlay(
+    p: &mut GuiPainter,
+    dev: &wgpu::Device,
+    q: &wgpu::Queue,
+    rm: &ResourceManager,
+    gw: f32,
+    gh: f32,
+    intensity: f32,
+    frame: u32,
+) {
+    const KEY: &str = "nether_portal_strip";
+    if !p.has(KEY) {
+        let Some(img) = rm
+            .read("assets/minecraft/textures/block/nether_portal.png")
+            .and_then(|d| ezzmc_assets::texture::Image::decode_png(&d).ok())
+        else {
+            return;
+        };
+        p.add_texture(dev, q, KEY, &img.to_rgba8(), img.width, img.height, false);
+    }
+    let mut a = intensity;
+    if a < 1.0 {
+        a *= a;
+        a *= a;
+        a = a * 0.8 + 0.2;
+    }
+    let argb = (((a.clamp(0.0, 1.0) * 255.0) as u32) << 24) | 0x00FF_FFFF;
+    // Полоса 16×(16·N): кадры идут подряд сверху вниз.
+    let n = 32u32;
+    let f = frame % n;
+    let (v0, v1) = (f as f32 / n as f32, (f + 1) as f32 / n as f32);
+    p.blit(KEY, 0.0, 0.0, gw, gh, [0.0, v0, 1.0, v1], argb);
+}
+
+/// VANILLA: ScreenEffectRenderer#submitWater — underwater.png, UV ×4 со сдвигом по взгляду, альфа 0.1·яркость.
+/// Квад на весь экран с UV 4 развёрнут тайлами (GUI-сэмплер не повторяет текстуру).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_water_overlay(
+    p: &mut GuiPainter,
+    dev: &wgpu::Device,
+    q: &wgpu::Queue,
+    rm: &ResourceManager,
+    gw: f32,
+    gh: f32,
+    brightness: f32,
+    yaw: f32,
+    pitch: f32,
+) {
+    const KEY: &str = "underwater_overlay";
+    if !p.has(KEY) {
+        let Some(img) = rm
+            .read("assets/minecraft/textures/misc/underwater.png")
+            .and_then(|d| ezzmc_assets::texture::Image::decode_png(&d).ok())
+        else {
+            return;
+        };
+        p.add_texture(dev, q, KEY, &img.to_rgba8(), img.width, img.height, false);
+    }
+    let (uo, vo) = (-yaw / 64.0, pitch / 64.0);
+    let b = (brightness.clamp(0.0, 1.0) * 255.0) as u32;
+    let argb = (25u32 << 24) | (b << 16) | (b << 8) | b;
+    // U(x) = uo + 4·(1 − x/gw), V(y) = vo + 4·y/gh; тайл = целая клетка (k..k+1, m..m+1).
+    let (k0, k1) = ((uo - 0.0).floor() as i32, (uo + 4.0).ceil() as i32);
+    let (m0, m1) = (vo.floor() as i32, (vo + 4.0).ceil() as i32);
+    for k in k0..k1 {
+        let x0 = gw * (1.0 - (k as f32 + 1.0 - uo) / 4.0);
+        let x1 = gw * (1.0 - (k as f32 - uo) / 4.0);
+        for m in m0..m1 {
+            let y0 = gh * (m as f32 - vo) / 4.0;
+            let y1 = gh * (m as f32 + 1.0 - vo) / 4.0;
+            p.blit(KEY, x0, y0, x1 - x0, y1 - y0, [1.0, 0.0, 0.0, 1.0], argb);
+        }
+    }
+}
+
+/// VANILLA: ScreenEffectRenderer#submitFire — два квада fire_1 (0.9 альфа) на z=−0.5, сдвиг (±0.24, −0.3),
+/// поворот ±10° вокруг Y. Приближение в 2D: масштаб экрана при fov 70° и z=0.5 (VANILLA-UNSURE: без перспективного перекоса).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_fire_overlay(
+    p: &mut GuiPainter,
+    dev: &wgpu::Device,
+    q: &wgpu::Queue,
+    rm: &ResourceManager,
+    gw: f32,
+    gh: f32,
+    frame: u32,
+) {
+    const KEY: &str = "fire_overlay_strip";
+    if !p.has(KEY) {
+        let Some(img) = rm
+            .read("assets/minecraft/textures/block/fire_1.png")
+            .and_then(|d| ezzmc_assets::texture::Image::decode_png(&d).ok())
+        else {
+            return;
+        };
+        p.add_texture(dev, q, KEY, &img.to_rgba8(), img.width, img.height, false);
+    }
+    let n = 32u32;
+    let f = frame % n;
+    let (v0, v1) = (f as f32 / n as f32, (f + 1) as f32 / n as f32);
+    let unit = gh / (2.0 * (35.0f32.to_radians().tan() * 0.5));
+    let side = unit * 10.0f32.to_radians().cos();
+    for sx in [0.24f32, -0.24] {
+        let cx = gw * 0.5 + sx * unit;
+        let cy = gh * 0.5 + 0.3 * unit;
+        p.blit(
+            KEY,
+            cx - side * 0.5,
+            cy - unit * 0.5,
+            side,
+            unit,
+            [1.0, v0, 0.0, v1],
+            0xE5FF_FFFF,
+        );
+    }
+}
+
+/// VANILLA: ScreenEffectRenderer#submitBlockSprite — спрайт частицы блока на весь экран, цвет 0xFF191919.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_block_overlay(
+    p: &mut GuiPainter,
+    dev: &wgpu::Device,
+    q: &wgpu::Queue,
+    atlas: &(Vec<u8>, u32, u32),
+    gw: f32,
+    gh: f32,
+    sp: ezzmc_assets::bake::SpriteUv,
+) {
+    const KEY: &str = "block_atlas_overlay";
+    if !p.has(KEY) {
+        p.add_texture(dev, q, KEY, &atlas.0, atlas.1, atlas.2, false);
+    }
+    // buildQuad: левый нижний угол получает (u1, v1), правый верхний (u0, v0) → зеркало по горизонтали.
+    p.blit(
+        KEY,
+        0.0,
+        0.0,
+        gw,
+        gh,
+        [sp.u1, sp.v0, sp.u0, sp.v1],
+        0xFF19_1919,
+    );
+}
+
+/// VANILLA: Hud#extractTextureOverlay — текстура misc/<name> на весь экран, белый с альфой.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_texture_overlay(
+    p: &mut GuiPainter,
+    dev: &wgpu::Device,
+    q: &wgpu::Queue,
+    rm: &ResourceManager,
+    gw: f32,
+    gh: f32,
+    name: &str,
+    alpha: f32,
+    linear: bool,
+) {
+    let key = format!("overlay_{name}");
+    if !p.has(&key) {
+        let Some(img) = rm
+            .read(&format!("assets/minecraft/textures/misc/{name}.png"))
+            .and_then(|d| ezzmc_assets::texture::Image::decode_png(&d).ok())
+        else {
+            return;
+        };
+        p.add_texture(dev, q, &key, &img.to_rgba8(), img.width, img.height, linear);
+    }
+    let argb = (((alpha.clamp(0.0, 1.0) * 255.0) as u32) << 24) | 0x00FF_FFFF;
+    p.blit(&key, 0.0, 0.0, gw, gh, [0.0, 0.0, 1.0, 1.0], argb);
+}
+
+/// VANILLA: Hud#extractSpyglassOverlay — квадрат scope по центру (min(w,h)·scale), остальное чёрное.
+pub fn draw_spyglass_overlay(
+    p: &mut GuiPainter,
+    dev: &wgpu::Device,
+    q: &wgpu::Queue,
+    rm: &ResourceManager,
+    gw: f32,
+    gh: f32,
+    scale: f32,
+) {
+    let key = "overlay_spyglass_scope";
+    if !p.has(key) {
+        let Some(img) = rm
+            .read("assets/minecraft/textures/misc/spyglass_scope.png")
+            .and_then(|d| ezzmc_assets::texture::Image::decode_png(&d).ok())
+        else {
+            return;
+        };
+        p.add_texture(dev, q, key, &img.to_rgba8(), img.width, img.height, false);
+    }
+    let side = gw.min(gh);
+    let size = (side * scale).floor();
+    let left = ((gw - size) / 2.0).floor();
+    let top = ((gh - size) / 2.0).floor();
+    let (right, bottom) = (left + size, top + size);
+    let uv = [0.0, 0.0, 1.0, 1.0];
+    p.blit(key, left, top, size, size, uv, 0xFFFF_FFFF);
+    let black = 0xFF00_0000;
+    p.blit("white", 0.0, bottom, gw, gh - bottom, uv, black);
+    p.blit("white", 0.0, 0.0, gw, top, uv, black);
+    p.blit("white", 0.0, top, left, bottom - top, uv, black);
+    p.blit("white", right, top, gw - right, bottom - top, uv, black);
+}
+
 /// VANILLA: Hud#extractCrosshair — спрайт 15×15 по центру (целочисленное деление), инверсный бленд;
 /// индикатор атаки под прицелом. Спектатор: только если цель интерактивна (`has_target`).
 /// `strength` — Player#getAttackStrengthScale; `living_target` — цель-сущность LivingEntity; `delay` — тиков на атаку.
@@ -460,6 +700,35 @@ pub fn draw_hotbar(
         let y = y0 + 3.0;
         stack_icon(p, dev, q, rm, s, x, y);
         stack_count(t, s, x, y);
+    }
+}
+
+/// Иконка стека уменьшенного размера `size` без декораций (оверлей вариантов книги рецептов).
+#[allow(clippy::too_many_arguments)]
+pub fn stack_icon_sized(
+    p: &mut GuiPainter,
+    dev: &wgpu::Device,
+    q: &wgpu::Queue,
+    rm: &ResourceManager,
+    s: &ItemStack,
+    x: f32,
+    y: f32,
+    size: f32,
+) {
+    let Some(name) = ezzmc_protocol::generated::r26_3::ITEM.get(s.item as usize) else {
+        return;
+    };
+    let cx = crate::itemicon::dynamic(name, crate::itemicon::ctx_of(&s.patch));
+    if ensure_icon(p, dev, q, rm, name, &cx) {
+        p.blit(
+            &icon_key(name, &cx),
+            x,
+            y,
+            size,
+            size,
+            [0.0, 0.0, 1.0, 1.0],
+            0xFFFF_FFFF,
+        );
     }
 }
 
@@ -572,7 +841,11 @@ pub fn patch_icon(
     let cx = crate::itemicon::dynamic(name, crate::itemicon::ctx_of(patch));
     name_icon_ctx(p, dev, q, rm, name, &cx, x, y);
     if has_foil(name, patch) && p.has(&icon_key(name, &cx)) {
-        glint_frame(p, 0.5, 0.75);
+        glint_frame(
+            p,
+            f64::from(crate::armor::glint_speed()),
+            ezzmc_render::particledraw::glint_strength(),
+        );
         p.glint(&icon_key(name, &cx), x, y, 16.0, 16.0);
     }
 }

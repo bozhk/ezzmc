@@ -50,6 +50,8 @@ pub struct Entity {
     pub ints: Vec<(u8, i32)>,
     /// Entity#DATA_POSE (метаданные #6): ординал Pose (0 STANDING, 6 LONG_JUMPING, 11 ROARING … 17 INHALING).
     pub pose: i32,
+    /// LivingEntity#SLEEPING_POS (#14): клетка кровати.
+    pub sleep_pos: Option<[i32; 3]>,
     /// Метаданные #16 типа BYTE (Bat#DATA_ID_FLAGS: бит 1 = висит).
     pub byte16: u8,
     /// Стак предмета (метаданные #8 у `item`).
@@ -154,6 +156,7 @@ impl Entity {
             paddle: [false; 2],
             ints: Vec::new(),
             pose: 0,
+            sleep_pos: None,
             byte16: 0,
             byte17: 0,
             byte18_set: false,

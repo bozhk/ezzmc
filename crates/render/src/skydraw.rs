@@ -23,6 +23,7 @@ enum Slot {
     Moon,
     Stars,
     Dark,
+    End,
 }
 
 /// Спрайты светил: RGBA8, все одного размера; `moons[i]` — `MoonPhase.index() == i`.
@@ -31,6 +32,8 @@ pub struct CelestialImages {
     pub height: u32,
     pub sun: Vec<u8>,
     pub moons: [Vec<u8>; 8],
+    /// `environment/end_sky.png` (RGBA8, ширина, высота).
+    pub end_sky: (Vec<u8>, u32, u32),
 }
 
 pub struct SkyDraw {
@@ -53,6 +56,10 @@ pub struct SkyDraw {
     sunrise_n: u32,
     quad_vb: wgpu::Buffer,
     quad_ib: wgpu::Buffer,
+    p_end: wgpu::RenderPipeline,
+    end_group1: wgpu::BindGroup,
+    end_vb: wgpu::Buffer,
+    end_ib: wgpu::Buffer,
     /// Видимое состояние последнего `prepare`.
     state: Option<(SkyState, bool)>,
 }
@@ -398,6 +405,102 @@ impl SkyDraw {
         }
         let quad_idx = quad_indices(1);
 
+        // VANILLA: RenderPipelines#END_SKY (position_tex_color, TRANSLUCENT) + SkyRenderer#buildEndSky:
+        // 6 граней куба ±100, uv 0..16 (текстура повторяется), цвет 0xFF282828.
+        let ptc_attr = [
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: 12,
+                shader_location: 1,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Unorm8x4,
+                offset: 20,
+                shader_location: 2,
+            },
+        ];
+        let ptc_layout = wgpu::VertexBufferLayout {
+            array_stride: 24,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &ptc_attr,
+        };
+        let p_end = make(
+            "end_sky",
+            Shader::PositionTexColor,
+            &pl1,
+            ptc_layout,
+            Some(translucent),
+        );
+        let (ew, eh) = (images.end_sky.1.max(1), images.end_sky.2.max(1));
+        let end_tex = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("end_sky"),
+                size: wgpu::Extent3d {
+                    width: ew,
+                    height: eh,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &images.end_sky.0,
+        );
+        let end_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let end_view = end_tex.create_view(&Default::default());
+        let end_group1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("end_sky.group1"),
+            layout: &l1,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&end_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&end_sampler),
+                },
+            ],
+        });
+        let mut end_v: Vec<[f32; 6]> = Vec::new();
+        let col = f32::from_bits(u32::from_le_bytes([0x28, 0x28, 0x28, 0xFF]));
+        for i in 0..6 {
+            let m = match i {
+                1 => Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                2 => Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                3 => Mat4::from_rotation_x(std::f32::consts::PI),
+                4 => Mat4::from_rotation_z(std::f32::consts::FRAC_PI_2),
+                5 => Mat4::from_rotation_z(-std::f32::consts::FRAC_PI_2),
+                _ => Mat4::IDENTITY,
+            };
+            for (p, u, v) in [
+                ([-100.0, -100.0, -100.0], 0.0, 0.0),
+                ([-100.0, -100.0, 100.0], 0.0, 16.0),
+                ([100.0, -100.0, 100.0], 16.0, 16.0),
+                ([100.0, -100.0, -100.0], 16.0, 0.0),
+            ] {
+                let q = m.transform_point3(Vec3::from(p));
+                end_v.push([q.x, q.y, q.z, u, v, col]);
+            }
+        }
+        let end_idx = quad_indices(6);
+
         Self {
             dyn_buf,
             group0,
@@ -418,6 +521,10 @@ impl SkyDraw {
             sunrise_n: fan_idx.len() as u32,
             quad_vb: vbuf("sky.quads", bytes(&q)),
             quad_ib: ibuf("sky.quad.i", &quad_idx),
+            p_end,
+            end_group1,
+            end_vb: vbuf("end_sky.vb", bytes(&end_v)),
+            end_ib: ibuf("end_sky.ib", &end_idx),
             state: None,
         }
     }
@@ -490,6 +597,17 @@ impl SkyDraw {
             [0.0, 0.0, 0.0, 1.0],
         );
         self.state = Some((*st, dark_disc));
+    }
+
+    /// VANILLA: SkyRenderer#renderEndSky — куб с текстурой end_sky, modelView = вращение камеры.
+    pub fn draw_end(&self, queue: &wgpu::Queue, pass: &mut wgpu::RenderPass<'_>, camera: Mat4) {
+        self.write(queue, Slot::End, camera, [1.0; 4]);
+        pass.set_pipeline(&self.p_end);
+        pass.set_bind_group(0, &self.group0, &[Slot::End as u32 * SLOT as u32]);
+        pass.set_bind_group(1, &self.end_group1, &[]);
+        pass.set_vertex_buffer(0, self.end_vb.slice(..));
+        pass.set_index_buffer(self.end_ib.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..36, 0, 0..1);
     }
 
     /// Рисует небо в уже открытом проходе мира (до террейна). Нужен вызов `prepare`.

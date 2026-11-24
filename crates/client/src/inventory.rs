@@ -192,6 +192,8 @@ pub struct Inventory {
     /// Уровень опыта и «бесконечные материалы» (креатив/наблюдатель) — для экранов контейнеров.
     pub xp_level: i32,
     pub infinite_materials: bool,
+    /// VANILLA: ClientRecipeBook#isOpen по типам (крафт, печь, плавильня, коптильня) — книга рецептов раскрыта (сдвигает окно влево).
+    pub book_open: [bool; 4],
 }
 
 impl Default for Inventory {
@@ -205,6 +207,7 @@ impl Default for Inventory {
             drop_spam: 0,
             xp_level: 0,
             infinite_materials: false,
+            book_open: [false; 4],
         }
     }
 }

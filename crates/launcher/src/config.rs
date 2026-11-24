@@ -62,6 +62,7 @@ pub struct Settings {
 
 pub fn home() -> PathBuf {
     std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
 }
@@ -70,7 +71,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             target: 0,
-            game_dir: home().join(".minecraft").to_string_lossy().into_owned(),
+            game_dir: default_game_dir().to_string_lossy().into_owned(),
             java_path: String::new(),
             ram_min_mb: 1024,
             ram_max_mb: 4096,
@@ -95,7 +96,22 @@ pub struct Config {
     pub settings: Settings,
 }
 
+/// Windows: %APPDATA%\\.minecraft, иначе ~/.minecraft.
+fn default_game_dir() -> PathBuf {
+    if cfg!(windows) {
+        if let Some(a) = std::env::var_os("APPDATA") {
+            return PathBuf::from(a).join(".minecraft");
+        }
+    }
+    home().join(".minecraft")
+}
+
 pub fn config_dir() -> PathBuf {
+    if cfg!(windows) {
+        if let Some(a) = std::env::var_os("APPDATA") {
+            return PathBuf::from(a).join("ezzmc-launcher");
+        }
+    }
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join(".config"))
@@ -103,6 +119,11 @@ pub fn config_dir() -> PathBuf {
 }
 
 pub fn data_dir() -> PathBuf {
+    if cfg!(windows) {
+        if let Some(a) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(a).join("ezzmc-launcher");
+        }
+    }
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join(".local/share"))

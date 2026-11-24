@@ -502,9 +502,13 @@ fn add_modded(
             continue;
         }
         let total = variants.iter().map(|v| v.1).sum();
-        // VANILLA-UNSURE: биомные тинты модов (NeedsLevel) — листва/трава по имени (TODO-509)
+        // Биомный цвет — как распознал дампер (TODO-509); нераспознанный (старый дамп или
+        // обработчик сложнее «взять цвет биома») — VANILLA-UNSURE: по имени блока.
         let tint = match bake.tint(st, 0) {
             BakeTint::Color(c) => TintKind::Fixed(c),
+            BakeTint::Grass => TintKind::Grass,
+            BakeTint::Foliage => TintKind::Foliage,
+            BakeTint::Water => TintKind::Water,
             BakeTint::NeedsLevel if block.name.contains("grass") => TintKind::Grass,
             BakeTint::NeedsLevel if block.name.contains("water") => TintKind::Water,
             BakeTint::NeedsLevel => TintKind::Foliage,

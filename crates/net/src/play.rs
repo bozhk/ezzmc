@@ -805,6 +805,36 @@ impl PlayHandler {
         conn.send(self.sid("rename_item")?, &w.buf)
     }
 
+    /// VANILLA: ServerboundPlaceRecipePacket(containerId, RecipeDisplayId, useMaxItems) (26.x).
+    pub fn send_place_recipe(
+        &self,
+        conn: &mut Connection,
+        container: i32,
+        recipe: i32,
+        use_max: bool,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.var_int(container);
+        w.var_int(recipe);
+        w.bool(use_max);
+        conn.send(self.sid("place_recipe")?, &w.buf)
+    }
+
+    /// VANILLA: ServerboundRecipeBookChangeSettingsPacket(RecipeBookType, open, filtering).
+    pub fn send_recipe_book_settings(
+        &self,
+        conn: &mut Connection,
+        book_type: i32,
+        open: bool,
+        filtering: bool,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.var_int(book_type);
+        w.bool(open);
+        w.bool(filtering);
+        conn.send(self.sid("recipe_book_change_settings")?, &w.buf)
+    }
+
     /// VANILLA: ServerboundSignUpdatePacket(pos, 4 строки, slot). Слот — VarInt (26.x: BACK=0, FRONT=1);
     /// у 1.20–1.21 то же как bool, байт совпадает.
     pub fn send_sign_update(
@@ -829,10 +859,152 @@ impl PlayHandler {
         conn.send(self.sid("sign_update")?, &w.buf)
     }
 
+    /// VANILLA: ServerboundSetCommandBlockPacket (pos, command, mode enum, flags: 1 track, 2 conditional, 4 auto).
+    pub fn send_set_command_block(
+        &self,
+        conn: &mut Connection,
+        pos: [i32; 3],
+        command: &str,
+        mode: u8,
+        flags: u8,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        ezzmc_protocol::types::BlockPos::new(pos[0], pos[1], pos[2]).write(&mut w);
+        w.string(command);
+        w.var_int(i32::from(mode));
+        w.u8(flags);
+        conn.send(self.sid("set_command_block")?, &w.buf)
+    }
+
+    /// VANILLA: ServerboundSetStructureBlockPacket.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_set_structure_block(
+        &self,
+        conn: &mut Connection,
+        pos: [i32; 3],
+        update: u8,
+        mode: u8,
+        name: &str,
+        offset: [i32; 3],
+        size: [i32; 3],
+        mirror: u8,
+        rot: u8,
+        data: &str,
+        integrity: f32,
+        seed: i64,
+        flags: u8,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        ezzmc_protocol::types::BlockPos::new(pos[0], pos[1], pos[2]).write(&mut w);
+        w.var_int(i32::from(update));
+        w.var_int(i32::from(mode));
+        w.string(name);
+        // VANILLA: смещение и размер — байты (клэмп ±48 / 0..48 делает сервер).
+        for v in offset.iter().chain(size.iter()) {
+            w.u8((*v).clamp(-128, 127) as i8 as u8);
+        }
+        w.var_int(i32::from(mirror));
+        w.var_int(i32::from(rot));
+        w.string(data);
+        w.f32(integrity);
+        w.var_long(seed);
+        w.u8(flags);
+        conn.send(self.sid("set_structure_block")?, &w.buf)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// VANILLA: ServerboundSetJigsawBlockPacket (ids: name, target, pool; joint: 0 rollable / 1 aligned).
+    pub fn send_set_jigsaw_block(
+        &self,
+        conn: &mut Connection,
+        pos: [i32; 3],
+        ids: [&str; 3],
+        final_state: &str,
+        joint: u8,
+        selection: i32,
+        placement: i32,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        ezzmc_protocol::types::BlockPos::new(pos[0], pos[1], pos[2]).write(&mut w);
+        for id in ids {
+            w.string(id);
+        }
+        w.string(final_state);
+        w.string(if joint == 1 { "aligned" } else { "rollable" });
+        w.var_int(selection);
+        w.var_int(placement);
+        conn.send(self.sid("set_jigsaw_block")?, &w.buf)
+    }
+
+    /// VANILLA: ServerboundSetTestBlockPacket.
+    pub fn send_set_test_block(
+        &self,
+        conn: &mut Connection,
+        pos: [i32; 3],
+        mode: u8,
+        message: &str,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        ezzmc_protocol::types::BlockPos::new(pos[0], pos[1], pos[2]).write(&mut w);
+        w.var_int(i32::from(mode));
+        w.string(message);
+        conn.send(self.sid("set_test_block")?, &w.buf)
+    }
+
+    /// VANILLA: ServerboundChangeGameModePacket (VarInt id режима).
+    pub fn send_change_game_mode(&self, conn: &mut Connection, mode: i8) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.var_int(i32::from(mode));
+        conn.send(self.sid("change_game_mode")?, &w.buf)
+    }
+
+    /// VANILLA: ServerboundJigsawGeneratePacket.
+    pub fn send_jigsaw_generate(
+        &self,
+        conn: &mut Connection,
+        pos: [i32; 3],
+        levels: i32,
+        keep: bool,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        ezzmc_protocol::types::BlockPos::new(pos[0], pos[1], pos[2]).write(&mut w);
+        w.var_int(levels);
+        w.u8(u8::from(keep));
+        conn.send(self.sid("jigsaw_generate")?, &w.buf)
+    }
+
+    /// VANILLA: ServerboundEditBookPacket (slot VarInt, pages ≤100 × 1024, Optional title ≤32).
+    pub fn send_edit_book(
+        &self,
+        conn: &mut Connection,
+        slot: i32,
+        pages: &[String],
+        title: Option<&str>,
+    ) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.var_int(slot);
+        w.var_int(pages.len() as i32);
+        for p in pages {
+            w.string(p);
+        }
+        w.bool(title.is_some());
+        if let Some(t) = title {
+            w.string(t);
+        }
+        conn.send(self.sid("edit_book")?, &w.buf)
+    }
+
     /// VANILLA: ServerboundClientCommandPacket(PERFORM_RESPAWN = 0).
     pub fn send_respawn(&self, conn: &mut Connection) -> NetResult<()> {
         let mut w = Writer::new();
         w.var_int(0);
+        conn.send(self.sid("client_command")?, &w.buf)
+    }
+
+    /// VANILLA: ServerboundClientCommandPacket(REQUEST_STATS = 1).
+    pub fn send_request_stats(&self, conn: &mut Connection) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.var_int(1);
         conn.send(self.sid("client_command")?, &w.buf)
     }
 
@@ -915,6 +1087,13 @@ impl PlayHandler {
     /// VANILLA: ServerboundPlayerAbilitiesPacket — байт флагов, бит1 = летит.
     pub fn send_abilities(&self, conn: &mut Connection, flying: bool) -> NetResult<()> {
         conn.send(self.sid("player_abilities")?, &[u8::from(flying) << 1])
+    }
+
+    /// VANILLA: ServerboundPlayerCommandPacket(STOP_SLEEPING): entity id, action 0, data 0.
+    pub fn send_stop_sleeping(&self, conn: &mut Connection) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.var_int(self.player_id).var_int(0).var_int(0);
+        conn.send(self.sid("player_command")?, &w.buf)
     }
 
     /// VANILLA: ServerboundPlayerCommandPacket(START/STOP_SPRINTING): entity id, action (1/2), data 0.

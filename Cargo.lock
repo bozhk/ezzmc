@@ -1570,6 +1570,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
+ "ureq",
  "wgpu 28.0.0",
  "winit",
 ]

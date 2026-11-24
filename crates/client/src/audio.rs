@@ -42,6 +42,26 @@ pub static STARTED: AtomicU32 = AtomicU32::new(0);
 /// Число играющих голосов категории Music (для MusicManager).
 pub static MUSIC_ACTIVE: AtomicU32 = AtomicU32::new(0);
 
+/// Ключ перевода играющего музыкального трека (VANILLA: Identifier#toShortLanguageKey файла звука,
+/// `/`→`.`). Пишет аудио-поток при старте голоса Music; сбрасывает MusicManager перед запуском.
+pub static MUSIC_KEY: Mutex<Option<String>> = Mutex::new(None);
+
+/// Громкость категории Music с учётом Master (VANILLA: getFinalSoundSourceVolume).
+pub fn music_volume() -> f32 {
+    cat_volume(Cat::Music)
+}
+
+fn music_key(path: &str) -> String {
+    let rest = path.strip_prefix("assets/").unwrap_or(path);
+    let (ns, p) = rest.split_once("/sounds/").unwrap_or(("minecraft", rest));
+    let p = p.strip_suffix(".ogg").unwrap_or(p).replace('/', ".");
+    if ns == "minecraft" {
+        p
+    } else {
+        format!("{ns}.{p}")
+    }
+}
+
 static CAT_VOL: [AtomicU32; 11] = [const { AtomicU32::new(0x3f80_0000) }; 11];
 
 /// Громкость категории 0..1 (VANILLA: Options#getFinalSoundSourceVolume).
@@ -481,6 +501,11 @@ fn worker(rx: Receiver<Cmd>) {
                 let Some(pcm) = pcm else { continue };
                 let pitch = (r.pitch * p.pitch).clamp(0.5, 2.0);
                 let looping = r.gain.is_some();
+                if r.cat == Cat::Music {
+                    if let Ok(mut k) = MUSIC_KEY.lock() {
+                        *k = Some(music_key(&p.path));
+                    }
+                }
                 let _ = mtx.send(MixCmd::Add(Voice {
                     step: f64::from(pcm.rate) / f64::from(out_rate) * f64::from(pitch),
                     pcm,

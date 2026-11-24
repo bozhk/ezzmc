@@ -26,6 +26,14 @@ pub struct ViewCfg {
     pub parts: u8,
     pub sprint_window: u8,
     pub auto_jump: bool,
+    /// Accessibility: screenEffectScale / fovEffectScale / darknessEffectScale / damageTiltStrength / glint*.
+    pub screen_effect: f32,
+    pub fov_effect: f32,
+    pub darkness_effect: f32,
+    pub damage_tilt: f32,
+    pub glint_speed: f32,
+    pub glint_strength: f32,
+    pub high_contrast_outline: bool,
 }
 
 impl Default for ViewCfg {
@@ -44,6 +52,13 @@ impl Default for ViewCfg {
             parts: 0x7F,
             sprint_window: 7,
             auto_jump: false,
+            screen_effect: 1.0,
+            fov_effect: 1.0,
+            darkness_effect: 1.0,
+            damage_tilt: 1.0,
+            glint_speed: 0.5,
+            glint_strength: 0.75,
+            high_contrast_outline: false,
         }
     }
 }
@@ -72,6 +87,13 @@ impl ViewCfg {
                 .round()
                 .clamp(0.0, 10.0) as u8,
             auto_jump: b(crate::ui::options::CONTROLS, "autoJump"),
+            screen_effect: o.f32(find(ACCESSIBILITY, "screenEffectScale")),
+            fov_effect: o.f32(find(ACCESSIBILITY, "fovEffectScale")),
+            darkness_effect: o.f32(find(ACCESSIBILITY, "darknessEffectScale")),
+            damage_tilt: o.f32(find(ACCESSIBILITY, "damageTiltStrength")),
+            glint_speed: o.f32(find(ACCESSIBILITY, "glintSpeed")),
+            glint_strength: o.f32(find(ACCESSIBILITY, "glintStrength")),
+            high_contrast_outline: b(ACCESSIBILITY, "highContrastBlockOutline"),
         }
     }
 }
@@ -110,7 +132,11 @@ pub fn render_distance(o: &Options) -> i32 {
     std::env::var("EZZMC_RENDER_DISTANCE")
         .ok()
         .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or_else(|| o.get(&VIDEO[0]).parse::<i32>().unwrap_or(12))
+        .unwrap_or_else(|| {
+            o.get(&VIDEO[crate::ui::options::RENDER_DISTANCE])
+                .parse::<i32>()
+                .unwrap_or(12)
+        })
         .clamp(2, 127)
 }
 
@@ -118,7 +144,8 @@ pub fn client_info(o: &Options) -> ClientInformation {
     let mask = model_mask(o);
     ClientInformation {
         view_distance: render_distance(o) as i8,
-        chat_colors: o.get(&CHAT[0]) == "true",
+        chat_visibility: o.get(&CHAT[0]).parse().unwrap_or(0),
+        chat_colors: o.get(&CHAT[1]) == "true",
         model_customisation: mask,
         main_hand: i32::from(o.get(find(SKIN, "mainHand")) != "left"),
         particle_status: o.get(find(VIDEO, "particles")).parse().unwrap_or(0),

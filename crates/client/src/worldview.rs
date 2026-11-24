@@ -25,6 +25,7 @@ use ezzmc_world::block::BlockState;
 use ezzmc_world::level::{Level, LevelEvent};
 use glam::{Mat4, Vec3};
 use rustc_hash::FxHashSet as HashSet;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -67,6 +68,9 @@ const ARENA_RETRIES: u8 = 3;
 fn foil_of(st: &ezzmc_protocol::item::ItemStack) -> bool {
     crate::handitem::stack_ctx(st).is_some_and(|(n, _)| crate::hud::has_foil(n, &st.patch))
 }
+
+/// Слотов скинов (64×64) в атласе других игроков; слот 0 — Стив.
+const SKIN_SLOTS: u32 = 32;
 
 /// Неймтег игрока (собирается в `bake_remote_players`).
 struct NameTag {
@@ -122,6 +126,8 @@ pub struct WorldView {
     last_input: crate::physics::Input,
     /// GameType локального игрока (0 survival, 1 creative…).
     pub game_mode: i8,
+    /// VANILLA: MultiPlayerGameMode#previousPlayerMode (-1 — нет).
+    pub prev_game_mode: i8,
     /// Атрибуты локального игрока с сервера (UpdateAttributes); None — пакета ещё не было.
     block_range: Option<f64>,
     attack_speed: Option<f32>,
@@ -144,17 +150,31 @@ pub struct WorldView {
     clouds: ezzmc_render::clouddraw::CloudDraw,
     weather: ezzmc_render::weatherdraw::WeatherDraw,
     lightning: ezzmc_render::lightningdraw::LightningDraw,
+    end_portal_draw: ezzmc_render::endportaldraw::EndPortalDraw,
+    beacon_draw: ezzmc_render::beacondraw::BeaconDraw,
+    beacons: crate::beacon::Beacons,
+    beacon_batches: ezzmc_render::beacondraw::BeamBatches,
+    end_portals: crate::endportal::EndPortals,
+    end_portal_verts: Vec<ezzmc_render::endportaldraw::PortalVertex>,
     border_draw: ezzmc_render::borderdraw::BorderDraw,
     /// Модели сущностей (пока только аватар игрока от 3-го лица): скин Стива, слой одежды.
     entity_draw: ezzmc_render::particledraw::ParticleDraw,
+    /// Другие игроки: атлас скинов 64×(64·SKIN_SLOTS), слот 0 — Стив.
+    player_draw: ezzmc_render::particledraw::ParticleDraw,
+    skin_slots: HashMap<String, u32>,
+    player_model_slim: (
+        ezzmc_render::entitymodel::Model,
+        ezzmc_render::humanoid::HumanoidParts,
+    ),
+    skin_uploads: Vec<(u32, std::sync::Arc<Vec<u8>>)>,
     /// Броня игроков: отдельная текстура-атлас (`armor::ArmorKit`).
     armor_draw: ezzmc_render::particledraw::ParticleDraw,
     armor_kit: crate::armor::ArmorKit,
     /// Блеск зачарований брони (геометрия брони + текстура блеска).
     glint_draw: ezzmc_render::particledraw::ParticleDraw,
     /// Атласы для программного превью игрока (блоки — со старта, предметы — лениво).
-    preview_blocks: std::rc::Rc<(Vec<u8>, u32, u32)>,
-    preview_items: Option<std::rc::Rc<(Vec<u8>, u32, u32)>>,
+    preview_blocks: std::sync::Arc<(Vec<u8>, u32, u32)>,
+    preview_items: Option<std::sync::Arc<(Vec<u8>, u32, u32)>>,
     mobs: crate::mobs::Mobs,
     /// Id песни из level_event 1010 (Hud#setNowPlaying) — забирает main.
     pub now_playing: Option<i32>,
@@ -188,6 +208,8 @@ pub struct WorldView {
     /// Entity#wasTouchingWater чужих сущностей (для брызг при входе в воду).
     wet_entities: std::collections::HashMap<i32, bool>,
     sky_state: Option<ezzmc_render::sky::SkyState>,
+    /// Skybox.END: рисуется куб end_sky вместо неба Overworld.
+    end_sky: bool,
     fog_state: ezzmc_render::fog::FogState,
     vignette: ezzmc_render::vignette::VignetteDraw,
     /// Hud#vignetteBrightness и накопитель тиков.
@@ -226,8 +248,8 @@ pub struct WorldView {
     entity_glint_draw: Option<ezzmc_render::particledraw::ParticleDraw>,
     /// GPU-инстансинг дропов: модели на GPU (по указателю HandMesh), экземпляры текущего кадра.
     item_inst: Option<ezzmc_render::particledraw::ItemInstDraw>,
-    item_inst_map: std::collections::HashMap<*const crate::handitem::HandMesh, usize>,
-    item_inst_keep: Vec<std::rc::Rc<crate::handitem::HandMesh>>,
+    item_inst_map: std::collections::HashMap<usize, usize>,
+    item_inst_keep: Vec<std::sync::Arc<crate::handitem::HandMesh>>,
     item_inst_frame: Vec<ItemInstFrame>,
     /// VANILLA: ModelBakery#FIRE_0 / FIRE_1 (пламя горящих сущностей).
     fire_uv: Option<(ezzmc_assets::bake::SpriteUv, ezzmc_assets::bake::SpriteUv)>,
@@ -297,9 +319,19 @@ pub struct WorldView {
     boat_out: Option<crate::boat::BoatOut>,
     /// VANILLA: GameRenderer#fovModifier / oldFovModifier (сглаживание 0.5 за тик).
     fov_mod: (f32, f32),
+    /// LocalPlayer#spinningEffectTime/Speed (Nausea, портал).
+    spin: (f32, f32),
+    /// LocalPlayer#oPortalEffectIntensity / portalEffectIntensity.
+    portal_eff: (f32, f32),
+    /// VANILLA: Player#sleepCounter (0..110), см. `tick_sleep`.
+    sleep_timer: i32,
+    /// Поза SLEEPING у локального игрока (Entity#isSleeping), обновляется в `tick_sleep`.
+    pub sleeping: bool,
     /// Зум по удержанию (клавиша `key.zoom`): цель и текущий множитель FOV (1.0 — без зума).
     pub zoom_held: bool,
     pub zoom_factor: f32,
+    /// VANILLA: Hud#scopeScale — масштаб оверлея подзорной трубы (0.5 → 1.125).
+    pub scope_scale: f32,
     /// Снимок настроек (options.txt), обновляется из main каждый кадр.
     pub cfg: crate::settings::ViewCfg,
     /// Отладка (EZZMC_TOUR): не слать серверу позицию камеры.
@@ -310,6 +342,8 @@ pub struct WorldView {
     pub perspective: u8,
     pub status: Option<String>,
     pub joined: bool,
+    /// VANILLA: MultiPlayerGameMode#carriedIndex — последний отправленный серверу слот хотбара.
+    carried_sent: u8,
     /// Здоровье (0 — мёртв, показывается экран смерти).
     pub health: f32,
     /// Входящий чат для главного потока: (текст, индикатор; None — action bar).
@@ -323,6 +357,12 @@ pub struct WorldView {
     pub titles: crate::titles::Titles,
     pub subtitles: crate::subtitles::Subtitles,
     pub advancements: crate::advancements::Advancements,
+    /// ClientRecipeBook (TODO-323a).
+    pub recipes: crate::recipebook::RecipeBook,
+    /// Ghost-рецепт в окне крафта (GhostSlots): слоты меню с вариантами предметов.
+    pub ghost: Vec<crate::recipebook::GhostSlot>,
+    /// Статистика игрока (award_stats).
+    pub stats: crate::stats::Stats,
     /// Достижения, по которым пора показать toast (язык есть только у main).
     pub toast_in: Vec<String>,
     pub toasts: crate::toasts::ToastManager,
@@ -347,12 +387,24 @@ pub struct WorldView {
     /// Ник локального игрока (команды/scoreboard).
     pub own_name: String,
     nt_view: (Mat4, [f64; 3], f32),
+    /// ChatVisiblity id из настроек (выставляется из main каждый кадр).
+    pub chat_vis: i32,
+    /// VANILLA: PlayerSocialManager#hiddenPlayers — UUID, чьи сообщения скрыты (только в памяти).
+    pub hidden_players: std::collections::HashSet<u128>,
     pub chat_in: Vec<(ezzmc_protocol::text::Component, Option<crate::chat::Tag>)>,
     /// Диалоги от сервера: Some — показать, None — clear_dialog.
     pub dialog_in: Vec<Option<Box<crate::dialog::Dialog>>>,
     /// open_sign_editor: (позиция, передняя сторона) — забирает main.
     pub sign_in: Vec<([i32; 3], bool)>,
+    /// Клик по командному блоку (creative + op ≥ 2): (позиция, имя блока) — забирает main.
+    pub cmd_in: Vec<([i32; 3], &'static str)>,
+    /// block_entity_data пришёл для этих позиций — забирает main.
+    pub be_changed: Vec<[i32; 3]>,
+    /// ПКМ пером: (слот, страницы) — main открывает экран правки книги.
+    pub book_in: Option<(i32, Vec<String>)>,
     lines: ezzmc_render::lines::LineDraw,
+    /// Чёрная подложка контура блока при highContrastBlockOutline.
+    outline_back: ezzmc_render::lines::LineDraw,
     /// F3: 3D-прицел (чёрная обводка + оси X/Y/Z); `Some(guiScale)` включает.
     /// VANILLA: DebugCrosshairRenderer.
     pub debug_crosshair: Option<u32>,
@@ -363,6 +415,10 @@ pub struct WorldView {
     pub show_hitboxes: bool,
     /// Цвета: белый (бокс), красный (глаза), синий (взгляд), зелёный (части дракона).
     hit_lines: [ezzmc_render::lines::LineDraw; 4],
+    /// F3+G: границы чанков. VANILLA: ChunkBorderRenderer.
+    pub show_chunk_borders: bool,
+    /// Группы: красные w4, жёлтые w1, бирюзовые w1, синие толстые w4, синие тонкие w1.
+    border_lines: [ezzmc_render::lines::LineDraw; 5],
     /// Блок под прицелом (контур) и жидкость под прицелом (F3); обновляются в `update`.
     pub target: Option<crate::pick::Target>,
     pub fluid_target: Option<crate::pick::Target>,
@@ -476,6 +532,13 @@ fn load_celestials(rm: &ResourceManager) -> CelestialImages {
         height: h,
         sun: sun.to_rgba8(),
         moons: MOON_FILES.map(|n| fit(rd(&format!("moon/{n}")))),
+        end_sky: rm
+            .read("assets/minecraft/textures/environment/end_sky.png")
+            .and_then(|d| Image::decode_png(&d).ok())
+            .map_or_else(
+                || (vec![0, 0, 0, 255], 1, 1),
+                |i| (i.to_rgba8(), i.width, i.height),
+            ),
     }
 }
 
@@ -505,6 +568,33 @@ impl SwimPose {
             r
         }
     }
+}
+
+/// VANILLA: Pose.SLEEPING (ordinal).
+const POSE_SLEEPING: i32 = 2;
+
+/// VANILLA: Player#tick, ветка sleepCounter.
+fn next_sleep_timer(t: i32, sleeping: bool) -> i32 {
+    if sleeping {
+        (t + 1).min(100)
+    } else if t > 0 {
+        let n = t + 1;
+        if n >= 110 {
+            0
+        } else {
+            n
+        }
+    } else {
+        0
+    }
+}
+
+/// VANILLA: PlayerModel#translateToHand — у slim рука сдвигается на ±0.5 px по X до поворота.
+fn slim_hand_matrix(arm: Mat4, root: Mat4, slim: bool, side: f32) -> Mat4 {
+    if !slim {
+        return arm;
+    }
+    root * Mat4::from_translation(Vec3::new(0.5 * side / 16.0, 0.0, 0.0)) * root.inverse() * arm
 }
 
 impl WorldView {
@@ -556,9 +646,16 @@ impl WorldView {
         net: NetHandle,
         mesh_threads: usize,
         opts: RenderOptions,
+        prebuilt: Option<(BlockAtlas, BlockModels)>,
     ) -> Result<Self, String> {
-        let atlas = BlockAtlas::build(rm, 4)?;
-        let mut models = BlockModels::build(rm, &atlas, opts.cutout_leaves);
+        let (atlas, mut models) = match prebuilt {
+            Some(p) => p,
+            None => {
+                let atlas = BlockAtlas::build(rm, 4)?;
+                let models = BlockModels::build(rm, &atlas, opts.cutout_leaves);
+                (atlas, models)
+            }
+        };
         models.tints.maps.grass = load_colormap(rm, "grass");
         models.tints.maps.foliage = load_colormap(rm, "foliage");
         models.tints.maps.dry_foliage = load_colormap(rm, "dry_foliage");
@@ -689,6 +786,63 @@ impl WorldView {
             &projection_buf,
             &fog_buf,
         );
+        let end_portal_draw = {
+            let rd = |p: &str| {
+                rm.read(p)
+                    .and_then(|d| Image::decode_png(&d).ok())
+                    .map_or_else(
+                        || (vec![0, 0, 0, 255], 1, 1),
+                        |i| (i.to_rgba8(), i.width, i.height),
+                    )
+            };
+            let (sk, skw, skh) = rd("assets/minecraft/textures/environment/end_sky.png");
+            let (pt, ptw, pth) = rd("assets/minecraft/textures/entity/end_portal/end_portal.png");
+            ezzmc_render::endportaldraw::EndPortalDraw::new(
+                &gpu.device,
+                &gpu.queue,
+                color,
+                DEPTH_FORMAT,
+                &projection_buf,
+                &fog_buf,
+                &ezzmc_render::endportaldraw::Rgba {
+                    data: &sk,
+                    width: skw,
+                    height: skh,
+                },
+                &ezzmc_render::endportaldraw::Rgba {
+                    data: &pt,
+                    width: ptw,
+                    height: pth,
+                },
+            )
+        };
+        let beacon_draw = {
+            let rd = |p: &str| {
+                rm.read(p)
+                    .and_then(|d| Image::decode_png(&d).ok())
+                    .map_or_else(
+                        || (vec![255, 255, 255, 255], 1, 1),
+                        |i| (i.to_rgba8(), i.width, i.height),
+                    )
+            };
+            let (b, bw, bh) = rd("assets/minecraft/textures/entity/beacon/beacon_beam.png");
+            let (g, gw, gh) =
+                rd("assets/minecraft/textures/entity/end_portal/end_gateway_beam.png");
+            let img = |data, width, height| ezzmc_render::endportaldraw::Rgba {
+                data,
+                width,
+                height,
+            };
+            ezzmc_render::beacondraw::BeaconDraw::new(
+                &gpu.device,
+                &gpu.queue,
+                color,
+                DEPTH_FORMAT,
+                &projection_buf,
+                &fog_buf,
+                [&img(&b, bw, bh), &img(&g, gw, gh)],
+            )
+        };
         // VANILLA: ParticleResources — атлас `particles` и наборы спрайтов `particles/<name>.json`.
         let particle_atlas = BlockAtlas::build_named(rm, "particles", 0)
             .map_err(|e| tracing::warn!("атлас частиц: {e}"))
@@ -714,6 +868,7 @@ impl WorldView {
                 "bubble",
                 "portal",
                 "dragon_breath",
+                "end_rod",
                 "crit",
                 "explosion",
                 "poof",
@@ -769,8 +924,23 @@ impl WorldView {
             &atlas_view,
             skin.as_ref().map(|(d, w, h)| (d.as_slice(), *w, *h)),
         );
+        let mut skin_atlas = vec![0u8; (64 * 64 * SKIN_SLOTS * 4) as usize];
+        if let Some((d, _, _)) = skin.as_ref().filter(|(_, w, h)| *w == 64 && *h == 64) {
+            skin_atlas[..d.len()].copy_from_slice(d);
+        }
+        let player_draw = ezzmc_render::particledraw::ParticleDraw::new(
+            &gpu.device,
+            &gpu.queue,
+            color,
+            DEPTH_FORMAT,
+            &projection_buf,
+            &fog_buf,
+            &lightmap.view,
+            &atlas_view,
+            Some((skin_atlas.as_slice(), 64, 64 * SKIN_SLOTS)),
+        );
         let preview_blocks =
-            std::rc::Rc::new((atlas.mips[0].to_rgba8(), atlas.width, atlas.height));
+            std::sync::Arc::new((atlas.mips[0].to_rgba8(), atlas.width, atlas.height));
         let armor_kit = crate::armor::ArmorKit::new(rm);
         let armor_draw = ezzmc_render::particledraw::ParticleDraw::new(
             &gpu.device,
@@ -1004,8 +1174,18 @@ impl WorldView {
             clouds,
             weather,
             lightning,
+            end_portal_draw,
+            beacon_draw,
+            beacons: crate::beacon::Beacons::default(),
+            beacon_batches: Default::default(),
+            end_portals: crate::endportal::EndPortals::default(),
+            end_portal_verts: Vec::new(),
             border_draw,
             entity_draw,
+            player_draw,
+            skin_slots: HashMap::new(),
+            player_model_slim: ezzmc_render::humanoid::player_mesh(true),
+            skin_uploads: Vec::new(),
             armor_draw,
             armor_kit,
             glint_draw,
@@ -1034,6 +1214,7 @@ impl WorldView {
             remote_tick: None,
             wet_entities: Default::default(),
             sky_state: None,
+            end_sky: false,
             fog_state: ezzmc_render::fog::FogState::default(),
             vignette,
             vignette_b: 1.0,
@@ -1093,6 +1274,7 @@ impl WorldView {
             player: crate::physics::Player::new([0.0; 3]),
             last_input: crate::physics::Input::default(),
             game_mode: 0,
+            prev_game_mode: -1,
             block_range: None,
             attack_speed: None,
             entity_range: None,
@@ -1136,8 +1318,10 @@ impl WorldView {
             boat: None,
             boat_out: None,
             fov_mod: (1.0, 1.0),
+            spin: (0.0, 0.0),
             zoom_held: false,
             zoom_factor: 1.0,
+            scope_scale: 0.5,
             cfg: crate::settings::ViewCfg::default(),
             no_send: false,
             yaw: 0.0,
@@ -1145,15 +1329,22 @@ impl WorldView {
             perspective: 0,
             status: None,
             joined: false,
+            carried_sent: 0,
             health: 20.0,
             sugg_in: Vec::new(),
             tab: Default::default(),
             boss: Default::default(),
+            portal_eff: (0.0, 0.0),
+            sleep_timer: 0,
+            sleeping: false,
             boss_darken: 0.0,
             boss_darken_o: 0.0,
             titles: Default::default(),
             subtitles: Default::default(),
             advancements: Default::default(),
+            recipes: Default::default(),
+            ghost: Vec::new(),
+            stats: Default::default(),
             toast_in: Vec::new(),
             toasts: Default::default(),
             subtitle_rows: Vec::new(),
@@ -1168,16 +1359,26 @@ impl WorldView {
             nametags: Vec::new(),
             own_name: String::new(),
             nt_view: (Mat4::IDENTITY, [0.0; 3], 1.0),
+            chat_vis: 0,
+            hidden_players: Default::default(),
             chat_in: Vec::new(),
             dialog_in: Vec::new(),
             sign_in: Vec::new(),
+            cmd_in: Vec::new(),
+            be_changed: Vec::new(),
+            book_in: None,
             lines: ezzmc_render::lines::LineDraw::new(&gpu.device, color, DEPTH_FORMAT),
+            outline_back: ezzmc_render::lines::LineDraw::new(&gpu.device, color, DEPTH_FORMAT),
             debug_crosshair: None,
             hud_hidden: false,
             cross_lines: std::array::from_fn(|_| {
                 ezzmc_render::lines::LineDraw::new(&gpu.device, color, DEPTH_FORMAT)
             }),
             show_hitboxes: false,
+            show_chunk_borders: false,
+            border_lines: std::array::from_fn(|_| {
+                ezzmc_render::lines::LineDraw::new(&gpu.device, color, DEPTH_FORMAT)
+            }),
             hit_lines: std::array::from_fn(|_| {
                 ezzmc_render::lines::LineDraw::new(&gpu.device, color, DEPTH_FORMAT)
             }),
@@ -1411,6 +1612,10 @@ impl WorldView {
                     );
                 }
                 NetEvt::GameMode(m) => {
+                    // VANILLA: MultiPlayerGameMode#setLocalMode — previous = текущий при смене.
+                    if m != self.game_mode {
+                        self.prev_game_mode = self.game_mode;
+                    }
                     self.game_mode = m;
                     // VANILLA: Player#hasInfiniteMaterials — креатив.
                     self.inv.infinite_materials = m == 1;
@@ -1466,6 +1671,16 @@ impl WorldView {
                 },
                 NetEvt::Hardcore(h) => self.hardcore = h,
                 NetEvt::ShowDeathScreen(b) => self.show_death_screen = b,
+                // VANILLA: ClientPacketListener#handleGameEvent ARROW_HIT_PLAYER → playSound(.., PLAYERS, 0.18, 0.45).
+                NetEvt::ArrowHitPlayer => crate::audio::play_at(
+                    "entity.arrow.hit_player",
+                    crate::audio::Cat::Players,
+                    self.cam[0],
+                    self.cam[1],
+                    self.cam[2],
+                    0.18,
+                    0.45,
+                ),
                 NetEvt::Score(s) => self.score = s,
                 NetEvt::Respawned => {
                     self.respawn_in = true;
@@ -1498,7 +1713,20 @@ impl WorldView {
                     }
                 }
                 NetEvt::UseComplete => self.complete_using(),
-                NetEvt::Chat(c, t) => self.chat_in.push((c, Some(t))),
+                NetEvt::Chat(c, t, player, sender) => {
+                    // VANILLA: ChatListener — canReceivePlayerMessages (chatVisibility FULL) /
+                    // canReceiveSystemMessages (не HIDDEN).
+                    let ok = if player {
+                        self.chat_vis == 0
+                    } else {
+                        self.chat_vis < 2
+                    };
+                    // VANILLA: ChatListener#handlePlayerChatMessage — isHidden(sender) → пропуск.
+                    let hidden = sender.is_some_and(|u| self.hidden_players.contains(&u));
+                    if ok && !hidden {
+                        self.chat_in.push((c, Some(t)));
+                    }
+                }
                 NetEvt::Overlay(c) => self.chat_in.push((c, None)),
                 NetEvt::Tab(e) => self.tab.apply(*e),
                 NetEvt::Boss(id, op) => self.boss.apply(id, *op),
@@ -1509,7 +1737,28 @@ impl WorldView {
                     let ids = self.advancements.apply(*u);
                     self.toast_in.extend(ids);
                 }
+                NetEvt::RecipeBook(u) => {
+                    for (cat, res) in self.recipes.apply(u) {
+                        self.toasts.add_recipe(cat, res);
+                    }
+                    self.inv.book_open = self.recipes.settings.open_flags();
+                }
+                NetEvt::GhostRecipe(c, g) => {
+                    // VANILLA: контейнер должен совпасть с открытым; в окне игрока id 0.
+                    let open = self.inv.open.as_ref().map_or(0, |o| o.id);
+                    if open == c {
+                        let grid = if self.inv.open.is_some() { 3 } else { 2 };
+                        let fuel = self
+                            .inv
+                            .open
+                            .as_ref()
+                            .and_then(|o| o.slots.get(1))
+                            .is_some_and(|s| s.is_some());
+                        self.ghost = g.slots(grid, fuel);
+                    }
+                }
                 NetEvt::AdvTab(tab) => self.advancements.select(tab),
+                NetEvt::Stats(u) => self.stats.apply(u),
                 NetEvt::Dialog(d) => self.dialog_in.push(d),
                 NetEvt::OpenSign(p, f) => self.sign_in.push((p, f)),
                 NetEvt::Suggestions(id, s, l, v) => self.sugg_in.push((id, s, l, v)),
@@ -1626,6 +1875,7 @@ impl WorldView {
                     LevelEvent::ChunkLoaded { x, z } | LevelEvent::LightUpdated { x, z } => {
                         self.mark_column_area(x, z);
                     }
+                    LevelEvent::BlockEntityChanged(p) => self.be_changed.push([p.x, p.y, p.z]),
                     LevelEvent::ChunkDropped { x, z } => {
                         self.drop_column(x, z);
                         for (dx, dz) in [
@@ -1692,6 +1942,8 @@ impl WorldView {
                             i32::from(b0),
                             i32::from(b1),
                         );
+                        self.beacons
+                            .block_event([pos.x, pos.y, pos.z], i32::from(b0));
                         // VANILLA: BellBlockEntity#triggerEvent (качание колокола).
                         self.bells
                             .block_event([pos.x, pos.y, pos.z], i32::from(b0), i32::from(b1));
@@ -1858,18 +2110,15 @@ impl WorldView {
         for dir in std::mem::take(&mut level.own_hurts) {
             self.player.hurt(dir);
         }
-        // VANILLA: LivingEntity#handleDamageEvent → playSound(getHurtSound, getSoundVolume, ±0.2).
-        for p in std::mem::take(&mut level.dragon_hurts) {
-            let pitch = (crate::levelsound::rf() - crate::levelsound::rf()) * 0.2 + 1.0;
-            crate::audio::play_at(
-                "entity.ender_dragon.hurt",
-                crate::audio::Cat::Hostile,
-                p[0],
-                p[1],
-                p[2],
-                5.0,
-                pitch,
-            );
+        // VANILLA: LivingEntity#handleDamageEvent / handleEntityEvent(3) → playSound(hurt/death, volume, ±0.2).
+        for (ty, p, death) in std::mem::take(&mut level.mob_sounds) {
+            let Some(name) = ezzmc_protocol::generated::r26_3::ENTITY_TYPE.get(ty) else {
+                continue;
+            };
+            if let Some((ev, cat, vol)) = crate::levelsound::mob_hurt_sound(name, death) {
+                let pitch = (crate::levelsound::rf() - crate::levelsound::rf()) * 0.2 + 1.0;
+                crate::audio::play_at(&ev, cat, p[0], p[1], p[2], vol, pitch);
+            }
         }
         for (p, w, h) in std::mem::take(&mut level.death_poofs) {
             self.particles.death_poof(p, w, h);
@@ -2400,12 +2649,59 @@ impl WorldView {
                 } else if self.boss_darken > 0.0 {
                     self.boss_darken -= 0.0125;
                 }
+                // VANILLA: MultiPlayerGameMode#tick → ensureHasSentCarriedItem: слот, выбранный сервером
+                // (set_held_slot при входе), уходит как set_carried_item (иначе Grim считает слот 0).
+                if self.inv.selected != self.carried_sent {
+                    self.carried_sent = self.inv.selected;
+                    let _ = self
+                        .net
+                        .cmd
+                        .send(crate::netthread::NetCmd::SetCarried(i16::from(
+                            self.inv.selected,
+                        )));
+                }
+                self.tick_sleep();
                 self.tick_using();
                 crate::cooldown::tick();
                 self.tick_hand();
                 self.tick_dig();
+                // VANILLA: LocalPlayer#handlePortalTransitionEffect (Transition.CONFUSION у nether_portal).
+                self.portal_eff.0 = self.portal_eff.1;
+                let step = if self.player.inside_portal {
+                    if self.portal_eff.1 == 0.0 {
+                        // VANILLA: SoundEvents.PORTAL_TRIGGER, forLocalAmbience(volume 0.25).
+                        crate::audio::play_ui(
+                            "block.portal.trigger",
+                            crate::audio::Cat::Ambient,
+                            0.25,
+                            crate::levelsound::rf() * 0.4 + 0.8,
+                        );
+                    }
+                    0.0125
+                } else if self.portal_eff.1 > 0.0 {
+                    -0.05
+                } else {
+                    0.0
+                };
+                self.portal_eff.1 = (self.portal_eff.1 + step).clamp(0.0, 1.0);
+                // VANILLA: LocalPlayer#tickSpinningEffect.
+                let portal = self.portal_eff.1;
+                let nausea = self.effects.blend_factor("nausea", 1.0);
+                if portal > 0.0 || nausea > 0.0 {
+                    self.spin.1 = (portal * 20.0 + nausea * 7.0) / (portal + nausea);
+                    self.spin.0 += self.spin.1;
+                } else {
+                    self.spin.1 = 0.0;
+                }
             }
             if let Some(t) = self_fov {
+                // VANILLA: AbstractClientPlayer#getFieldOfViewModifier — lerp(fovEffectScale, 1, modifier);
+                // от первого лица со зрительной трубой возвращает 0.1 напрямую.
+                let t = if self.is_scoping() {
+                    SPYGLASS_ZOOM_FOV_MODIFIER
+                } else {
+                    1.0 + (t - 1.0) * self.cfg.fov_effect
+                };
                 let (_, cur) = self.fov_mod;
                 self.fov_mod = (cur, cur + (t - cur) * 0.5);
                 self.update_place_target(yaw, pitch);
@@ -2438,6 +2734,10 @@ impl WorldView {
             }
         }
         self.cam = self.player.eye_lerp(self.tick_acc / 0.05);
+        if self.sleeping && self.perspective == 0 {
+            // VANILLA: Camera#setup — move(0, 0.15, 0) спящего.
+            self.cam[1] += 0.15;
+        }
         // VANILLA: Camera → getViewYRot(partialTick): поворот лодки за тик размазываем по кадрам.
         self.render_yaw_off = if self.riding && self.ride_boat_yaw.is_some() {
             self.ride_dr * (1.0 - (self.tick_acc / 0.05).clamp(0.0, 1.0) as f32)
@@ -2503,20 +2803,193 @@ impl WorldView {
 
     pub fn set_cfg(&mut self, cfg: crate::settings::ViewCfg) {
         self.cfg = cfg;
+        crate::armor::set_glint_speed(cfg.glint_speed);
+        ezzmc_render::particledraw::set_glint_strength(cfg.glint_strength);
         self.particles.status = cfg.particles;
         self.player.sprint_window = cfg.sprint_window;
         self.player.auto_jump = cfg.auto_jump;
     }
 
     /// VANILLA: GameRenderer#bobHurt (всегда) · bobView (только при options.bobView).
-    /// damageTiltStrength в UI опций нет — 1.0 (по умолчанию).
     fn bob(&self, pt: f32) -> Mat4 {
-        let hurt = self.player.hurt_matrix(pt, 1.0);
-        if self.cfg.bob_view {
+        let hurt = self.player.hurt_matrix(pt, self.cfg.damage_tilt);
+        let m = if self.cfg.bob_view {
             hurt * self.player.bob_matrix(pt)
         } else {
             hurt
+        };
+        // VANILLA: GameRenderer#renderLevel — вращающийся перекос проекции (Nausea × screenEffectScale²).
+        let nausea = self.effects.blend_factor("nausea", pt);
+        let k =
+            nausea.max(self.portal_intensity(pt)) * self.cfg.screen_effect * self.cfg.screen_effect;
+        if k > 0.0 {
+            let skew = 5.0 / (k * k + 5.0) - k * 0.04;
+            let skew = skew * skew;
+            let axis = glam::Vec3::new(
+                0.0,
+                std::f32::consts::SQRT_2 / 2.0,
+                std::f32::consts::SQRT_2 / 2.0,
+            );
+            let ang = (self.spin.0 + pt * self.spin.1).to_radians();
+            m * Mat4::from_axis_angle(axis, ang)
+                * Mat4::from_scale(glam::Vec3::new(1.0 / skew, 1.0, 1.0))
+                * Mat4::from_axis_angle(axis, -ang)
+        } else {
+            m
         }
+    }
+
+    /// VANILLA: Mth.lerp(pt, oPortalEffectIntensity, portalEffectIntensity).
+    pub fn portal_intensity(&self, pt: f32) -> f32 {
+        self.portal_eff.0 + (self.portal_eff.1 - self.portal_eff.0) * pt
+    }
+
+    /// VANILLA: LevelExtractor — waterOverlay: глаза в воде, от первого лица, не спектатор → яркость в точке глаз.
+    pub fn water_overlay(&self) -> Option<f32> {
+        if !self.player.under_water || self.perspective != 0 || self.game_mode == 3 {
+            return None;
+        }
+        let g = self.net.level.lock().ok()?;
+        let l = g.as_ref()?;
+        let (bl, sl) = crate::particles::light_at(l, self.cam[0], self.cam[1], self.cam[2]);
+        // VANILLA-UNSURE: Lightmap.getBrightness без ambient измерения: v / (4 − 3v).
+        let v = f32::from(bl.max(sl)) / 15.0;
+        Some(v / (4.0 - 3.0 * v))
+    }
+
+    /// VANILLA: PlayerRenderState.isOnFire (Entity#isOnFire — бит 0 флагов, от первого лица, не спектатор, не спальня).
+    /// Возвращает номер кадра анимации fire_1 (frametime 1).
+    pub fn fire_overlay_frame(&self) -> Option<u32> {
+        if self.perspective != 0 || self.game_mode == 3 {
+            return None;
+        }
+        let g = self.net.level.lock().ok()?;
+        let l = g.as_ref()?;
+        (l.own_flags & 1 != 0).then_some(self.effects.ticks as u32)
+    }
+
+    /// VANILLA: LevelExtractor#getViewBlockingState — 8 точек вокруг глаз; блок «душит» (isSuffocating):
+    /// по умолчанию blocksMotion + полный куб, исключения — листва, стекло, корни мангров, часть вечно «душащих».
+    /// VANILLA-UNSURE: nearPlaneBB не проверяется; закрытые шалкеры/поршни не разобраны.
+    /// Возвращает спрайт частицы блока и атлас.
+    pub fn block_overlay(&self) -> Option<ezzmc_assets::bake::SpriteUv> {
+        if self.game_mode == 3 {
+            return None;
+        }
+        let g = self.net.level.lock().ok()?;
+        let l = g.as_ref()?;
+        let eye = self.player.pos[1] + self.player.eye_height();
+        let half = f64::from(0.6f32 * 0.8);
+        for i in 0..8 {
+            let x = self.player.pos[0] + (f64::from(i & 1) - 0.5) * half;
+            let y = eye + (f64::from((i >> 1) & 1) - 0.5) * 0.1;
+            let z = self.player.pos[2] + (f64::from((i >> 2) & 1) - 0.5) * half;
+            let (bx, by, bz) = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
+            let st = l.chunks.block(bx, by, bz);
+            let name = st.name();
+            let always = matches!(name, "farmland" | "soul_sand" | "dirt_path" | "mud");
+            let never = name.ends_with("leaves")
+                || name.ends_with("glass")
+                || name == "mangrove_roots"
+                || name == "moving_piston";
+            let full = {
+                use crate::physics::Collider;
+                l.boxes(bx, by, bz) == [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]
+            };
+            if always || (!never && full) {
+                if let Some(sp) = self.models.particle_sprite(st) {
+                    return Some(sp);
+                }
+            }
+        }
+        None
+    }
+
+    /// Атлас блоков (RGBA) для экранных оверлеев.
+    pub fn blocks_atlas(&self) -> &(Vec<u8>, u32, u32) {
+        &self.preview_blocks
+    }
+
+    /// VANILLA: Hud#extractCameraOverlays — Equippable#cameraOverlay (тыква на голове, слот 5), от первого лица.
+    /// VANILLA-UNSURE: компонент equippable не читается, захардкожен carved_pumpkin → misc/pumpkinblur.
+    pub fn pumpkin_overlay(&self) -> bool {
+        self.perspective == 0
+            && self
+                .inv
+                .slots
+                .get(5)
+                .and_then(|s| s.as_ref())
+                .and_then(|s| crate::inventory::item_name(s.item))
+                .is_some_and(|n| n.trim_start_matches("minecraft:") == "carved_pumpkin")
+    }
+
+    /// VANILLA: Player#isScoping (+ первое лицо) — используется подзорная труба.
+    pub fn is_scoping(&self) -> bool {
+        self.perspective == 0
+            && self.using.is_some()
+            && self
+                .inv
+                .held()
+                .and_then(|s| crate::inventory::item_name(s.item))
+                .is_some_and(|n| n.trim_start_matches("minecraft:") == "spyglass")
+    }
+
+    /// VANILLA: Player#getPercentFrozen = min(ticksFrozen, 140) / 140 (0 — не рисуем).
+    pub fn frozen_percent(&self) -> f32 {
+        let Ok(g) = self.net.level.lock() else {
+            return 0.0;
+        };
+        g.as_ref()
+            .map_or(0.0, |l| l.own_frozen.clamp(0, 140) as f32 / 140.0)
+    }
+
+    /// То же с partialTick текущего кадра.
+    /// VANILLA: Player#tick — sleepCounter растёт во сне (до 100), после пробуждения доходит до 110 и сбрасывается.
+    fn tick_sleep(&mut self) {
+        let sleeping = if let Ok(Some(l)) = self.net.level.lock().as_deref() {
+            l.own_pose == POSE_SLEEPING
+        } else {
+            false
+        };
+        self.sleeping = sleeping;
+        self.player.sleeping = sleeping;
+        self.sleep_timer = next_sleep_timer(self.sleep_timer, sleeping);
+    }
+
+    /// VANILLA: Camera#setup — спящий: вид по ориентации кровати (`toYRot − 180`, pitch 0), глаза +0.15.
+    /// Без кровати под sleeping_pos — yaw 0.
+    pub fn sleep_camera(&self) -> Option<(f32, f32)> {
+        if !self.sleeping || self.perspective != 0 {
+            return None;
+        }
+        let g = self.net.level.lock().ok()?;
+        let l = g.as_ref()?;
+        let yaw = l
+            .own_sleep_pos
+            .map(|p| l.chunks.block(p[0], p[1], p[2]))
+            .filter(|s| s.name().ends_with("_bed"))
+            .and_then(|s| s.property("facing"))
+            .map_or(0.0, |f| match f {
+                "south" => -180.0,
+                "west" => -90.0,
+                "north" => 0.0,
+                _ => 90.0,
+            });
+        Some((yaw, 0.0))
+    }
+
+    /// VANILLA: Player#getSleepTimer.
+    pub fn sleep_timer(&self) -> i32 {
+        self.sleep_timer
+    }
+
+    pub fn portal_intensity_now(&self) -> f32 {
+        self.portal_intensity((self.tick_acc / 0.05).clamp(0.0, 1.0) as f32)
+    }
+
+    /// Номер кадра анимации спрайта nether_portal (frametime 2) по тикам клиента.
+    pub fn portal_frame(&self) -> u32 {
+        self.effects.ticks as u32 / 2
     }
 
     /// Сущности в поле зрения камеры (для MCP `visible`): проекция центра хитбокса по матрице последнего кадра.
@@ -2704,6 +3177,13 @@ impl WorldView {
 
     /// Плавный зум: к 1/4 FOV при удержании клавиши, обратно при отпускании.
     pub fn tick_zoom(&mut self, dt: f64) {
+        // VANILLA: Hud#extractCameraOverlays — scopeScale = lerp(0.5·Δтиков, scopeScale, 1.125); без трубы 0.5.
+        if self.is_scoping() {
+            let k = (0.5 * dt * 20.0).clamp(0.0, 1.0) as f32;
+            self.scope_scale += (1.125 - self.scope_scale) * k;
+        } else {
+            self.scope_scale = 0.5;
+        }
         let target = if self.zoom_held { 0.25 } else { 1.0 };
         let k = 1.0 - (-14.0 * dt.clamp(0.0, 0.1)).exp() as f32;
         self.zoom_factor += (target - self.zoom_factor) * k;
@@ -2957,8 +3437,9 @@ impl WorldView {
             }
         }
         crate::mobs::prof_at(5, "t до bake_remote_players");
+        let mut player_data = Vec::new();
         self.bake_remote_players(
-            &mut data,
+            &mut player_data,
             &mut armor_data,
             &mut glint_data,
             &mut shadow,
@@ -3124,6 +3605,12 @@ impl WorldView {
         crate::mobs::prof_at(9, "t после bake_flames");
         self.entity_draw
             .prepare_raw(&gpu.device, &gpu.queue, mv, &data);
+        for (slot, rgba) in self.skin_uploads.drain(..) {
+            self.player_draw
+                .write_region(&gpu.queue, 0, slot * 64, 64, 64, &rgba);
+        }
+        self.player_draw
+            .prepare_raw(&gpu.device, &gpu.queue, mv, &player_data);
         self.armor_draw
             .prepare_raw(&gpu.device, &gpu.queue, mv, &armor_data);
         self.glint_draw
@@ -3197,7 +3684,7 @@ impl WorldView {
         let mut data: Vec<f32> = Vec::new();
         let mut ranges = Vec::with_capacity(frame.len());
         for f in &frame {
-            let key = std::rc::Rc::as_ptr(&f.mesh);
+            let key = std::sync::Arc::as_ptr(&f.mesh) as usize;
             let mesh = *self.item_inst_map.entry(key).or_insert_with(|| {
                 let (b, i) = f.mesh.static_mesh();
                 self.item_inst_keep.push(f.mesh.clone());
@@ -3235,6 +3722,30 @@ impl WorldView {
         Mat4::from_translation(off)
             * Mat4::from_rotation_y((180.0 - body).to_radians())
             * swim.matrix()
+            * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0))
+            * Mat4::from_scale(Vec3::splat(0.9375))
+            * Mat4::from_translation(Vec3::new(0.0, -1.501, 0.0))
+    }
+
+    /// VANILLA: LivingEntityRenderer#submit/setupRotations для Pose.SLEEPING: сдвиг от кровати на
+    /// `eyeHeight − 0.1` против ориентации, затем YP(sleepDirectionToRotation), ZP(90), YP(270).
+    fn avatar_root_sleeping(&self, pos: [f64; 3], facing: &str) -> Mat4 {
+        let (angle, sx, sz) = match facing {
+            "south" => (90.0f32, 0.0f32, 1.0f32),
+            "west" => (0.0, -1.0, 0.0),
+            "north" => (270.0, 0.0, -1.0),
+            _ => (180.0, 1.0, 0.0),
+        };
+        let head_off = 1.62 - 0.1;
+        let off = Vec3::new(
+            (pos[0] - self.cam[0]) as f32 - sx * head_off,
+            (pos[1] - self.cam[1]) as f32,
+            (pos[2] - self.cam[2]) as f32 - sz * head_off,
+        );
+        Mat4::from_translation(off)
+            * Mat4::from_rotation_y(angle.to_radians())
+            * Mat4::from_rotation_z(90.0f32.to_radians())
+            * Mat4::from_rotation_y(270.0f32.to_radians())
             * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0))
             * Mat4::from_scale(Vec3::splat(0.9375))
             * Mat4::from_translation(Vec3::new(0.0, -1.501, 0.0))
@@ -3663,7 +4174,7 @@ impl WorldView {
             self.preview_items = self
                 .hand_items
                 .as_ref()
-                .map(|h| std::rc::Rc::new(h.items_rgba()));
+                .map(|h| std::sync::Arc::new(h.items_rgba()));
         }
         crate::charpreview::Snap {
             state,
@@ -3684,7 +4195,7 @@ impl WorldView {
         }
     }
 
-    fn offhand_mesh(&mut self, real: bool) -> Option<std::rc::Rc<crate::handitem::HandMesh>> {
+    fn offhand_mesh(&mut self, real: bool) -> Option<std::sync::Arc<crate::handitem::HandMesh>> {
         let st = if real {
             self.inv.slots.get(crate::inventory::OFFHAND)?.clone()?
         } else {
@@ -3703,7 +4214,7 @@ impl WorldView {
         cx
     }
 
-    fn shown_mesh(&mut self) -> Option<std::rc::Rc<crate::handitem::HandMesh>> {
+    fn shown_mesh(&mut self) -> Option<std::sync::Arc<crate::handitem::HandMesh>> {
         let (stack, _) = self.hand_shown.as_ref()?;
         let (name, cx) = crate::handitem::stack_ctx(stack)?;
         let cx = self.use_ctx(cx);
@@ -3910,8 +4421,7 @@ impl WorldView {
         let _prof_bake = ProfDrop(t_bake, n_drops);
         // Фаза 1 (последовательно): меши и матрицы всех копий каждого дропа.
         self.item_inst_frame.clear();
-        let mut mesh_ix: std::collections::HashMap<*const crate::handitem::HandMesh, usize> =
-            std::collections::HashMap::new();
+        let mut mesh_ix: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
         let mut bounds: Vec<(f32, f32)> = Vec::new();
         let mut frame: Vec<ItemInstFrame> = Vec::new();
         for d in drops {
@@ -3927,7 +4437,7 @@ impl WorldView {
             self.entity_item_visible = true;
             let foil = foil_of(&d.stack);
             let mi = *mesh_ix
-                .entry(std::rc::Rc::as_ptr(&mesh))
+                .entry(std::sync::Arc::as_ptr(&mesh) as usize)
                 .or_insert_with(|| {
                     bounds.push(mesh.ground_bounds());
                     frame.push(ItemInstFrame {
@@ -4248,9 +4758,38 @@ impl WorldView {
         }
     }
 
+    /// Слот атласа скинов для игрока (VANILLA: SkinManager — пока скин не пришёл, Стив).
+    fn skin_slot(
+        tab: &crate::tablist::TabList,
+        slots: &mut HashMap<String, u32>,
+        uploads: &mut Vec<(u32, std::sync::Arc<Vec<u8>>)>,
+        uuid: &u128,
+    ) -> u32 {
+        let Some(url) = tab.entries.get(uuid).and_then(|t| t.skin_url.clone()) else {
+            return 0;
+        };
+        if let Some(&s) = slots.get(&url) {
+            return s;
+        }
+        let sk = crate::skins::global();
+        sk.request(&url);
+        let next = slots.len() as u32 + 1;
+        if next >= SKIN_SLOTS {
+            return 0;
+        }
+        match sk.get(&url) {
+            Some(img) => {
+                slots.insert(url, next);
+                uploads.push((next, img));
+                next
+            }
+            None => 0,
+        }
+    }
+
     fn bake_remote_players(
         &mut self,
-        data: &mut Vec<u8>,
+        player_data: &mut Vec<u8>,
         armor_data: &mut Vec<u8>,
         glint_data: &mut Vec<u8>,
         shadow: &mut Vec<u8>,
@@ -4388,11 +4927,38 @@ impl WorldView {
                 visually: swimming,
                 x_rot: state.x_rot,
             };
-            let root = self.avatar_root(pos, body, crouching, swim);
-            let (model, parts) = &mut self.player_model;
+            let bed_facing = (e.pose == POSE_SLEEPING)
+                .then_some(e.sleep_pos)
+                .flatten()
+                .map(|p| level.chunks.block(p[0], p[1], p[2]))
+                .filter(|s| s.name().ends_with("_bed"))
+                .and_then(|s| s.property("facing"));
+            let root = match bed_facing {
+                Some(f) => self.avatar_root_sleeping(pos, f),
+                None => self.avatar_root(pos, body, crouching, swim),
+            };
+            let slot = Self::skin_slot(
+                &self.tab,
+                &mut self.skin_slots,
+                &mut self.skin_uploads,
+                &e.uuid,
+            );
+            let slim = self.tab.entries.get(&e.uuid).is_some_and(|t| t.skin_slim);
+            let (model, parts) = if slim {
+                &mut self.player_model_slim
+            } else {
+                &mut self.player_model
+            };
             crate::settings::apply_parts(model, 0x7F);
             setup_anim(model, parts, &state);
-            model.bake(root, [255; 4], light, data);
+            // Скин игрока: слот атласа по URL из свойства `textures` (нет/не скачан — Стив, слот 0).
+            let first = player_data.len();
+            model.bake(root, [255; 4], light, player_data);
+            for v in player_data[first..].chunks_exact_mut(32) {
+                let t = f32::from_le_bytes([v[16], v[17], v[18], v[19]]);
+                let t = (slot as f32 + t) / SKIN_SLOTS as f32;
+                v[16..20].copy_from_slice(&t.to_le_bytes());
+            }
             if let Some(n) = e.armor[0].as_ref().and_then(crate::skull::worn_name) {
                 let head = model.part_matrices(root)[parts.head];
                 self.head_skulls
@@ -4426,7 +4992,7 @@ impl WorldView {
                 ),
             ] {
                 if let Some(mesh) = mesh {
-                    let arm = model.part_matrices(root)[arm_idx]
+                    let arm = slim_hand_matrix(model.part_matrices(root)[arm_idx], root, slim, dx)
                         * Mat4::from_rotation_x((-90.0f32).to_radians())
                         * Mat4::from_rotation_y(180.0f32.to_radians())
                         * Mat4::from_translation(Vec3::new(dx / 16.0, 0.125, -0.625));
@@ -4509,16 +5075,16 @@ impl WorldView {
                     .and_then(|d| d.attr_color("visual/ambient_light_color"))
                     .map_or([10.0 / 255.0; 3], rgb01);
                 // VANILLA: LightmapRenderStateExtractor#extract — эффекты Darkness/NightVision/Conduit.
-                // darknessEffectScale (доступность) = 1.0: опции нет.
                 // VANILLA: GameRenderer#extract вызывает lightmap extract(state, 1.0F), а не покадровый pt:
                 // иначе (tickCount - pt) идёт назад внутри тика и скачет на новом (пила вместо плавной волны).
                 let pt = 1.0;
-                let darkness_effect = self.effects.blend_factor("darkness", pt);
+                let darkness_opt = self.cfg.darkness_effect;
+                let darkness_effect = self.effects.blend_factor("darkness", pt) * darkness_opt;
                 let darkness_scale = ezzmc_render::lightmap::darkness_scale(
                     self.effects.ticks as f32,
                     pt,
                     darkness_effect,
-                );
+                ) * darkness_opt;
                 let night_vision = if self.effects.has("night_vision") {
                     self.effects.night_vision_scale(pt)
                 } else if self.fog_state.water_vision(self.player.under_water) > 0.0
@@ -4561,6 +5127,8 @@ impl WorldView {
                 self.sky_state = (l.skybox == ezzmc_world::dimension::Skybox::Overworld
                     && !self.boss.world_fog())
                 .then_some(drawn);
+                self.end_sky =
+                    l.skybox == ezzmc_world::dimension::Skybox::End && !self.boss.world_fog();
                 [
                     f64::from((c >> 16) & 255) / 255.0,
                     f64::from((c >> 8) & 255) / 255.0,
@@ -4569,6 +5137,7 @@ impl WorldView {
             }
             _ => {
                 self.sky_state = None;
+                self.end_sky = false;
                 clear
             }
         };
@@ -4590,8 +5159,13 @@ impl WorldView {
             self.cam,
             proj.y_axis.y,
         );
-        // VANILLA: CloudRenderer#prepare (cloudHeight 192.33, cloudRange 64 (GraphicsPreset fancy), FANCY).
+        // VANILLA: CloudRenderer#prepare (cloudHeight = visual/cloud_height, дефолт 192.33; cloudRange 64 (fancy), FANCY).
         if let Ok(Some(l)) = self.net.level.lock().as_deref() {
+            let cloud_height = l
+                .dimension
+                .as_ref()
+                .and_then(|d| d.attr_f32("visual/cloud_height"))
+                .unwrap_or(192.33);
             let cc = ezzmc_render::sky::cloud_color(l.day_time, l.rain_level, l.thunder());
             if cc >> 24 > 0 && l.skybox == ezzmc_world::dimension::Skybox::Overworld {
                 self.clouds.prepare(
@@ -4604,7 +5178,7 @@ impl WorldView {
                     } else {
                         ezzmc_render::clouddraw::CloudStatus::Fancy
                     },
-                    192.33,
+                    cloud_height,
                     64,
                     self.cam,
                     l.game_time,
@@ -4672,6 +5246,36 @@ impl WorldView {
             };
             self.lightning
                 .prepare(&gpu.device, &gpu.queue, mv, self.cam, &bolts);
+        }
+        // VANILLA: TheEndPortalRenderer / TheEndGatewayRenderer.
+        {
+            let versions = (self.queue.version, self.queue.block_version);
+            let mut verts = std::mem::take(&mut self.end_portal_verts);
+            let (gt, pt) = match self.net.level.lock().as_deref() {
+                Ok(Some(l)) => {
+                    self.end_portals.build(l, self.cam, versions, &mut verts);
+                    (l.game_time, l.partial_tick())
+                }
+                _ => {
+                    verts.clear();
+                    (0, 0.0)
+                }
+            };
+            self.end_portal_draw
+                .prepare(&gpu.device, &gpu.queue, mv, &verts, gt, pt);
+            self.end_portal_verts = verts;
+        }
+        // VANILLA: BeaconRenderer.
+        {
+            let versions = (self.queue.version, self.queue.block_version);
+            let mut batches = std::mem::take(&mut self.beacon_batches);
+            batches.iter_mut().flatten().for_each(Vec::clear);
+            if let Ok(Some(l)) = self.net.level.lock().as_deref() {
+                self.beacons.build(l, self.cam, versions, &mut batches);
+            }
+            self.beacon_draw
+                .prepare(&gpu.device, &gpu.queue, mv, &batches);
+            self.beacon_batches = batches;
         }
         // VANILLA: WorldBorderRenderer#extract/prepare — renderDistance = опция·16, depthFar.
         {
@@ -4860,6 +5464,10 @@ impl WorldView {
                 self.sky.prepare(&gpu.queue, mv, st, dark_disc);
                 self.sky.draw(&mut pass);
             }
+            // VANILLA: SkyRenderer#renderEndSky (skybox=end); вспышка End flash — TODO.
+            if self.end_sky && !self.effects.blocks_sky() {
+                self.sky.draw_end(&gpu.queue, &mut pass, mv);
+            }
             if compute {
                 if let Some(v) = &self.vox {
                     v.draw(&mut pass);
@@ -4930,11 +5538,30 @@ impl WorldView {
             let width = (w as f32 / 1920.0 * 2.5).max(2.5);
             // VANILLA: боббинг входит в матрицу проекции — контур качается вместе с миром.
             let outline_vp = view_proj;
+            // VANILLA: LevelRenderer#submitBlockOutline — highContrast: чёрная подложка (ширина 7)
+            // и цвет 0xFF57FFE1 (-11010079) вместо чёрного 40%.
+            let hc = self.cfg.high_contrast_outline;
+            if hc {
+                self.outline_back.set(
+                    &gpu.queue,
+                    outline_vp,
+                    [w as f32, h as f32],
+                    [0.0, 0.0, 0.0, 1.0],
+                    7.0,
+                    &segs,
+                );
+            } else {
+                self.outline_back.clear();
+            }
             self.lines.set(
                 &gpu.queue,
                 outline_vp,
                 [w as f32, h as f32],
-                [0.0, 0.0, 0.0, 0.4],
+                if hc {
+                    [0x57 as f32 / 255.0, 1.0, 0xE1 as f32 / 255.0, 1.0]
+                } else {
+                    [0.0, 0.0, 0.0, 0.4]
+                },
                 width,
                 &segs,
             );
@@ -4951,8 +5578,10 @@ impl WorldView {
                 }),
                 ..Default::default()
             });
+            self.outline_back.draw(&mut pass);
             self.lines.draw(&mut pass);
         } else {
+            self.outline_back.clear();
             self.lines.clear();
         }
         if self.show_hitboxes {
@@ -4993,6 +5622,44 @@ impl WorldView {
                 l.draw(&mut pass);
             }
         }
+        if self.show_chunk_borders {
+            let segs = self.chunk_border_segments();
+            let colors = [
+                [1.0, 0.0, 0.0, 0.5],
+                [1.0, 1.0, 0.0, 1.0],
+                [0.0, 155.0 / 255.0, 155.0 / 255.0, 1.0],
+                [0.25, 0.25, 1.0, 1.0],
+                [0.25, 0.25, 1.0, 1.0],
+            ];
+            let k = (w as f32 / 1920.0).max(1.0);
+            let widths = [4.0 * k, k, k, 4.0 * k, k];
+            for i in 0..5 {
+                self.border_lines[i].set(
+                    &gpu.queue,
+                    view_proj,
+                    [w as f32, h as f32],
+                    colors[i],
+                    widths[i],
+                    &segs[i],
+                );
+            }
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("chunk borders"),
+                color_attachments: &[Some(color_att(wgpu::LoadOp::Load))],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            for l in &self.border_lines {
+                l.draw(&mut pass);
+            }
+        }
         if let (Some(gs), 0) = (self.debug_crosshair, self.perspective) {
             // VANILLA: DebugCrosshairRenderer#render — оси мира на расстоянии 1 перед глазами,
             // длина 0.01·guiScale; чёрная обводка (ширина 4) под цветными осями (ширина 2).
@@ -5002,6 +5669,9 @@ impl WorldView {
             let seg = |a: [f32; 3]| (d, [d[0] + a[0], d[1] + a[1], d[2] + a[2]]);
             let screen = [w as f32, h as f32];
             let black: Vec<_> = axes.iter().map(|a| seg(*a)).collect();
+            // VANILLA: GameRenderer#render3dHud — прицел рисуется с hud-проекцией (bobHurt/bobView
+            // входят только в проекцию мира), поэтому качание камеры его не двигает.
+            let view_proj = proj * mv;
             let colors = [
                 [1.0, 0.0, 0.0, 1.0],
                 [0.0, 1.0, 0.0, 1.0],
@@ -5044,6 +5714,7 @@ impl WorldView {
         }
         if (self.hand_visible || self.hand_item_visible || self.hand_map_visible)
             && !self.hud_hidden
+            && !self.is_scoping()
         {
             // VANILLA: рука рисуется после мира с очищенной глубиной.
             let hand_depth = self.hand_depth.as_ref().unwrap_or(&depth);
@@ -5083,20 +5754,139 @@ impl WorldView {
         let _ = &self.lightmap;
     }
 
-    /// VANILLA: KeyboardHandler (F3+B) — переключить хитбоксы и написать в чат «[Debug]: Hitboxes: shown/hidden».
-    pub fn toggle_hitboxes(&mut self) {
-        self.show_hitboxes = !self.show_hitboxes;
+    /// VANILLA: KeyboardHandler (F3+A) — LevelExtractor#allChanged: перестроить все чанки.
+    pub fn reload_chunks(&mut self) {
+        let all: Vec<_> = self.resident.iter().copied().collect();
+        for p in all {
+            self.queue.mark(p);
+        }
+        self.debug_feedback("Reloaded chunks");
+    }
+
+    /// VANILLA: KeyboardHandler (F3+C) — текст `/execute in <dim> run tp @s x y z yaw pitch`.
+    pub fn location_command(&self) -> String {
+        let p = self.player.pos;
+        format!(
+            "/execute in {} run tp @s {:.2} {:.2} {:.2} {:.2} {:.2}",
+            crate::itemdyn::dimension(),
+            p[0],
+            p[1],
+            p[2],
+            self.yaw,
+            self.pitch
+        )
+    }
+
+    /// VANILLA: KeyboardHandler#debugFeedback — «[Debug]: <текст>» (жёлтый жирный префикс) в чат.
+    pub fn debug_feedback(&mut self, text: &str) {
         let mut c = ezzmc_protocol::text::Component::text("[Debug]:");
         c.style.color = Some(0xFFFF55);
         c.style.bold = Some(true);
-        c.siblings.push(ezzmc_protocol::text::Component::text(
-            if self.show_hitboxes {
-                " Hitboxes: shown"
-            } else {
-                " Hitboxes: hidden"
-            },
-        ));
+        c.siblings
+            .push(ezzmc_protocol::text::Component::text(format!(" {text}")));
         self.chat_in.push((c, Some(crate::chat::Tag::System)));
+    }
+
+    /// VANILLA: KeyboardHandler (F3+B) — переключить хитбоксы и написать в чат «[Debug]: Hitboxes: shown/hidden».
+    pub fn toggle_hitboxes(&mut self) {
+        self.show_hitboxes = !self.show_hitboxes;
+        self.debug_feedback(if self.show_hitboxes {
+            "Hitboxes: shown"
+        } else {
+            "Hitboxes: hidden"
+        });
+    }
+
+    /// VANILLA: ChunkBorderRenderer#emitGizmos — линии секции под камерой (координаты относительно камеры).
+    fn chunk_border_segments(&self) -> [Vec<([f32; 3], [f32; 3])>; 5] {
+        let mut out: [Vec<([f32; 3], [f32; 3])>; 5] = Default::default();
+        let Ok(g) = self.net.level.lock() else {
+            return out;
+        };
+        let Some(l) = g.as_ref() else {
+            return out;
+        };
+        let f = l.chunks.format();
+        let (ymin, ymax) = (f.min_y, f.min_y + f.height);
+        let px = self.player.pos;
+        let xs = ((px[0].floor() as i32) >> 4) * 16;
+        let zs = ((px[2].floor() as i32) >> 4) * 16;
+        let sy = (px[1].floor() as i32) >> 4;
+        let rel = |x: i32, y: i32, z: i32| {
+            [
+                (f64::from(x) - self.cam[0]) as f32,
+                (f64::from(y) - self.cam[1]) as f32,
+                (f64::from(z) - self.cam[2]) as f32,
+            ]
+        };
+        let vline = |x: i32, z: i32| (rel(x, ymin, z), rel(x, ymax, z));
+        for x in [-16, 0, 16, 32] {
+            for z in [-16, 0, 16, 32] {
+                out[0].push(vline(xs + x, zs + z));
+            }
+        }
+        for x in (2..16).step_by(2) {
+            let i = if x % 4 == 0 { 2 } else { 1 };
+            out[i].push(vline(xs + x, zs));
+            out[i].push(vline(xs + x, zs + 16));
+            out[i].push(vline(xs, zs + x));
+            out[i].push(vline(xs + 16, zs + x));
+        }
+        let ring = |o: &mut Vec<_>, y: i32| {
+            o.push((rel(xs, y, zs), rel(xs, y, zs + 16)));
+            o.push((rel(xs, y, zs + 16), rel(xs + 16, y, zs + 16)));
+            o.push((rel(xs + 16, y, zs + 16), rel(xs + 16, y, zs)));
+            o.push((rel(xs + 16, y, zs), rel(xs, y, zs)));
+        };
+        for y in (ymin..=ymax).step_by(2) {
+            let i = if y % 8 == 0 { 2 } else { 1 };
+            ring(&mut out[i], y);
+        }
+        for x in [0, 16] {
+            for z in [0, 16] {
+                out[3].push(vline(xs + x, zs + z));
+            }
+        }
+        for y in (ymin..=ymax).step_by(16) {
+            ring(&mut out[3], y);
+        }
+        // Куб секции под игроком.
+        let (y0, y1) = (sy * 16, sy * 16 + 16);
+        for y in [y0, y1] {
+            ring(&mut out[4], y);
+        }
+        for x in [0, 16] {
+            for z in [0, 16] {
+                out[4].push((rel(xs + x, y0, zs + z), rel(xs + x, y1, zs + z)));
+            }
+        }
+        out
+    }
+
+    /// VANILLA: KeyboardHandler (F3+N) — creative↔spectator через change_game_mode (нужен op ≥ 2).
+    pub fn debug_spectate(&mut self) {
+        if self.op_level < 2 {
+            self.debug_feedback("Unable to switch game mode, no permission");
+        } else if self.game_mode != 3 {
+            self.send(crate::netthread::NetCmd::ChangeGameMode(3));
+        } else {
+            let m = if self.prev_game_mode < 0 {
+                1
+            } else {
+                self.prev_game_mode
+            };
+            self.send(crate::netthread::NetCmd::ChangeGameMode(m));
+        }
+    }
+
+    /// VANILLA: KeyboardHandler (F3+G) — границы чанков.
+    pub fn toggle_chunk_borders(&mut self) {
+        self.show_chunk_borders = !self.show_chunk_borders;
+        self.debug_feedback(if self.show_chunk_borders {
+            "Chunk borders: shown"
+        } else {
+            "Chunk borders: hidden"
+        });
     }
 
     /// VANILLA: EntityHitboxDebugRenderer — отрезки (относительно камеры) по цветам:
@@ -5198,6 +5988,7 @@ impl WorldView {
     /// Сущности/частицы слоя OPAQUE — до прозрачного террейна (общий код ванильного и compute-пути).
     fn draw_entities(&self, pass: &mut wgpu::RenderPass<'_>) {
         self.entity_draw.draw(pass);
+        self.player_draw.draw(pass);
         self.armor_draw.draw(pass);
         self.glint_draw.draw(pass);
         self.mobs.draw(pass);
@@ -5224,6 +6015,9 @@ impl WorldView {
     /// Молнии, облака, погода, виньетка — после прозрачного слоя террейна.
     fn draw_post_world(&mut self, queue: &wgpu::Queue, pass: &mut wgpu::RenderPass<'_>) {
         // VANILLA: облака рисуются после прозрачного слоя террейна.
+        self.end_portal_draw.draw(pass);
+        self.beacon_draw.draw(pass, false);
+        self.beacon_draw.draw(pass, true);
         self.lightning.draw(pass);
         self.clouds.draw(pass);
         self.weather.draw(pass);
@@ -5467,6 +6261,24 @@ impl WorldView {
 
     /// VANILLA: LivingEntity#stopUsingItem (локально).
     pub fn stop_using(&mut self) {
+        // VANILLA: SpyglassItem#releaseUsing → stopUsing: звук (в любом лице).
+        let spy = self.using.is_some()
+            && self
+                .inv
+                .held()
+                .and_then(|s| crate::inventory::item_name(s.item))
+                .is_some_and(|n| n.trim_start_matches("minecraft:") == "spyglass");
+        if spy {
+            crate::audio::play_at(
+                "item.spyglass.stop_using",
+                crate::audio::Cat::Players,
+                self.cam[0],
+                self.cam[1],
+                self.cam[2],
+                1.0,
+                1.0,
+            );
+        }
         self.using = None;
         self.player.using_item = false;
     }
@@ -5660,6 +6472,30 @@ impl WorldView {
     }
 
     /// VANILLA: AnvilScreen#onNameChanged → ServerboundRenameItemPacket.
+    /// VANILLA: MultiPlayerGameMode#handlePlaceRecipe (контейнер 0 — инвентарь игрока).
+    pub fn send_place_recipe(&self, recipe: i32, use_max: bool) {
+        let id = self.inv.open.as_ref().map_or(0, |o| o.id);
+        self.send(crate::netthread::NetCmd::PlaceRecipe(id, recipe, use_max));
+    }
+
+    /// VANILLA: RecipeBookComponent#toggleVisibility + sendUpdateSettings (книга крафта).
+    pub fn toggle_crafting_book(&mut self, k: crate::recipebook::BookKind) {
+        let t = self.recipes.settings.of_mut(k);
+        t.open = !t.open;
+        self.inv.book_open = self.recipes.settings.open_flags();
+        self.send_book_settings(k);
+    }
+
+    /// VANILLA: RecipeBookComponent#sendUpdateSettings (тип: 0 крафт, 1 печь, 2 плавильня, 3 коптильня).
+    pub fn send_book_settings(&self, k: crate::recipebook::BookKind) {
+        let s = self.recipes.settings.of(k);
+        self.send(crate::netthread::NetCmd::RecipeBookSettings(
+            k.idx() as i32,
+            s.open,
+            s.filtering,
+        ));
+    }
+
     pub fn send_rename_item(&self, name: String) {
         self.send(crate::netthread::NetCmd::RenameItem(name));
     }
@@ -5715,6 +6551,7 @@ impl WorldView {
     pub fn select_slot(&mut self, slot: u8) {
         if slot < 9 && self.inv.selected != slot {
             self.inv.selected = slot;
+            self.carried_sent = slot;
             let _ = self
                 .net
                 .cmd
@@ -5820,8 +6657,36 @@ impl WorldView {
                 });
                 !changes
             };
+            // VANILLA: CommandBlock#useWithoutItem — Player#canUseGameMasterBlocks (creative + op ≥ 2).
+            let cmd_block = matches!(
+                t.state.name(),
+                "command_block" | "chain_command_block" | "repeating_command_block"
+            ) && self.game_mode == 1
+                && self.op_level >= 2;
+            if cmd_block && !suppress {
+                self.cmd_in.push((t.pos, t.state.name()));
+            }
+            // VANILLA: StructureBlockEntity#usedBy — canUseGameMasterBlocks, экран открывается на клиенте.
+            let structure =
+                t.state.name() == "structure_block" && self.game_mode == 1 && self.op_level >= 2;
+            if structure && !suppress {
+                self.cmd_in.push((t.pos, "structure_block"));
+            }
+            // VANILLA: JigsawBlock#useWithoutItem — canUseGameMasterBlocks, экран на клиенте.
+            let jigsaw = t.state.name() == "jigsaw" && self.game_mode == 1 && self.op_level >= 2;
+            if jigsaw && !suppress {
+                self.cmd_in.push((t.pos, "jigsaw"));
+            }
+            // VANILLA: TestBlock#useWithoutItem — canUseGameMasterBlocks, openTestBlock на клиенте.
+            let testblock =
+                t.state.name() == "test_block" && self.game_mode == 1 && self.op_level >= 2;
+            if testblock && !suppress {
+                self.cmd_in.push((t.pos, "test_block"));
+            }
             let kind = if suppress || wire_passes {
                 None
+            } else if cmd_block || structure || jigsaw || testblock {
+                Some(BlockUse::Menu)
             } else {
                 // VANILLA: FlowerPotBlock#useItemOn/useWithoutItem — пустой горшок с растением в руке: SUCCESS
                 // (взмах); без растения клик поглощён (CONSUME, без взмаха).
@@ -5924,6 +6789,15 @@ impl WorldView {
         // Взмах — только у предметов, чьё использование клиент предсказывает (метательные);
         // еда/лук/щит/меч и прочее руку не качают (swingSource NONE / сервер пришлёт сам).
         if !consumed && held_name.is_some() {
+            // VANILLA: WritableBookItem#use → Player#openItemGui (клиент: BookEditScreen), пакет use_item уходит всё равно.
+            if held_name == Some("writable_book") {
+                let pages = self
+                    .inv
+                    .held()
+                    .map(crate::bookview::writable_pages)
+                    .unwrap_or_default();
+                self.book_in = Some((i32::from(self.inv.selected), pages));
+            }
             let seq = self.next_seq();
             let _ = self.net.cmd.send(crate::netthread::NetCmd::UseItem {
                 seq,
@@ -5967,6 +6841,28 @@ impl WorldView {
                     });
                     self.player.using_item = true;
                 }
+            }
+            // VANILLA: SpyglassItem#use — звук + startUsingItem (1200 тиков).
+            if held_name == Some("spyglass") && self.using.is_none() {
+                self.using = Some(Using {
+                    item: self.inv.held().map_or(0, |s| s.item),
+                    slot: self.inv.selected,
+                    remaining: 1200,
+                    duration: 1200,
+                    c: None,
+                    bow: false,
+                    rng: ezzmc_world::noise::LegacyRandom::new(seed_now()),
+                });
+                self.player.using_item = true;
+                crate::audio::play_at(
+                    "item.spyglass.use",
+                    crate::audio::Cat::Players,
+                    self.cam[0],
+                    self.cam[1],
+                    self.cam[2],
+                    1.0,
+                    1.0,
+                );
             }
             // VANILLA: Consumable#startConsuming → LivingEntity#startUsingItem (canEat для еды).
             if let Some(c) = held_name.and_then(crate::itemdata::consumable) {
@@ -6912,6 +7808,9 @@ fn block_use_kind(name: &str) -> Option<BlockUse> {
 }
 
 /// VANILLA: состояние использования предмета (еда/питьё).
+/// VANILLA: SpyglassItem#ZOOM_FOV_MODIFIER.
+const SPYGLASS_ZOOM_FOV_MODIFIER: f32 = 0.1;
+
 pub struct Using {
     pub item: u32,
     pub slot: u8,
@@ -6984,6 +7883,21 @@ fn is_living_type(name: &str) -> bool {
 
 #[cfg(test)]
 mod block_use_tests {
+    #[test]
+    fn sleep_timer_follows_vanilla() {
+        let mut t = 0;
+        for _ in 0..150 {
+            t = next_sleep_timer(t, true);
+        }
+        assert_eq!(t, 100);
+        let mut n = 0;
+        while t != 0 {
+            t = next_sleep_timer(t, false);
+            n += 1;
+        }
+        assert_eq!(n, 10);
+    }
+
     use super::*;
 
     #[test]
@@ -7000,7 +7914,7 @@ mod block_use_tests {
 /// PROF: время запекания дропов и их число (по Drop).
 /// Экземпляры одной модели за кадр (20 f32: матрица + свет): обычные, затем с блеском.
 struct ItemInstFrame {
-    mesh: std::rc::Rc<crate::handitem::HandMesh>,
+    mesh: std::sync::Arc<crate::handitem::HandMesh>,
     normal: Vec<f32>,
     foil: Vec<f32>,
 }

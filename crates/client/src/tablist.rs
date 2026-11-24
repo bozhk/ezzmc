@@ -30,6 +30,10 @@ pub struct Entry {
     pub game_mode: i32,
     pub listed: bool,
     pub order: i32,
+    /// URL скина из свойства профиля `textures` (None — нет свойства).
+    pub skin_url: Option<String>,
+    /// `metadata.model == "slim"` (руки 3 px).
+    pub skin_slim: bool,
 }
 
 /// Изменения одной записи из player_info_update (None — действие не пришло).
@@ -41,6 +45,7 @@ pub struct Delta {
     pub latency: Option<i32>,
     pub display: Option<Option<Component>>,
     pub order: Option<i32>,
+    pub skin_url: Option<(String, bool)>,
 }
 
 #[derive(Clone, Debug)]
@@ -59,6 +64,21 @@ pub struct TabList {
     pub footer: Option<Component>,
     /// VANILLA: PlayerTabOverlay#healthStates (ключ — имя профиля).
     health: std::cell::RefCell<HashMap<String, HealthState>>,
+    /// Головы текущего кадра: (x, y, URL скина или None — Стив); заполняет `draw`.
+    pub heads: std::cell::RefCell<Vec<(f32, f32, Option<String>)>>,
+}
+
+/// Свойство `textures`: base64(JSON) → `textures.SKIN.url`.
+pub fn skin_url_from_property(value: &str) -> Option<(String, bool)> {
+    let raw = crate::skins::base64_decode(value)?;
+    let v: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    let skin = v.get("textures")?.get("SKIN")?;
+    let slim = skin
+        .get("metadata")
+        .and_then(|m| m.get("model"))
+        .and_then(|m| m.as_str())
+        == Some("slim");
+    Some((skin.get("url")?.as_str()?.to_owned(), slim))
 }
 
 fn component(r: &mut Reader) -> ProtocolResult<Component> {
@@ -86,9 +106,12 @@ pub fn parse_update(body: &[u8]) -> ProtocolResult<Vec<(u128, Delta)>> {
                     d.name = Some(r.string(16)?);
                     let props = r.length("profile properties", 16)?;
                     for _ in 0..props {
-                        r.string(64)?;
-                        r.string(32767)?;
+                        let key = r.string(64)?;
+                        let value = r.string(32767)?;
                         r.optional(|r| r.string(1024))?;
+                        if key == "textures" {
+                            d.skin_url = skin_url_from_property(&value);
+                        }
                     }
                 }
                 1 => {
@@ -188,6 +211,10 @@ impl TabList {
                     if let Some(name) = d.name {
                         self.profiles.insert(id, name.clone());
                         self.entries.entry(id).or_default().name = name;
+                    }
+                    if let (Some(u), Some(en)) = (d.skin_url, self.entries.get_mut(&id)) {
+                        en.skin_url = Some(u.0);
+                        en.skin_slim = u.1;
                     }
                     let Some(en) = self.entries.get_mut(&id) else {
                         continue;
@@ -358,11 +385,15 @@ impl TabList {
                 }
             })
             .collect();
+        // VANILLA: PlayerTabOverlay — головы при шифрованном соединении. VANILLA-UNSURE: признак — у кого-то есть `textures`.
+        let show_heads = self.entries.values().any(|e| e.skin_url.is_some());
+        let head_w = if show_heads { 9.0 } else { 0.0 };
         let max_name = names
             .iter()
             .map(|n| t.text_width(n))
             .fold(0.0_f32, f32::max)
-            .ceil();
+            .ceil()
+            + head_w;
         // VANILLA: очки цели слота LIST (PLAYER_LIST_DEFAULT — жёлтый); HEARTS — ширина 90.
         let list_obj = sb.list_objective();
         let spacer = t.text_width(" ");
@@ -424,6 +455,8 @@ impl TabList {
         }
         t.fill(x0, yyo - 1.0, x1, yyo + rows as f32 * 9.0, 0x8000_0000);
         let mut icons = Vec::new();
+        let mut heads = self.heads.borrow_mut();
+        heads.clear();
         for (i, (e, name)) in infos.iter().zip(&names).enumerate() {
             let (col, row) = (i / rows, i % rows);
             let xo = xxo + (col as f32) * slot_w + (col as f32) * 5.0;
@@ -434,7 +467,10 @@ impl TabList {
             } else {
                 0xFFFFFF
             };
-            t.draw(name, xo, yo, c, true);
+            if show_heads {
+                heads.push((xo, yo, e.skin_url.clone()));
+            }
+            t.draw(name, xo + head_w, yo, c, true);
             if let (Some((_, o)), Some((sc, sw))) = (list_obj, &scores[i]) {
                 // VANILLA: extractTablistScore — не у наблюдателей, при right − left > 5.
                 let left = xo + max_name + 1.0;

@@ -9,6 +9,107 @@ use std::sync::Mutex;
 /// VANILLA: Holder<Dialog> по сетевому id — индекс записи реестра.
 pub static DIALOG_REG: Mutex<Vec<(String, Option<Tag>)>> = Mutex::new(Vec::new());
 
+/// Ссылки сервера (VANILLA: ClientCommonPacketListenerImpl#serverLinks): подпись и URL.
+pub static SERVER_LINKS: Mutex<Vec<(Component, String)>> = Mutex::new(Vec::new());
+
+/// VANILLA: ClientboundServerLinksPacket + handleServerLinks (невалидные/не-http(s) ссылки отбрасываются).
+pub fn set_server_links(body: &[u8]) {
+    use ezzmc_protocol::nbt;
+    use ezzmc_protocol::text::Content;
+    use ezzmc_protocol::wire::Reader;
+    const KNOWN: [&str; 10] = [
+        "report_bug",
+        "community_guidelines",
+        "support",
+        "status",
+        "feedback",
+        "community",
+        "website",
+        "forums",
+        "news",
+        "announcements",
+    ];
+    let mut r = Reader::new(body);
+    let mut out = Vec::new();
+    let Ok(n) = r.var_int() else { return };
+    for _ in 0..n.max(0) {
+        // Either<KnownLinkType, Component>: true — известный тип (VarInt, вне диапазона → 0).
+        let label = match r.bool() {
+            Ok(true) => {
+                let Ok(id) = r.var_int() else { return };
+                let k = KNOWN
+                    .get(usize::try_from(id).unwrap_or(0))
+                    .unwrap_or(&KNOWN[0]);
+                Component {
+                    content: Content::Translatable {
+                        key: format!("known_server_link.{k}"),
+                        fallback: None,
+                        args: Vec::new(),
+                    },
+                    style: Default::default(),
+                    siblings: Vec::new(),
+                }
+            }
+            Ok(false) => match nbt::read_network(&mut r)
+                .ok()
+                .flatten()
+                .and_then(|t| comp(&t))
+            {
+                Some(c) => c,
+                None => return,
+            },
+            Err(_) => return,
+        };
+        let Ok(url) = r.string(32767) else { return };
+        // VANILLA: Util.parseAndValidateUntrustedUri — только http/https.
+        let l = url.to_ascii_lowercase();
+        if l.starts_with("http://") || l.starts_with("https://") {
+            out.push((label, url));
+        } else {
+            tracing::warn!("server_links: недопустимая ссылка {url}");
+        }
+    }
+    if let Ok(mut g) = SERVER_LINKS.lock() {
+        *g = out;
+    }
+}
+
+/// VANILLA: Dialogs.SERVER_LINKS — запись реестра или встроенный `server_links.json`.
+pub fn server_links_dialog() -> Option<Dialog> {
+    if let Ok(reg) = DIALOG_REG.lock() {
+        if let Some(t) = reg
+            .iter()
+            .find(|(id, _)| id == "minecraft:server_links")
+            .and_then(|(_, t)| t.clone())
+        {
+            return parse(&t);
+        }
+    }
+    let t = Tag::Compound(vec![
+        ("type".into(), Tag::String("minecraft:server_links".into())),
+        (
+            "title".into(),
+            Tag::Compound(vec![(
+                "translate".into(),
+                Tag::String("menu.server_links.title".into()),
+            )]),
+        ),
+        ("button_width".into(), Tag::Int(310)),
+        ("columns".into(), Tag::Int(1)),
+        (
+            "exit_action".into(),
+            Tag::Compound(vec![
+                (
+                    "label".into(),
+                    Tag::Compound(vec![("translate".into(), Tag::String("gui.back".into()))]),
+                ),
+                ("width".into(), Tag::Int(200)),
+            ]),
+        ),
+    ]);
+    parse(&t)
+}
+
 /// VANILLA: DialogAction.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum After {
@@ -343,12 +444,25 @@ pub fn parse(t: &Tag) -> Option<Dialog> {
             )
         }
         "server_links" => {
-            // Ссылки сервера клиент не хранит (пакет server_links) — список пуст, остаётся exit.
+            // VANILLA: ServerLinksDialogScreen — кнопка на ссылку, действие open_url.
+            let w = width();
+            let buttons: Vec<_> = SERVER_LINKS
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(label, url)| Btn {
+                    label,
+                    tooltip: None,
+                    width: w,
+                    action: Some(Act::Static(Click::OpenUrl(url))),
+                })
+                .collect();
             let exit = btn("exit_action");
             let oc = exit.as_ref().and_then(|e| e.action.clone());
             (
                 Kind::List {
-                    buttons: Vec::new(),
+                    buttons,
                     exit,
                     columns: columns(),
                 },
@@ -568,5 +682,41 @@ mod tests {
         assert_eq!(range_value(0.0, 10.0, None, Some(2.0), 0.33), 3.0);
         assert_eq!(range_str(4.0), "4");
         assert_eq!(range_str(2.5), "2.5");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod server_links_tests {
+    use super::*;
+    use ezzmc_protocol::wire::Writer;
+
+    #[test]
+    fn parse_links_and_dialog() {
+        let mut w = Writer::new();
+        w.var_int(3);
+        // известный тип website (6)
+        w.bool(true).var_int(6).string("https://example.com/");
+        // не-http ссылка отбрасывается
+        w.bool(true).var_int(0).string("file:///etc/passwd");
+        // кастомный компонент (строковый NBT-тег «Hi»)
+        w.bool(false).u8(8).u16(2).bytes(b"Hi");
+        w.string("http://a.b/c");
+        set_server_links(&w.into_vec());
+        let g = SERVER_LINKS.lock().unwrap().clone();
+        assert_eq!(g.len(), 2);
+        assert_eq!(g[0].1, "https://example.com/");
+        assert_eq!(g[1].1, "http://a.b/c");
+        let d = server_links_dialog().unwrap();
+        match d.kind {
+            Kind::List {
+                buttons, columns, ..
+            } => {
+                assert_eq!(buttons.len(), 2);
+                assert_eq!(columns, 1);
+                assert_eq!(buttons[0].width, 310);
+            }
+            Kind::Simple(_) => panic!(),
+        }
     }
 }

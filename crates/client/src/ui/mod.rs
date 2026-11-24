@@ -1,11 +1,17 @@
 //! GUI главного меню (VANILLA: TitleScreen, JoinMultiplayerScreen, OptionsScreen и подэкраны).
 //! Режим «немедленного рисования»: каждый кадр экран объявляет виджеты, клик обрабатывается на месте.
+pub mod bookedit;
+pub mod cmdblock;
 pub mod dialog;
+pub mod jigsaw;
 pub mod lang;
 pub mod options;
 pub mod ping;
 pub mod servers;
 pub mod signedit;
+pub mod social;
+pub mod structblock;
+pub mod testblock;
 
 use crate::editbox::{EditBox, Move};
 use ezzmc_render::gui::GuiPainter;
@@ -165,12 +171,30 @@ pub enum Screen {
     Disconnected,
     /// Диалог сервера (данные — `State.dlg`).
     Dialog,
+    /// VANILLA: ConfirmLinkScreen (untrusted) — URL в `State.link`.
+    LinkConfirm,
     /// VANILLA: SignEditScreen/HangingSignEditScreen (данные — `State.sign`).
     Sign,
+    /// VANILLA: BookEditScreen/BookSignScreen (данные — `State.book`).
+    Book,
+    /// VANILLA: CommandBlockEditScreen (данные — `State.cmd`).
+    CmdBlock,
+    /// VANILLA: StructureBlockEditScreen (данные — `State.structure`).
+    Structure,
+    /// VANILLA: JigsawBlockEditScreen (данные — `State.jigsaw`).
+    Jigsaw,
+    /// VANILLA: TestBlockEditScreen (данные — `State.testblock`).
+    TestBlock,
+    /// VANILLA: SocialInteractionsScreen (данные — `State.social`).
+    Social,
     /// VANILLA: DeathScreen (данные — `State.death`).
     Death,
     /// VANILLA: DeathScreen.TitleConfirmScreen — «Вы уверены, что хотите выйти?».
     DeathConfirm,
+    /// VANILLA: ConnectScreen — «Connecting to the server...» и «Cancel».
+    Connecting,
+    /// VANILLA: LevelLoadingScreen — «Loading terrain...» до готовности уровня.
+    Loading,
 }
 
 /// Рабочий порт локального сервера (xtask server 26.3 25611).
@@ -187,12 +211,33 @@ pub enum Action {
     Respawn,
     /// Выйти с сервера в главное меню.
     Disconnect,
+    /// VANILLA: LanguageSelectScreen#onDone — применить язык (код `ru_ru`).
+    SetLanguage(String),
     /// Набор ресурспаков изменён — перезагрузить ресурсы (перезапуск процесса).
     ReloadResources,
     /// Последний диалог закрыт — вернуться в игру (без пересборки ресурсов).
     CloseDialog,
     /// Экран правки таблички закрыт (`take_sign_out` отдаёт текст).
     CloseSign,
+    /// Экран командного блока закрыт (`take_cmd_out` отдаёт данные, если Готово).
+    CloseCmdBlock,
+    /// Экран структурного блока закрыт (`take_structure_out`).
+    CloseStructure,
+    CloseJigsaw,
+    CloseTestBlock,
+    CloseSocial,
+    /// Экран книги закрыт (`take_book_out` отдаёт страницы, если сохранено).
+    CloseBook,
+    /// VANILLA: ConfirmLinkScreen → Blaze3D.openUri.
+    OpenLink(String),
+    /// VANILLA: PauseScreen → диалог Dialogs.SERVER_LINKS.
+    OpenServerLinks,
+    /// VANILLA: PauseScreen → AdvancementsScreen.
+    OpenAdv,
+    /// VANILLA: PauseScreen → StatsScreen.
+    OpenStats,
+    /// VANILLA: ConnectScreen «Cancel» — оборвать подключение, назад к списку серверов.
+    CancelConnect,
 }
 
 struct State {
@@ -211,18 +256,40 @@ struct State {
     packs_avail: Option<Vec<crate::packrepo::PackInfo>>,
     /// Строка поиска, пак на подтверждении (несовместимый), выбор при входе на экран, ввод кадра.
     pack_search: EditBox,
+    /// Экран языка: список (код, «Название (Регион)»), выбранный код.
+    langs: Vec<(String, String)>,
+    lang_sel: String,
     pack_confirm: Option<String>,
     pack_initial: Option<String>,
     pack_typed: String,
     pack_keys: Vec<UiKey>,
     /// Текст для системного буфера (Ctrl+C/X в полях меню); забирает main.
     clip_out: Option<String>,
+    link: Option<String>,
     /// Причина отключения для `Screen::Disconnected`.
     kick: String,
+    /// Заголовок `connect.failed` (отказ до входа в игру) вместо `disconnect.lost`.
+    kick_connect_failed: bool,
     /// Текущий диалог сервера и исходящие действия его кнопок.
     dlg: Option<dialog::Scr>,
     dlg_out: Vec<dialog::Out>,
     sign: Option<signedit::SignEdit>,
+    book: Option<bookedit::BookEdit>,
+    cmd: Option<cmdblock::CmdBlock>,
+    cmd_out: Option<cmdblock::CmdOut>,
+    structure: Option<structblock::StructBlock>,
+    structure_out: Option<structblock::StructOut>,
+    jigsaw: Option<jigsaw::Jigsaw>,
+    jigsaw_out: Option<jigsaw::JigsawOut>,
+    testblock: Option<testblock::TestBlock>,
+    social: Option<social::Social>,
+    /// Игроки для экрана (main обновляет каждый кадр) и скрытые UUID.
+    social_players: Vec<social::Player>,
+    social_hidden: std::collections::HashSet<u128>,
+    /// Запросы скрыть/показать: (uuid, скрыть, имя) — разбирает main.
+    social_toggle: Vec<(u128, bool, String)>,
+    testblock_out: Option<testblock::TestOut>,
+    book_out: Option<bookedit::BookOut>,
     sign_out: Option<([i32; 3], bool, [String; 4])>,
     /// VANILLA: DeathScreen — причина (строка с кодами `§`), hardcore, счёт, момент открытия (кнопки активны через 20 тиков).
     death: Option<Death>,
@@ -307,7 +374,10 @@ fn edit_apply(e: &mut EditBox, keys: &[UiKey], typed: &str, clip: &mut Option<St
             _ => {}
         }
     }
-    e.type_text(typed);
+    // type_text("") удалил бы выделение (и Ctrl+A, Shift+стрелки «стирали» бы текст).
+    if !typed.is_empty() {
+        e.type_text(typed);
+    }
 }
 
 fn cur(st: &State) -> Screen {
@@ -336,12 +406,13 @@ impl Gui {
         } else {
             lines[seed % lines.len()].to_owned()
         };
-        // Отладка: EZZMC_MENU_SCREEN=options|video|sound|multiplayer — открыть экран сразу.
+        // Отладка: EZZMC_MENU_SCREEN=options|video|sound|language|multiplayer — открыть экран сразу.
         let mut stack = vec![Screen::Title];
         match std::env::var("EZZMC_MENU_SCREEN").as_deref() {
             Ok("options") => stack.push(Screen::Options),
             Ok("video") => stack.extend([Screen::Options, Screen::Page(Page::Video)]),
             Ok("sound") => stack.extend([Screen::Options, Screen::Page(Page::Sound)]),
+            Ok("language") => stack.extend([Screen::Page(Page::Language)]),
             Ok("controls") => stack.extend([Screen::Options, Screen::Page(Page::Controls)]),
             Ok("keybinds") => stack.extend([
                 Screen::Options,
@@ -372,17 +443,35 @@ impl Gui {
                 splash,
                 packs_avail: None,
                 pack_search: EditBox::new(64),
+                langs: Vec::new(),
+                lang_sel: String::new(),
                 pack_confirm: None,
                 pack_initial: None,
                 pack_typed: String::new(),
                 pack_keys: Vec::new(),
                 clip_out: None,
+                link: None,
                 kick: String::new(),
+                kick_connect_failed: false,
                 death: None,
                 dlg: None,
                 dlg_out: Vec::new(),
                 sign: None,
                 sign_out: None,
+                cmd: None,
+                cmd_out: None,
+                structure: None,
+                structure_out: None,
+                jigsaw: None,
+                jigsaw_out: None,
+                testblock: None,
+                social: None,
+                social_players: Vec::new(),
+                social_hidden: Default::default(),
+                social_toggle: Vec::new(),
+                testblock_out: None,
+                book: None,
+                book_out: None,
             },
             lang: Lang::load(lang_json),
             opts: Options::load(&dir.join("options.txt")),
@@ -403,6 +492,15 @@ impl Gui {
         }
     }
 
+    /// Список языков из `pack.mcmeta` индекса ассетов (VANILLA: LanguageManager#getLanguages).
+    pub fn set_languages(&mut self, v: Vec<(String, String)>) {
+        self.st.langs = v;
+    }
+
+    pub fn set_lang(&mut self, l: Lang) {
+        self.lang = l;
+    }
+
     /// Показать диалог сервера (VANILLA: ClientPacketListener#showDialog).
     pub fn open_dialog(&mut self, d: Box<crate::dialog::Dialog>) {
         self.st.dlg = Some(dialog::open(*d));
@@ -412,6 +510,20 @@ impl Gui {
     }
 
     /// clear_dialog. true — экран диалога был открыт и закрыт (надо вернуться в игру).
+    pub fn open_server_links(&mut self) {
+        if let Some(d) = crate::dialog::server_links_dialog() {
+            self.open_dialog(Box::new(d));
+        }
+    }
+
+    /// VANILLA: ChatScreen#handleComponentClicked → open_url → ConfirmLinkScreen(untrusted).
+    /// VANILLA-UNSURE: ваниль возвращает в чат после выбора, мы — сразу в игру.
+    pub fn open_link_confirm(&mut self, url: String) {
+        self.st.link = Some(url);
+        self.st.stack = vec![Screen::LinkConfirm];
+        self.in_game = true;
+    }
+
     pub fn close_dialog(&mut self) -> bool {
         let had = self.st.dlg.take().is_some();
         let shown = had && cur(&self.st) == Screen::Dialog;
@@ -457,6 +569,169 @@ impl Gui {
         self.in_game = true;
     }
 
+    /// Открыть экран командного блока (VANILLA: LocalPlayer#openCommandBlock).
+    pub fn open_cmd_block(&mut self, pos: [i32; 3], name: &str) {
+        self.st.dlg = None;
+        self.st.cmd = Some(cmdblock::open(pos, name));
+        self.st.stack = vec![Screen::CmdBlock];
+        self.in_game = true;
+    }
+
+    /// Пришёл block_entity_data для открытого командного блока (VANILLA: updateGui).
+    pub fn cmd_block_data(
+        &mut self,
+        pos: [i32; 3],
+        conditional: bool,
+        tag: Option<&ezzmc_protocol::nbt::Tag>,
+    ) {
+        if let Some(c) = self.st.cmd.as_mut().filter(|c| c.pos == pos) {
+            c.update(conditional, tag);
+        }
+    }
+
+    /// Позиция открытого командного блока.
+    pub fn cmd_block_pos(&self) -> Option<[i32; 3]> {
+        self.st.cmd.as_ref().map(|c| c.pos)
+    }
+
+    pub fn take_cmd_out(&mut self) -> Option<cmdblock::CmdOut> {
+        self.st.cmd_out.take()
+    }
+
+    pub fn close_cmd_block(&mut self) {
+        self.st.cmd = None;
+        if cur(&self.st) == Screen::CmdBlock {
+            self.st.stack.clear();
+        }
+    }
+
+    /// VANILLA: LocalPlayer#openStructureBlock.
+    pub fn open_structure(&mut self, pos: [i32; 3], tag: Option<&ezzmc_protocol::nbt::Tag>) {
+        self.st.dlg = None;
+        let mut s = structblock::open(pos);
+        s.update(tag);
+        self.st.structure = Some(s);
+        self.st.stack = vec![Screen::Structure];
+        self.in_game = true;
+    }
+
+    pub fn take_structure_out(&mut self) -> Option<structblock::StructOut> {
+        self.st.structure_out.take()
+    }
+
+    pub fn close_structure(&mut self) {
+        self.st.structure = None;
+        if cur(&self.st) == Screen::Structure {
+            self.st.stack.clear();
+        }
+    }
+
+    /// VANILLA: LocalPlayer#openJigsawBlock.
+    pub fn open_jigsaw(
+        &mut self,
+        pos: [i32; 3],
+        orientation: &str,
+        tag: Option<&ezzmc_protocol::nbt::Tag>,
+    ) {
+        self.st.dlg = None;
+        self.st.jigsaw = Some(jigsaw::open(pos, orientation, tag));
+        self.st.stack = vec![Screen::Jigsaw];
+        self.in_game = true;
+    }
+
+    /// VANILLA: Minecraft#handleKeybinds — key.socialInteractions → SocialInteractionsScreen.
+    pub fn open_social(&mut self, me: u128, server: String) {
+        self.st.dlg = None;
+        self.st.social = Some(social::open(me, server));
+        self.st.stack = vec![Screen::Social];
+        self.in_game = true;
+    }
+
+    /// Обновить данные открытого экрана; true — экран открыт.
+    pub fn social_sync(
+        &mut self,
+        players: Vec<social::Player>,
+        hidden: &std::collections::HashSet<u128>,
+    ) -> bool {
+        if self.st.social.is_none() {
+            return false;
+        }
+        self.st.social_players = players;
+        self.st.social_hidden = hidden.clone();
+        true
+    }
+
+    pub fn take_social_toggles(&mut self) -> Vec<(u128, bool, String)> {
+        std::mem::take(&mut self.st.social_toggle)
+    }
+
+    pub fn is_social(&self) -> bool {
+        self.st.social.is_some()
+    }
+
+    pub fn close_social(&mut self) {
+        self.st.social = None;
+        if cur(&self.st) == Screen::Social {
+            self.st.stack.clear();
+        }
+    }
+
+    /// VANILLA: LocalPlayer#openTestBlock.
+    pub fn open_testblock(&mut self, pos: [i32; 3], tag: Option<&ezzmc_protocol::nbt::Tag>) {
+        self.st.dlg = None;
+        self.st.testblock = Some(testblock::open(pos, tag));
+        self.st.stack = vec![Screen::TestBlock];
+        self.in_game = true;
+    }
+
+    pub fn take_testblock_out(&mut self) -> Option<testblock::TestOut> {
+        self.st.testblock_out.take()
+    }
+
+    pub fn close_testblock(&mut self) {
+        self.st.testblock = None;
+        if cur(&self.st) == Screen::TestBlock {
+            self.st.stack.clear();
+        }
+    }
+
+    pub fn take_jigsaw_out(&mut self) -> Option<jigsaw::JigsawOut> {
+        self.st.jigsaw_out.take()
+    }
+
+    pub fn close_jigsaw(&mut self) {
+        self.st.jigsaw = None;
+        if cur(&self.st) == Screen::Jigsaw {
+            self.st.stack.clear();
+        }
+    }
+
+    /// Открыт экран правки книги (для агента).
+    pub fn is_book(&self) -> bool {
+        cur(&self.st) == Screen::Book
+    }
+
+    /// Открыть экран правки книги с пером (VANILLA: LocalPlayer#openItemGui → BookEditScreen).
+    pub fn open_book(&mut self, slot: i32, pages: Vec<String>, author: &str) {
+        self.st.dlg = None;
+        self.st.book = Some(bookedit::open(slot, pages, author));
+        self.st.stack = vec![Screen::Book];
+        self.in_game = true;
+    }
+
+    /// Сохранённая книга (Готово/Подписать): отправить ServerboundEditBookPacket.
+    pub fn take_book_out(&mut self) -> Option<bookedit::BookOut> {
+        self.st.book_out.take()
+    }
+
+    /// Закрыть экран книги (после `Action::CloseBook`).
+    pub fn close_book(&mut self) {
+        self.st.book = None;
+        if cur(&self.st) == Screen::Book {
+            self.st.stack.clear();
+        }
+    }
+
     /// Текст закрытой таблички: (позиция, передняя сторона, строки) — отправить ServerboundSignUpdate.
     pub fn take_sign_out(&mut self) -> Option<([i32; 3], bool, [String; 4])> {
         self.st.sign_out.take()
@@ -488,11 +763,45 @@ impl Gui {
         self.in_game = true;
     }
 
+    /// VANILLA: ConnectScreen — подключение (родитель — список серверов).
+    pub fn open_connecting(&mut self) {
+        self.st.dlg = None;
+        self.st.stack = vec![Screen::Title, Screen::Multiplayer, Screen::Connecting];
+        self.st.scroll = 0.0;
+        self.in_game = false;
+    }
+
+    /// VANILLA: LevelLoadingScreen — «Loading terrain...».
+    pub fn open_loading(&mut self) {
+        self.st.dlg = None;
+        self.st.stack = vec![Screen::Loading];
+        self.st.scroll = 0.0;
+        self.in_game = false;
+    }
+
+    /// Экран подключения/загрузки уровня сейчас активен.
+    pub fn is_connecting(&self) -> bool {
+        matches!(cur(&self.st), Screen::Connecting | Screen::Loading)
+    }
+
+    /// Меню паузы сейчас активно (NowPlayingToast рисуется внутри него).
+    pub fn is_pause(&self) -> bool {
+        matches!(cur(&self.st), Screen::Pause)
+    }
+
+    /// Вернуться к списку серверов (после «Cancel»).
+    pub fn back_to_servers(&mut self) {
+        self.st.dlg = None;
+        self.st.stack = vec![Screen::Title, Screen::Multiplayer];
+        self.in_game = false;
+    }
+
     /// VANILLA: DisconnectedScreen — показать причину отключения (родитель — список серверов).
-    pub fn open_disconnected(&mut self, reason: String) {
+    pub fn open_disconnected(&mut self, reason: String, connect_failed: bool) {
         self.st.dlg = None;
         self.st.stack = vec![Screen::Title, Screen::Multiplayer, Screen::Disconnected];
         self.st.kick = reason;
+        self.st.kick_connect_failed = connect_failed;
         self.st.scroll = 0.0;
         self.st.sel = None;
         self.in_game = false;
@@ -608,9 +917,14 @@ impl Gui {
         dt_s: f32,
         now_ms: u64,
     ) -> Action {
-        let speed = self.opts.f32(&options::ACCESSIBILITY[3]);
+        let speed = self.opts.f32(
+            options::ACCESSIBILITY
+                .iter()
+                .find(|d| d.key == "panoramaScrollSpeed")
+                .expect("panorama"),
+        );
         self.spin = (self.spin + dt_s * 20.0 * speed * 0.1) % 360.0;
-        let guiscale = self.opts.f32(&options::VIDEO[3]) as u32;
+        let guiscale = self.opts.f32(&options::VIDEO[options::GUI_SCALE]) as u32;
         t.set_scale_option(guiscale);
         t.begin(w, h);
         p.begin(t.scale());
@@ -619,6 +933,10 @@ impl Gui {
         let mut action = Action::None;
         let keys = std::mem::take(&mut self.pending_keys);
         let typed = std::mem::take(&mut self.pending_text);
+        if cur(&self.st) == Screen::Page(Page::Language) {
+            self.st.pack_typed = typed.clone();
+            self.st.pack_keys = keys.clone();
+        }
         if cur(&self.st) == Screen::Page(Page::ResourcePacks) {
             let st = &mut self.st;
             if st.packs_avail.is_none() {
@@ -653,7 +971,15 @@ impl Gui {
         let wheel = std::mem::take(&mut self.wheel);
         let click = std::mem::take(&mut self.click);
         let mut esc = false;
-        if cur(&self.st) == Screen::Sign {
+        if matches!(
+            cur(&self.st),
+            Screen::Sign
+                | Screen::Book
+                | Screen::CmdBlock
+                | Screen::Structure
+                | Screen::Jigsaw
+                | Screen::TestBlock
+        ) {
             // VANILLA: Screen#extractTransparentBackground — fillGradient(0xC0101010 → 0xD0101010).
             let (gw0, gh0) = (w as f32 / k, h as f32 / k);
             t.fill_gradient(0.0, 0.0, gw0, gh0, 0xC010_1010, 0xD010_1010);
@@ -700,7 +1026,17 @@ impl Gui {
                     0xFFFFFFFF,
                 );
             }
-            if matches!(screen, Screen::Death | Screen::DeathConfirm | Screen::Sign) {
+            if matches!(
+                screen,
+                Screen::Death
+                    | Screen::DeathConfirm
+                    | Screen::Sign
+                    | Screen::Book
+                    | Screen::CmdBlock
+                    | Screen::Structure
+                    | Screen::Jigsaw
+                    | Screen::TestBlock
+            ) {
                 // фон нарисован до Frame (см. выше)
             } else if screen != Screen::Title {
                 // VANILLA: Screen#extractMenuBackground — тайл 32×32 (menu_background / inworld_).
@@ -762,13 +1098,66 @@ impl Gui {
                     }
                 }
                 Screen::Pause => pause(&mut f, &mut next, &mut action),
-                Screen::Disconnected => disconnected(&mut f, &st.kick, &mut back),
+                Screen::Disconnected => {
+                    disconnected(&mut f, &st.kick, st.kick_connect_failed, &mut back)
+                }
+                Screen::Connecting => {
+                    // VANILLA: ConnectScreen#extractRenderState / #init.
+                    let key = match ezzmc_net::session::LOGIN_STATUS
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        1 => "connect.authorizing",
+                        2 => "connect.encrypting",
+                        _ => "connect.connecting",
+                    };
+                    f.center(key, gh / 2.0 - 50.0, WHITE);
+                    if f.button(
+                        gw / 2.0 - 100.0,
+                        (gh / 4.0).floor() + 120.0 + 12.0,
+                        200.0,
+                        20.0,
+                        &f.lang.tr("gui.cancel"),
+                        true,
+                    ) {
+                        action = Action::CancelConnect;
+                    }
+                }
+                // VANILLA: LevelLoadingScreen — без статуса чанков (на клиенте его нет): текст y = h/2 − 50.
+                Screen::Loading => {
+                    f.center("multiplayer.downloadingTerrain", gh / 2.0 - 50.0, WHITE)
+                }
                 Screen::Death => death(&mut f, st, &mut next, &mut action),
                 Screen::DeathConfirm => death_confirm(&mut f, st, &mut action),
                 Screen::Sign => signedit::screen(&mut f, st, &keys, &typed, now_ms, &mut action),
-                Screen::Dialog => {
-                    dialog::screen(&mut f, st, &keys, &typed, wheel, now_ms, &mut action)
+                Screen::Book => bookedit::screen(&mut f, st, &keys, &typed, now_ms, &mut action),
+                Screen::CmdBlock => {
+                    cmdblock::screen(&mut f, st, &keys, &typed, now_ms, &mut action)
                 }
+                Screen::Structure => {
+                    structblock::screen(&mut f, st, &keys, &typed, now_ms, &mut action)
+                }
+                Screen::Jigsaw => jigsaw::screen(&mut f, st, &keys, &typed, now_ms, &mut action),
+                Screen::TestBlock => {
+                    testblock::screen(&mut f, st, &keys, &typed, now_ms, &mut action)
+                }
+                Screen::Dialog => {
+                    dialog::screen(&mut f, st, &keys, &typed, wheel, now_ms, &mut action);
+                    // VANILLA: Screen#defaultHandleGameClickEvent → open_url → ConfirmLinkScreen(trusted=false).
+                    if let Some(i) = st
+                        .dlg_out
+                        .iter()
+                        .position(|o| matches!(o, dialog::Out::OpenUrl(_)))
+                    {
+                        if let dialog::Out::OpenUrl(u) = st.dlg_out.remove(i) {
+                            st.link = Some(u);
+                            next = Some(Screen::LinkConfirm);
+                        }
+                    }
+                }
+                Screen::Social => {
+                    social::screen(&mut f, st, &keys, &typed, wheel, now_ms, &mut action)
+                }
+                Screen::LinkConfirm => link_confirm(&mut f, st, &mut back, &mut action),
                 Screen::Options => options_hub(&mut f, st, opts, &mut next, &mut back),
                 Screen::Page(Page::KeyBinds) => controls(
                     &mut f,
@@ -783,14 +1172,27 @@ impl Gui {
                 Screen::Page(Page::ResourcePacks) => {
                     resource_packs(&mut f, st, opts, wheel, &mut back)
                 }
+                Screen::Page(Page::Language) => {
+                    if let Some(code) = language_screen(&mut f, st, opts, wheel, &mut back) {
+                        action = Action::SetLanguage(code);
+                    }
+                }
                 Screen::Page(pg) => page(&mut f, st, opts, pg, wheel, &mut next, &mut back),
             }
             // VANILLA: DisconnectedScreen#shouldCloseOnEsc = false.
             if keys.iter().any(|k| matches!(k, UiKey::Escape))
                 && screen != Screen::Title
                 && screen != Screen::Disconnected
+                && screen != Screen::Connecting
+                && screen != Screen::Loading
                 && screen != Screen::Dialog
                 && screen != Screen::Sign
+                && screen != Screen::Book
+                && screen != Screen::CmdBlock
+                && screen != Screen::Structure
+                && screen != Screen::Jigsaw
+                && screen != Screen::TestBlock
+                && screen != Screen::Social
                 && screen != Screen::Death
                 && screen != Screen::DeathConfirm
                 && self.listening.is_none()
@@ -807,6 +1209,9 @@ impl Gui {
                     prepare_form(&mut self.st, n);
                 }
             } else if back || esc {
+                if screen == Screen::Page(Page::Language) {
+                    self.st.pack_search = EditBox::new(64);
+                }
                 if screen == Screen::Page(Page::ResourcePacks) {
                     let now = self.opts.raw("resourcePacks").unwrap_or("[\"vanilla\"]");
                     if self.st.pack_initial.as_deref().is_some_and(|i| i != now) {
@@ -876,6 +1281,47 @@ impl Frame<'_> {
         self.center_raw(&s, y, rgb);
     }
 
+    /// VANILLA: AbstractWidget#extractScrollingStringOverContents (margin 2) +
+    /// ActiveTextCollector#defaultScrollingHelper — длинная подпись обрезается и ездит туда-обратно.
+    fn scrolling_label(&mut self, label: &str, x: f32, y: f32, w: f32, h: f32, col: u32) {
+        let ty = ((y + y + h - 9.0) / 2.0).floor() + 1.0;
+        self.scrolling_text(label, x + 2.0, x + w - 2.0, ty, col, true);
+    }
+
+    /// Строка в `[left, right]`: влезает — по центру (`center`) или слева, иначе обрезка и бегущая строка.
+    fn scrolling_text(
+        &mut self,
+        label: &str,
+        left: f32,
+        right: f32,
+        ty: f32,
+        col: u32,
+        center: bool,
+    ) {
+        let lw = self.t.text_width(label);
+        let avail = right - left;
+        if lw > avail {
+            let max_pos = f64::from(lw - avail);
+            let time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0.0, |d| (d.as_millis() % 86_400_000) as f64 / 1000.0);
+            let period = (max_pos * 0.5).max(3.0);
+            let a = (std::f64::consts::FRAC_PI_2 * (std::f64::consts::TAU * time / period).cos())
+                .sin()
+                / 2.0
+                + 0.5;
+            let pos = (a * max_pos).trunc() as f32;
+            self.t.set_clip_x(Some((left, right)));
+            self.t.draw(label, left - pos, ty, col, true);
+            self.t.set_clip_x(None);
+        } else if center {
+            let cx = ((left + right) / 2.0).clamp(left + lw / 2.0, right - lw / 2.0);
+            self.t.draw(label, cx - lw / 2.0, ty, col, true);
+        } else {
+            self.t.draw(label, left, ty, col, true);
+        }
+    }
+
     /// VANILLA: Button — спрайты button / highlighted / disabled (nine_slice 200×20, граница 3).
     fn button(&mut self, x: f32, y: f32, w: f32, h: f32, label: &str, active: bool) -> bool {
         if self.hover(x, y, w, h) {
@@ -895,10 +1341,8 @@ impl Frame<'_> {
         };
         self.p
             .nine_slice(sprite, x, y, w, h, [200.0, 20.0], [3.0; 4], 0xFFFFFFFF);
-        let tw = self.t.text_width(label);
         let col = if active { WHITE } else { GRAY };
-        self.t
-            .draw(label, x + (w - tw) / 2.0, y + (h - 8.0) / 2.0, col, true);
+        self.scrolling_label(label, x, y, w, h, col);
         if hov && self.click {
             self.click = false;
             // VANILLA: AbstractButton#playDownSound → SimpleSoundInstance.forUI(UI_BUTTON_CLICK, 1.0F).
@@ -911,6 +1355,7 @@ impl Frame<'_> {
     /// VANILLA: AbstractSliderButton. `v` в 0..1; возвращает true, если значение менялось.
     fn slider(&mut self, x: f32, y: f32, w: f32, h: f32, label: &str, v: &mut f32) -> bool {
         self.id += 1;
+        let mut clicked = false;
         let hov = self.hover(x, y, w, h);
         if hov || *self.drag == Some(self.id) {
             crate::cursor::request(if *self.drag == Some(self.id) && self.down {
@@ -923,9 +1368,11 @@ impl Frame<'_> {
             self.click = false;
             crate::audio::play_ui("ui.button.click", crate::audio::Cat::Master, 0.25, 1.0);
             *self.drag = Some(self.id);
+            clicked = true;
         }
         let mut changed = false;
-        if *self.drag == Some(self.id) && self.down {
+        // VANILLA: AbstractSliderButton#onClick — значение ставится сразу по клику.
+        if *self.drag == Some(self.id) && (self.down || clicked) {
             let nv = ((self.mx - (x + 4.0)) / (w - 8.0)).clamp(0.0, 1.0);
             if (nv - *v).abs() > f32::EPSILON {
                 *v = nv;
@@ -954,9 +1401,7 @@ impl Frame<'_> {
             [2.0, 2.0, 2.0, 3.0],
             0xFFFFFFFF,
         );
-        let tw = self.t.text_width(label);
-        self.t
-            .draw(label, x + (w - tw) / 2.0, y + (h - 8.0) / 2.0, WHITE, true);
+        self.scrolling_label(label, x, y, w, h, WHITE);
         changed
     }
 
@@ -1016,13 +1461,22 @@ impl Frame<'_> {
         if a < b {
             let x1 = tx + self.t.text_width(&sub(e.scroll, a));
             let x2 = tx + self.t.text_width(&sub(e.scroll, b));
-            self.t.fill(x1, ty - 1.0, x2, ty + 9.0, 0xFF3A5FD9);
+            self.t.fill(x1, ty - 1.0, x2, ty + 10.0, 0xFF3A6FD8);
         }
         self.t.draw(&sub(e.scroll, end), tx, ty, 0xE0E0E0, true);
-        if focused && caret {
-            let c = e.cursor.clamp(e.scroll, end);
-            let cx = tx + self.t.text_width(&sub(e.scroll, c));
-            self.t.fill(cx, y + 2.0, cx + 1.0, y + h - 2.0, 0xFFD0D0D0);
+        // VANILLA: EditBox#extractWidgetRenderState + TextCursorUtils — мигание 300 мс; в конце текста
+        // каретка «_», иначе полоска 1×(9+1) цветом текста (вставка).
+        let _ = caret;
+        let blink = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() / 300);
+        if focused && blink % 2 == 0 && e.cursor >= e.scroll && e.cursor <= end {
+            let cx = tx + self.t.text_width(&sub(e.scroll, e.cursor));
+            if e.cursor == cs.len() && cs.len() < e.max {
+                self.t.draw("_", cx, ty, 0xE0E0E0, true);
+            } else {
+                self.t.fill(cx, ty - 1.0, cx + 1.0, ty + 10.0, 0xFFE0E0E0);
+            }
         }
         let over = self.hover(x, y, w, h);
         if over {
@@ -1092,7 +1546,7 @@ fn title(
         0xFFFFFFFF,
     );
     // VANILLA: SplashRenderer — центр (w/2+123, 69), поворот −20°, пульсация масштаба.
-    if !st.splash.is_empty() {
+    if !st.splash.is_empty() && !HIDE_SPLASH.load(std::sync::atomic::Ordering::Relaxed) {
         let tw = f.t.text_width(&st.splash);
         let ph = 1.8
             - ((now_ms % 1000) as f32 / 1000.0 * std::f32::consts::TAU)
@@ -1614,12 +2068,22 @@ fn form(
 /// VANILLA: OptionsScreen — FOV, «Online», сетка 2×N кнопок, «Done».
 /// VANILLA: PauseScreen (Back to Game / Options / Disconnect).
 /// VANILLA: DisconnectedScreen#init — колонка по центру: заголовок, причина (макс. ширина w−50), кнопка 200.
-fn disconnected(f: &mut Frame, reason: &str, back: &mut bool) {
+fn disconnected(f: &mut Frame, reason: &str, connect_failed: bool, back: &mut bool) {
     let lines = wrap(f.t, reason, f.w - 50.0);
     let n = lines.len() as f32;
     let total = 29.0 + 9.0 * n + 20.0 + 24.0;
     let top = ((f.h - total) / 2.0).floor();
-    f.center("disconnect.lost", top + 10.0, WHITE);
+    // VANILLA: ConnectScreen → CONNECT_FAILED до входа, иначе «Connection Lost»
+    // (VANILLA-UNSURE: кик в Configuration у ванили тоже «Connection Lost», у нас — connect.failed).
+    f.center(
+        if connect_failed {
+            "connect.failed"
+        } else {
+            "disconnect.lost"
+        },
+        top + 10.0,
+        WHITE,
+    );
     for (i, l) in lines.iter().enumerate() {
         f.center_raw(l, top + 39.0 + 9.0 * i as f32, WHITE);
     }
@@ -1719,6 +2183,31 @@ fn death_confirm(f: &mut Frame, st: &mut State, action: &mut Action) {
     }
 }
 
+/// VANILLA: ConfirmLinkScreen(trusted=false): заголовок, URL, предупреждение, [Да][Копировать][Нет].
+fn link_confirm(f: &mut Frame, st: &mut State, back: &mut bool, action: &mut Action) {
+    let Some(url) = st.link.clone() else {
+        *back = true;
+        return;
+    };
+    // LinearLayout vertical spacing 8: 9 + 9 + 9 + ряд кнопок (padding 16 + 20).
+    let top = ((f.h - 87.0) / 2.0).floor();
+    f.center("chat.link.confirm", top, WHITE);
+    f.center_raw(&url, top + 17.0, WHITE);
+    f.center("chat.link.warning", top + 34.0, 0xFFFFCC);
+    let (y, x) = (top + 67.0, ((f.w - 308.0) / 2.0).floor());
+    if f.button(x, y, 100.0, 20.0, &f.lang.tr("gui.yes"), true) {
+        *action = Action::OpenLink(url.clone());
+        *back = true;
+    }
+    if f.button(x + 104.0, y, 100.0, 20.0, &f.lang.tr("chat.copy"), true) {
+        st.clip_out = Some(url);
+        *back = true;
+    }
+    if f.button(x + 208.0, y, 100.0, 20.0, &f.lang.tr("gui.no"), true) {
+        *back = true;
+    }
+}
+
 fn pause(f: &mut Frame, next: &mut Option<Screen>, action: &mut Action) {
     let (w, h) = (f.w, f.h);
     f.center("menu.game", 40.0, WHITE);
@@ -1727,12 +2216,58 @@ fn pause(f: &mut Frame, next: &mut Option<Screen>, action: &mut Action) {
     if f.button(x, y0, 204.0, 20.0, &f.lang.tr("menu.returnToGame"), true) {
         *action = Action::Resume;
     }
-    if f.button(x, y0 + 48.0, 204.0, 20.0, &f.lang.tr("menu.options"), true) {
+    // VANILLA: PauseScreen — ряд Advancements / Statistics (по 98).
+    if f.button(
+        x,
+        y0 + 24.0,
+        98.0,
+        20.0,
+        &f.lang.tr("gui.advancements"),
+        true,
+    ) {
+        *action = Action::OpenAdv;
+    }
+    if f.button(
+        x + 106.0,
+        y0 + 24.0,
+        98.0,
+        20.0,
+        &f.lang.tr("gui.stats"),
+        true,
+    ) {
+        *action = Action::OpenStats;
+    }
+    // VANILLA: PauseScreen#getCustomAdditions — «Ссылки сервера», если сервер прислал ссылки.
+    let links = crate::dialog::SERVER_LINKS
+        .lock()
+        .is_ok_and(|g| !g.is_empty());
+    let mut dy = 0.0;
+    if links {
+        if f.button(
+            x,
+            y0 + 48.0,
+            204.0,
+            20.0,
+            &f.lang.tr("menu.server_links"),
+            true,
+        ) {
+            *action = Action::OpenServerLinks;
+        }
+        dy = 24.0;
+    }
+    if f.button(
+        x,
+        y0 + 48.0 + dy,
+        204.0,
+        20.0,
+        &f.lang.tr("menu.options"),
+        true,
+    ) {
         *next = Some(Screen::Options);
     }
     if f.button(
         x,
-        y0 + 96.0,
+        y0 + 96.0 + dy,
         204.0,
         20.0,
         &f.lang.tr("menu.disconnect"),
@@ -1835,9 +2370,8 @@ fn controls(
             y += 20.0;
         }
         if y >= top && y + 20.0 <= bottom {
-            let label = f.lang.tr(b.name);
+            let name_label = f.lang.tr(b.name);
             let ty = y + 6.0;
-            f.t.draw(&label, w / 2.0 - 155.0, ty, WHITE, true);
             if f.button(
                 w / 2.0 + 105.0,
                 y,
@@ -1863,6 +2397,15 @@ fn controls(
             if f.button(w / 2.0 + 25.0, y, 75.0, 20.0, &label, true) {
                 *listening = Some(b.name);
             }
+            // Отход от ваниля (по просьбе владельца): длинное имя обрезается до кнопки и ездит.
+            f.scrolling_text(
+                &name_label,
+                w / 2.0 - 155.0,
+                w / 2.0 + 17.0,
+                ty,
+                WHITE,
+                false,
+            );
         }
         y += 24.0;
     }
@@ -1905,7 +2448,28 @@ fn page(
     let defs = pg.defs();
     // VANILLA: ControlsScreen — первая строка: Mouse Settings / Key Binds, дальше опции.
     let head = usize::from(pg == Page::Controls) * 2;
-    let rows = (defs.len() + head).div_ceil(2) as f32;
+    // VANILLA: OptionsList#addBig/addSmall — «большая» опция занимает всю строку (310), малые идут парами.
+    let wide =
+        |d: &Def| pg == Page::Sound && matches!(d.key, "soundCategory_master" | "soundDevice");
+    let (mut row, mut col) = (head / 2, head % 2);
+    let mut pos = Vec::with_capacity(defs.len());
+    for d in defs {
+        if wide(d) {
+            if col == 1 {
+                row += 1;
+                col = 0;
+            }
+            pos.push((row, 0, true));
+            row += 1;
+        } else {
+            pos.push((row, col, false));
+            col ^= 1;
+            if col == 0 {
+                row += 1;
+            }
+        }
+    }
+    let rows = (row + usize::from(col == 1)) as f32;
     let max_scroll = (rows * 24.0 + 4.0 - (bottom - top)).max(0.0);
     st.scroll = (st.scroll - wheel * 12.0).clamp(0.0, max_scroll);
     for (n, (key, target)) in [
@@ -1922,14 +2486,17 @@ fn page(
             *next = Some(Screen::Page(target));
         }
     }
-    for (i, d) in defs.iter().enumerate() {
-        let c = i + head;
-        let y = top + 4.0 - st.scroll + (c / 2) as f32 * 24.0;
+    for (d, &(r, c, big)) in defs.iter().zip(&pos) {
+        let y = top + 4.0 - st.scroll + r as f32 * 24.0;
         if y < top || y + 20.0 > bottom {
             continue;
         }
-        let x = w / 2.0 + if c % 2 == 0 { -155.0 } else { 5.0 };
-        option_row(f, opts, d, x, y, 150.0);
+        if big {
+            option_row(f, opts, d, w / 2.0 - 155.0, y, 310.0);
+        } else {
+            let x = w / 2.0 + if c == 0 { -155.0 } else { 5.0 };
+            option_row(f, opts, d, x, y, 150.0);
+        }
     }
     if defs.is_empty() && head == 0 {
         f.center_raw("-", h / 2.0 - 4.0, GRAY);
@@ -1945,6 +2512,145 @@ fn page(
     ) {
         *back = true;
     }
+}
+
+/// VANILLA: LanguageSelectScreen — поиск, список (строки по 18, ширина 270), «Font…»/«Done».
+/// VANILLA-UNSURE: вертикальные отступы шапки (заголовок y=4, поиск y=17) выведены из раскладки.
+fn language_screen(
+    f: &mut Frame,
+    st: &mut State,
+    opts: &mut Options,
+    wheel: f32,
+    back: &mut bool,
+) -> Option<String> {
+    let (w, h) = (f.w, f.h);
+    let (top, bottom) = (36.0, h - 53.0);
+    let (pk, pt) = (
+        std::mem::take(&mut st.pack_keys),
+        std::mem::take(&mut st.pack_typed),
+    );
+    edit_apply(&mut st.pack_search, &pk, &pt, &mut st.clip_out);
+    if st.lang_sel.is_empty() {
+        st.lang_sel = opts.raw("lang").unwrap_or("en_us").to_owned();
+    }
+    let q = st.pack_search.text.to_lowercase();
+    let shown: Vec<(String, String)> = st
+        .langs
+        .iter()
+        .filter(|(_, n)| q.is_empty() || n.to_lowercase().contains(&q))
+        .cloned()
+        .collect();
+    let max_scroll = (shown.len() as f32 * 18.0 + 4.0 - (bottom - top)).max(0.0);
+    st.scroll = (st.scroll - wheel * 9.0).clamp(0.0, max_scroll);
+    f.list_bg(top, bottom);
+    let (rw, rx) = (270.0, w / 2.0 - 135.0);
+    let mut applied = None;
+    for (i, (code, name)) in shown.iter().enumerate() {
+        let y = top + 2.0 - st.scroll + i as f32 * 18.0;
+        if y + 18.0 < top || y > bottom {
+            continue;
+        }
+        let (vt, vb) = (y.max(top), (y + 18.0).min(bottom));
+        let sel = *code == st.lang_sel;
+        if sel {
+            f.t.fill(rx, vt, rx + rw, vb, 0xFFFFFFFF);
+            f.t.fill(rx + 1.0, vt, rx + rw - 1.0, vb, 0xFF000000);
+        }
+        if f.click && f.hover(rx, vt, rw, vb - vt) && f.my >= top && f.my < bottom {
+            st.lang_sel = code.clone();
+            f.click = false;
+            // Двойной клик (VANILLA: mouseClicked(doubleClick) → onDone).
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            if st.last_click.0 == Some(i) && now.saturating_sub(st.last_click.1) < 250 {
+                applied = Some(code.clone());
+                *back = true;
+            }
+            st.last_click = (Some(i), now);
+        }
+        let ty = y + 5.0;
+        if ty >= top && ty + 8.0 <= bottom {
+            f.center_raw(name, ty, WHITE);
+        }
+    }
+    // Ползунок (AbstractSelectionList#scrollBarX = rowRight + 6 + 2), перетаскивание — пока кнопка зажата на нём.
+    if max_scroll > 0.0 {
+        let (sbx, lh) = (rx + rw + 8.0, bottom - top);
+        let sh = (lh * lh / (shown.len() as f32 * 18.0 + 4.0)).clamp(32.0, (lh - 8.0).max(32.0));
+        if f.down && f.mx >= sbx && f.mx < sbx + 6.0 && f.my >= top && f.my < bottom {
+            let n = ((f.my - top - sh / 2.0) / (lh - sh)).clamp(0.0, 1.0);
+            st.scroll = n * max_scroll;
+        }
+        let sy = top + st.scroll * (lh - sh) / max_scroll;
+        f.p.nine_slice(
+            "st_scroller_bg",
+            sbx,
+            top,
+            6.0,
+            lh,
+            [6.0, 32.0],
+            [1.0; 4],
+            0xFFFFFFFF,
+        );
+        f.p.nine_slice(
+            "st_scroller",
+            sbx,
+            sy,
+            6.0,
+            sh,
+            [6.0, 32.0],
+            [1.0; 4],
+            0xFFFFFFFF,
+        );
+    }
+    // Шапка поверх прокручиваемого списка.
+    f.center(&f.lang.tr("options.language.title"), 4.0, WHITE);
+    let caret = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis())
+        / 500)
+        % 2
+        == 0;
+    f.edit_box(
+        w / 2.0 - 100.0,
+        17.0,
+        200.0,
+        14.0,
+        &mut st.pack_search,
+        true,
+        caret,
+    );
+    // VANILLA: футер — предупреждение (withColor -4539718 = 0xBABABA) и кнопки.
+    f.center_raw(
+        &f.lang.tr("options.languageAccuracyWarning"),
+        h - 45.0,
+        0xBABABA,
+    );
+    // Font Settings (FontOptionsScreen) не реализован — кнопка неактивна.
+    let _ = f.button(
+        w / 2.0 - 154.0,
+        h - 28.0,
+        150.0,
+        20.0,
+        &f.lang.tr("options.font"),
+        false,
+    );
+    if f.button(
+        w / 2.0 + 4.0,
+        h - 28.0,
+        150.0,
+        20.0,
+        &f.lang.tr("gui.done"),
+        true,
+    ) {
+        applied = Some(st.lang_sel.clone());
+        *back = true;
+    }
+    if let Some(c) = &applied {
+        opts.set("lang", c.clone());
+    }
+    applied
 }
 
 /// Обрезка строки по ширине с «...».
@@ -2133,28 +2839,15 @@ fn resource_packs(f: &mut Frame, st: &mut State, opts: &mut Options, wheel: f32,
         / 500)
         % 2
         == 0;
-    if st.pack_search.text.is_empty() {
-        let hint = f.lang.tr("gui.packSelection.search");
-        f.t.fill(
-            w / 2.0 - 100.0 - 1.0,
-            31.0,
-            w / 2.0 + 101.0,
-            47.0,
-            0xFFA0A0A0,
-        );
-        f.t.fill(w / 2.0 - 100.0, 32.0, w / 2.0 + 100.0, 46.0, 0xFF000000);
-        f.t.draw(&hint, w / 2.0 - 96.0, 35.0, 0x707070, true);
-    } else {
-        f.edit_box(
-            w / 2.0 - 100.0,
-            32.0,
-            200.0,
-            14.0,
-            &mut st.pack_search,
-            true,
-            caret,
-        );
-    }
+    f.edit_box(
+        w / 2.0 - 100.0,
+        32.0,
+        200.0,
+        14.0,
+        &mut st.pack_search,
+        true,
+        caret,
+    );
     for (x, key) in [(lx, "pack.available.title"), (rx, "pack.selected.title")] {
         let t = f.lang.tr(key);
         let tx = x + (cw - f.t.text_width(&t)) / 2.0;
@@ -2266,7 +2959,33 @@ fn value_text(lang: &Lang, d: &Def, raw: &str) -> String {
             "maxFps" if v >= max => lang.tr("options.framerateLimit.max"),
             "maxFps" => lang.fmt("options.framerate", &[&format!("{v}")]),
             "guiScale" if v < 1.0 => lang.tr("options.guiScale.auto"),
-            "renderDistance" => lang.fmt("options.chunks", &[&format!("{v}")]),
+            "renderDistance" | "simulationDistance" | "cloudRange" => {
+                lang.fmt("options.chunks", &[&format!("{v}")])
+            }
+            "weatherRadius" => lang.fmt("options.blocks", &[&format!("{v}")]),
+            // VANILLA: Options#biomeBlendRadius — подпись по ширине (2v+1).
+            "biomeBlendRadius" => {
+                lang.tr(&format!("options.biomeBlendRadius.{}", v as i32 * 2 + 1))
+            }
+            "menuBackgroundBlurriness" if v <= 0.0 => lang.tr("options.off"),
+            // VANILLA: Options#percentValueOrOffLabel.
+            "screenEffectScale"
+            | "fovEffectScale"
+            | "darknessEffectScale"
+            | "damageTiltStrength"
+            | "glintSpeed"
+            | "glintStrength"
+                if v <= 0.0 =>
+            {
+                lang.tr("options.off")
+            }
+            "chatDelay" if v <= 0.0 => lang.tr("options.chat.delay_none"),
+            "chatDelay" => lang.fmt("options.chat.delay", &[&format!("{v:.1}")]),
+            "notificationDisplayTime" => lang.fmt("options.multiplier", &[&format!("{v}")]),
+            "mipmapLevels" if v <= 0.0 => lang.tr("options.off"),
+            "maxAnisotropyBit" => {
+                lang.fmt("options.multiplier", &[&format!("{}", 1 << (v as u32))])
+            }
             "gamma" if v <= min => lang.tr("options.gamma.min"),
             "gamma" if (v - 0.5).abs() < 0.005 => lang.tr("options.gamma.default"),
             "gamma" if v >= max => lang.tr("options.gamma.max"),
@@ -2280,10 +2999,27 @@ fn value_text(lang: &Lang, d: &Def, raw: &str) -> String {
 fn option_row(f: &mut Frame, opts: &mut Options, d: &Def, x: f32, y: f32, w: f32) {
     let raw = opts.get(d).to_owned();
     let caption = f.lang.tr(d.lang);
-    let label = f.lang.fmt(
-        "options.generic_value",
-        &[&caption, &value_text(f.lang, d, &raw)],
-    );
+    let label = if d.key == "chunkSectionFadeInTime" {
+        // VANILLA: Options#chunkSectionFadeInTime — подпись целиком, без «caption: value».
+        let v: f32 = raw.parse().unwrap_or(0.0);
+        if v <= 0.0 {
+            f.lang.tr("options.chunkFade.none")
+        } else {
+            f.lang
+                .fmt("options.chunkFade.seconds", &[&format!("{v:.2}")])
+        }
+    } else if matches!(
+        d.key,
+        "musicFrequency" | "musicToast" | "backgroundForChatOnly" | "chatDelay"
+    ) {
+        // VANILLA: Options#musicFrequency/musicToast — подпись = только значение.
+        value_text(f.lang, d, &raw)
+    } else {
+        f.lang.fmt(
+            "options.generic_value",
+            &[&caption, &value_text(f.lang, d, &raw)],
+        )
+    };
     match d.kind {
         Kind::Toggle => {
             if f.button(x, y, w, 20.0, &label, true) {
@@ -2312,9 +3048,19 @@ fn option_row(f: &mut Frame, opts: &mut Options, d: &Def, x: f32, y: f32, w: f32
             } else {
                 max
             };
-            let mut n = ((opts.f32(d) - min) / (max - min)).clamp(0.0, 1.0);
+            // VANILLA: UnitDouble.xmap(Mth::square, Math::sqrt) — положение ползунка = √значения.
+            let squared = matches!(d.key, "fovEffectScale" | "darknessEffectScale");
+            let cur = if squared {
+                opts.f32(d).max(0.0).sqrt()
+            } else {
+                opts.f32(d)
+            };
+            let mut n = ((cur - min) / (max - min)).clamp(0.0, 1.0);
             if f.slider(x, y, w, 20.0, &label, &mut n) {
                 let mut v = min + n * (max - min);
+                if squared {
+                    v *= v;
+                }
                 if step > 0.0 {
                     v = (min + ((v - min) / step).round() * step).clamp(min, max);
                 }
@@ -2323,3 +3069,6 @@ fn option_row(f: &mut Frame, opts: &mut Options, d: &Def, x: f32, y: f32, w: f32
         }
     }
 }
+
+/// Options#hideSplashTexts (обновляется каждый кадр из options).
+pub static HIDE_SPLASH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

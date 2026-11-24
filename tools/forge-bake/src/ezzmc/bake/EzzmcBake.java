@@ -409,15 +409,21 @@ public final class EzzmcBake {
             int nt = Math.min(maxTint + 1, 16);
             o.u8(nt);
             for (int i = 0; i < nt; i++) {
-                // статус: 0 — нет обработчика (-1), 1 — цвет, 2 — исключение (нужен уровень/биом)
+                // статус: 0 — нет обработчика (-1), 1 — цвет, 2 — нужен уровень (неизвестно как),
+                // 3/4/5 — биомный цвет травы/листвы/воды (TODO-509: пробный уровень TintProbe)
+                int st;
+                int c = -1;
                 try {
-                    int c = colors.getColor(s, null, null, i);
-                    o.u8(c == -1 ? 0 : 1);
-                    o.u32(c);
+                    c = colors.getColor(s, null, null, i);
+                    st = c == -1 ? 0 : 1;
                 } catch (Throwable t) {
-                    o.u8(2);
-                    o.u32(-1);
+                    st = 2;
                 }
+                if (st == 2) {
+                    st = TintProbe.classify(colors, s, i);
+                }
+                o.u8(st);
+                o.u32(st == 1 || st == 0 ? c : -1);
             }
         }
 

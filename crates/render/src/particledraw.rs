@@ -583,7 +583,7 @@ impl ParticleDraw {
             blocks_quads: 0,
             particle_quads: 0,
             texture_mat: Mat4::IDENTITY,
-            alpha: if glint { 0.75 } else { 1.0 },
+            alpha: if glint { glint_strength() } else { 1.0 },
             foil_only: item_mode,
             l0,
             l1,
@@ -1323,4 +1323,16 @@ mod tests {
         assert_eq!((f(0), f(1), f(2)), (0.5, -0.5, 5.0));
         assert_eq!((f(3), f(4)), (1.0, 1.0));
     }
+}
+
+static GLINT_STRENGTH: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0x3F40_0000); // 0.75
+
+/// VANILLA: Options#glintStrength (GlintAlpha в color_modulator.a).
+pub fn set_glint_strength(v: f32) {
+    GLINT_STRENGTH.store(v.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn glint_strength() -> f32 {
+    f32::from_bits(GLINT_STRENGTH.load(std::sync::atomic::Ordering::Relaxed))
 }

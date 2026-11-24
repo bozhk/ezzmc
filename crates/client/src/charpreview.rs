@@ -15,10 +15,10 @@ pub struct Snap {
     pub state: HumanoidState,
     pub crouching: bool,
     pub swim: crate::worldview::SwimPose,
-    pub right: Option<std::rc::Rc<crate::handitem::HandMesh>>,
-    pub left: Option<std::rc::Rc<crate::handitem::HandMesh>>,
-    pub blocks: std::rc::Rc<(Vec<u8>, u32, u32)>,
-    pub items: Option<std::rc::Rc<(Vec<u8>, u32, u32)>>,
+    pub right: Option<std::sync::Arc<crate::handitem::HandMesh>>,
+    pub left: Option<std::sync::Arc<crate::handitem::HandMesh>>,
+    pub blocks: std::sync::Arc<(Vec<u8>, u32, u32)>,
+    pub items: Option<std::sync::Arc<(Vec<u8>, u32, u32)>>,
     /// ItemStack#hasFoil предметов в правой/левой руке.
     pub foil: (bool, bool),
 }
@@ -99,7 +99,7 @@ impl CharPreview {
         (snap.crouching, snap.swim.in_water, snap.swim.visually).hash(&mut h);
         for m in [&snap.right, &snap.left] {
             m.as_ref()
-                .map(|m| std::rc::Rc::as_ptr(m) as usize)
+                .map(|m| std::sync::Arc::as_ptr(m) as usize)
                 .hash(&mut h);
         }
         let hash = h.finish();
