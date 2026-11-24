@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::inventory::Inventory;
 use crate::invscreen::Layout;
-use crate::recipebook::{Kind, RecipeBook, RecipeEntry};
+use crate::recipebook::{BookKind, Kind, RecipeBook, RecipeEntry};
 
 pub const SPRITES: &[(&str, &str)] = &[
     ("rb_bg", "recipe_book"),
@@ -21,6 +21,29 @@ pub const SPRITES: &[(&str, &str)] = &[
     (
         "rb_ov_x_hl",
         "sprites/recipe_book/crafting_overlay_disabled_highlighted",
+    ),
+    ("rb_fov", "sprites/recipe_book/furnace_overlay"),
+    (
+        "rb_fov_hl",
+        "sprites/recipe_book/furnace_overlay_highlighted",
+    ),
+    ("rb_fov_x", "sprites/recipe_book/furnace_overlay_disabled"),
+    (
+        "rb_fov_x_hl",
+        "sprites/recipe_book/furnace_overlay_disabled_highlighted",
+    ),
+    ("rb_ffilt_on", "sprites/recipe_book/furnace_filter_enabled"),
+    (
+        "rb_ffilt_on_hl",
+        "sprites/recipe_book/furnace_filter_enabled_highlighted",
+    ),
+    (
+        "rb_ffilt_off",
+        "sprites/recipe_book/furnace_filter_disabled",
+    ),
+    (
+        "rb_ffilt_off_hl",
+        "sprites/recipe_book/furnace_filter_disabled_highlighted",
     ),
     ("rb_btn", "sprites/recipe_book/button"),
     ("rb_btn_hl", "sprites/recipe_book/button_highlighted"),
@@ -53,18 +76,58 @@ pub const SPRITES: &[(&str, &str)] = &[
 ];
 
 const ITEMS_PER_PAGE: usize = 20;
-/// VANILLA: RecipeBookCategories CRAFTING_* — id реестра `recipe_book_category` 0..=3.
-const CRAFTING_CATEGORIES: std::ops::RangeInclusive<i32> = 0..=3;
+type Tab = (Option<i32>, &'static str, Option<&'static str>);
 
-/// VANILLA: CraftingRecipeBookComponent#TABS — (категория или None = «поиск», иконки).
-/// Id категорий реестра `recipe_book_category`: 0 блоки, 1 механизмы, 2 снаряжение, 3 разное.
-const TABS: [(Option<i32>, &str, Option<&str>); 5] = [
-    (None, "compass", None),
-    (Some(2), "iron_axe", Some("golden_sword")),
-    (Some(0), "bricks", None),
-    (Some(3), "lava_bucket", Some("apple")),
-    (Some(1), "redstone", None),
-];
+/// VANILLA: *Screen#TABS — (категория или None = «поиск», иконки). Id реестра `recipe_book_category`:
+/// 0..3 крафт (блоки, механизмы, снаряжение, разное), 4..6 печь (еда, блоки, разное),
+/// 7..8 плавильня (блоки, разное), 9 коптильня (еда).
+fn tab_defs(k: BookKind) -> &'static [Tab] {
+    match k {
+        BookKind::Crafting => &[
+            (None, "compass", None),
+            (Some(2), "iron_axe", Some("golden_sword")),
+            (Some(0), "bricks", None),
+            (Some(3), "lava_bucket", Some("apple")),
+            (Some(1), "redstone", None),
+        ],
+        BookKind::Furnace => &[
+            (None, "compass", None),
+            (Some(4), "porkchop", None),
+            (Some(5), "stone", None),
+            (Some(6), "lava_bucket", Some("emerald")),
+        ],
+        BookKind::Blast => &[
+            (None, "compass", None),
+            (Some(7), "redstone_ore", None),
+            (Some(8), "iron_shovel", Some("golden_leggings")),
+        ],
+        BookKind::Smoker => &[(None, "compass", None), (Some(9), "porkchop", None)],
+    }
+}
+
+/// Категории, входящие в вкладку «поиск».
+fn book_categories(k: BookKind) -> std::ops::RangeInclusive<i32> {
+    match k {
+        BookKind::Crafting => 0..=3,
+        BookKind::Furnace => 4..=6,
+        BookKind::Blast => 7..=8,
+        BookKind::Smoker => 9..=9,
+    }
+}
+
+/// Тип книги окна и размер сетки крафта (для печей не используется).
+#[derive(Clone, Copy)]
+pub struct Ctx {
+    kind: BookKind,
+    grid: u32,
+}
+
+fn ctx(lay: &Layout) -> Ctx {
+    Ctx {
+        kind: lay.book_kind().unwrap_or(BookKind::Crafting),
+        grid: if lay.is_player() { 2 } else { 3 },
+    }
+}
 
 fn named(name: &str) -> Option<ezzmc_protocol::item::ItemStack> {
     let id = ezzmc_protocol::generated::r26_3::ITEM
@@ -77,31 +140,28 @@ fn named(name: &str) -> Option<ezzmc_protocol::item::ItemStack> {
     })
 }
 
-/// VANILLA: CraftingRecipeBookComponent#canDisplay — рецепт влезает в сетку меню.
-fn can_display(e: &RecipeEntry, grid: u32) -> bool {
+/// VANILLA: CraftingRecipeBookComponent#canDisplay — рецепт влезает в сетку меню; печи — любой Furnace.
+fn can_display(e: &RecipeEntry, cx: Ctx) -> bool {
+    let grid = cx.grid;
     match e.kind {
-        Kind::Shaped { w, h } => grid >= w && grid >= h,
-        Kind::Shapeless => (grid * grid) as usize >= e.ingredients.len(),
+        Kind::Shaped { w, h } => cx.kind == BookKind::Crafting && grid >= w && grid >= h,
+        Kind::Shapeless => {
+            cx.kind == BookKind::Crafting && (grid * grid) as usize >= e.ingredients.len()
+        }
+        Kind::Furnace { .. } => cx.kind != BookKind::Crafting,
         _ => false,
     }
 }
 
-fn grid_size(lay: &Layout) -> u32 {
-    if lay.is_player() {
-        2
-    } else {
-        3
-    }
-}
-
 /// VANILLA: RecipeBookTabButton#updateVisibility — «поиск» всегда, остальные при наличии рецептов.
-fn visible_tabs(known: &BTreeMap<i32, RecipeEntry>, grid: u32) -> Vec<usize> {
-    (0..TABS.len())
-        .filter(|&i| match TABS[i].0 {
+fn visible_tabs(known: &BTreeMap<i32, RecipeEntry>, cx: Ctx) -> Vec<usize> {
+    let t = tab_defs(cx.kind);
+    (0..t.len())
+        .filter(|&i| match t[i].0 {
             None => true,
             Some(c) => known
                 .values()
-                .any(|e| e.category == c && can_display(e, grid)),
+                .any(|e| e.category == c && can_display(e, cx)),
         })
         .collect()
 }
@@ -177,13 +237,16 @@ pub fn toggle_rect(lay: &Layout, gw: f32, gh: f32) -> Option<(f32, f32, f32, f32
     let c = (gh / 2.0).floor();
     Some(if lay.is_player() {
         (l + 104.0, c - 22.0, 20.0, 18.0)
+    } else if ctx(lay).kind != BookKind::Crafting {
+        // VANILLA: AbstractFurnaceScreen#getRecipeBookButtonPosition
+        (l + 20.0, c - 49.0, 20.0, 18.0)
     } else {
         (l + 5.0, c - 49.0, 20.0, 18.0)
     })
 }
 
 /// VANILLA: Inventory#fillStackedContents + menu.fillCraftSlotsStackedContents.
-fn have(inv: &Inventory) -> HashMap<u32, i32> {
+fn have(inv: &Inventory, kind: BookKind) -> HashMap<u32, i32> {
     let mut m = HashMap::new();
     let mut add = |s: &Option<ezzmc_protocol::item::ItemStack>| {
         if let Some(s) = s {
@@ -191,6 +254,11 @@ fn have(inv: &Inventory) -> HashMap<u32, i32> {
         }
     };
     match &inv.open {
+        // печи: 0 вход, 1 топливо, 2 результат, 3..=38 инвентарь (fillCraftSlotsStackedContents — вход)
+        Some(o) if kind != BookKind::Crafting => {
+            o.slots.iter().take(1).for_each(&mut add);
+            o.slots.iter().skip(3).take(36).for_each(&mut add);
+        }
         // верстак: 0 результат, 1..=9 сетка, 10..=45 инвентарь
         Some(o) => o.slots.iter().skip(1).take(45).for_each(&mut add),
         // InventoryMenu: 1..=4 сетка, 9..=44 инвентарь (без брони 5..=8 и второй руки)
@@ -206,19 +274,19 @@ fn have(inv: &Inventory) -> HashMap<u32, i32> {
 pub fn collections<'a>(
     known: &'a BTreeMap<i32, RecipeEntry>,
     inv: &Inventory,
-    grid: u32,
+    cx: Ctx,
     tab: usize,
     names: &HashMap<u32, String>,
     term: &str,
 ) -> Vec<Collection<'a>> {
-    let want = TABS.get(tab).and_then(|t| t.0);
-    let have = have(inv);
+    let want = tab_defs(cx.kind).get(tab).and_then(|t| t.0);
+    let have = have(inv, cx.kind);
     let mut out: Vec<Collection> = Vec::new();
     let mut by_group: HashMap<i32, usize> = HashMap::new();
     for e in known.values() {
-        if !CRAFTING_CATEGORIES.contains(&e.category)
+        if !book_categories(cx.kind).contains(&e.category)
             || want.is_some_and(|c| c != e.category)
-            || !can_display(e, grid)
+            || !can_display(e, cx)
         {
             continue;
         }
@@ -318,7 +386,7 @@ pub fn click(
         return Act::None;
     }
     let g = Geo::new(gw, gh);
-    let filtering = book.settings.crafting.filtering;
+    let filtering = book.settings.of(ctx(lay).kind).filtering;
     // VANILLA: RecipeBookPage#mouseClicked — открытый оверлей забирает клик; ЛКМ по варианту
     // ставит рецепт, любой другой клик его закрывает.
     if let Some(o) = book.overlay.take() {
@@ -341,7 +409,7 @@ pub fn click(
         return Act::Handled;
     }
     book.search_focus = false;
-    let tabs = visible_tabs(&book.known, grid_size(lay));
+    let tabs = visible_tabs(&book.known, ctx(lay));
     if !tabs.contains(&book.tab) {
         book.tab = 0;
     }
@@ -359,7 +427,7 @@ pub fn click(
         collections(
             &book.known,
             inv,
-            grid_size(lay),
+            ctx(lay),
             book.tab,
             &book.names,
             &book.search.text,
@@ -394,7 +462,7 @@ pub fn click(
                         c.recipes.len()
                     };
                     if n > 1 {
-                        book.overlay = Some(Overlay::new(c, filtering, x, y, &g));
+                        book.overlay = Some(Overlay::new(c, filtering, x, y, &g, ctx(lay).kind));
                     }
                     return Act::Handled;
                 }
@@ -494,7 +562,7 @@ pub fn draw(
         [k, k, 148.0 * k, 167.0 * k],
         white,
     );
-    let tabs = visible_tabs(&book.known, grid_size(lay));
+    let tabs = visible_tabs(&book.known, ctx(lay));
     for (idx, &t) in tabs.iter().enumerate() {
         let sel = t == book.tab || (idx == 0 && !tabs.contains(&book.tab));
         let (tx, ty) = tab_pos(&g, idx);
@@ -508,7 +576,7 @@ pub fn draw(
             [0.0, 0.0, 1.0, 1.0],
             white,
         );
-        let (a, b) = (TABS[t].1, TABS[t].2);
+        let (a, b) = (tab_defs(ctx(lay).kind)[t].1, tab_defs(ctx(lay).kind)[t].2);
         match b {
             Some(b) => {
                 for (n, dx) in [(a, 3.0), (b, 14.0)] {
@@ -524,21 +592,25 @@ pub fn draw(
             }
         }
     }
-    let filtering = book.settings.crafting.filtering;
+    let filtering = book.settings.of(ctx(lay).kind).filtering;
     let (fx, fy) = g.filter();
     let hov = inside(mx, my, fx, fy, 26.0, 16.0);
-    let name = match (filtering, hov) {
-        (true, false) => "rb_filt_on",
-        (true, true) => "rb_filt_on_hl",
-        (false, false) => "rb_filt_off",
-        (false, true) => "rb_filt_off_hl",
+    let name = match (filtering, hov, ctx(lay).kind == BookKind::Crafting) {
+        (true, false, true) => "rb_filt_on",
+        (true, true, true) => "rb_filt_on_hl",
+        (false, false, true) => "rb_filt_off",
+        (false, true, true) => "rb_filt_off_hl",
+        (true, false, false) => "rb_ffilt_on",
+        (true, true, false) => "rb_ffilt_on_hl",
+        (false, false, false) => "rb_ffilt_off",
+        (false, true, false) => "rb_ffilt_off_hl",
     };
     p.blit(name, fx, fy, 26.0, 16.0, [0.0, 0.0, 1.0, 1.0], white);
     let cols = visible(
         collections(
             &book.known,
             inv,
-            grid_size(lay),
+            ctx(lay),
             book.tab,
             &book.names,
             &book.search.text,
@@ -597,12 +669,12 @@ pub fn page_label(
     if !lay.book {
         return None;
     }
-    let filtering = book.settings.crafting.filtering;
+    let filtering = book.settings.of(ctx(lay).kind).filtering;
     let n = visible(
         collections(
             &book.known,
             inv,
-            grid_size(lay),
+            ctx(lay),
             book.tab,
             &book.names,
             &book.search.text,
@@ -633,12 +705,12 @@ pub fn hover_stack(
         return None;
     }
     let g = Geo::new(gw, gh);
-    let filtering = book.settings.crafting.filtering;
+    let filtering = book.settings.of(ctx(lay).kind).filtering;
     let cols = visible(
         collections(
             &book.known,
             inv,
-            grid_size(lay),
+            ctx(lay),
             book.tab,
             &book.names,
             &book.search.text,
@@ -656,6 +728,65 @@ pub fn hover_stack(
         }
     }
     None
+}
+
+/// Предмет призрака под курсором. VANILLA: GhostSlots#extractTooltip (вариант по slotSelectTime).
+pub fn hover_ghost(
+    ghost: &[crate::recipebook::GhostSlot],
+    lay: &Layout,
+    gw: f32,
+    gh: f32,
+    now_ms: u128,
+    mx: f32,
+    my: f32,
+) -> Option<ezzmc_protocol::item::ItemStack> {
+    let (l, t) = (lay.left(gw), lay.top(gh));
+    let idx = (now_ms / 1500) as usize;
+    ghost.iter().find_map(|g| {
+        let Some((x, y)) = lay.slots.get(g.slot).copied().flatten() else {
+            return None;
+        };
+        if g.items.is_empty() || !inside(mx, my, l + x, t + y, 16.0, 16.0) {
+            return None;
+        }
+        Some(ezzmc_protocol::item::ItemStack {
+            item: g.items[idx % g.items.len()],
+            count: 1,
+            patch: Default::default(),
+        })
+    })
+}
+
+/// Тултип кнопки фильтра. VANILLA: RecipeBookComponent#filterButton (withTooltip) —
+/// при фильтрации имя типа книги (craftable/smeltable/blastable/smokable), иначе `toggleRecipes.all`.
+pub fn hover_filter(
+    book: &RecipeBook,
+    lay: &Layout,
+    lang: &crate::ui::lang::Lang,
+    gw: f32,
+    gh: f32,
+    mx: f32,
+    my: f32,
+) -> Option<Vec<(String, u32)>> {
+    if !lay.book {
+        return None;
+    }
+    let (fx, fy) = Geo::new(gw, gh).filter();
+    if !inside(mx, my, fx, fy, 26.0, 16.0) {
+        return None;
+    }
+    let kind = ctx(lay).kind;
+    let key = if book.settings.of(kind).filtering {
+        match kind {
+            BookKind::Crafting => "gui.recipebook.toggleRecipes.craftable",
+            BookKind::Furnace => "gui.recipebook.toggleRecipes.smeltable",
+            BookKind::Blast => "gui.recipebook.toggleRecipes.blastable",
+            BookKind::Smoker => "gui.recipebook.toggleRecipes.smokable",
+        }
+    } else {
+        "gui.recipebook.toggleRecipes.all"
+    };
+    Some(vec![(lang.tr(key), 0xFFFF_FFFF)])
 }
 
 /// Поле поиска: рамка, текст/подсказка, каретка. VANILLA: EditBox (81×14, подсказка gui.recipebook.search_hint).
@@ -737,12 +868,13 @@ pub struct Overlay {
     pub y: f32,
     pub w: f32,
     pub h: f32,
+    pub furnace: bool,
     pub buttons: Vec<OvButton>,
 }
 
 impl Overlay {
     /// VANILLA: OverlayRecipeComponent#init.
-    fn new(c: &Collection, filtering: bool, bx: f32, by: f32, g: &Geo) -> Self {
+    fn new(c: &Collection, filtering: bool, bx: f32, by: f32, g: &Geo, kind: BookKind) -> Self {
         let mut list: Vec<(&RecipeEntry, bool)> = Vec::new();
         for (r, ok) in c.recipes.iter().zip(&c.craftable) {
             if *ok {
@@ -803,6 +935,8 @@ impl Overlay {
                             add(i % 3, i / 3, sd);
                         }
                     }
+                    // VANILLA: OverlaySmeltingRecipeButton — вход в клетке (1, 1).
+                    Kind::Furnace { .. } => add(1, 1, &r.ingredients[0]),
                     _ => {}
                 }
                 OvButton {
@@ -819,6 +953,7 @@ impl Overlay {
             y,
             w: (total.min(max_row) * 25 + 8) as f32,
             h: (rows * 25 + 8) as f32,
+            furnace: kind != BookKind::Crafting,
             buttons,
         }
     }
@@ -857,11 +992,15 @@ pub fn draw_overlay(
     let idx = (now_ms / 1500) as usize;
     for b in &o.buttons {
         let hot = inside(mx, my, b.x, b.y, 24.0, 24.0);
-        let sp = match (b.craftable, hot) {
-            (true, false) => "rb_ov",
-            (true, true) => "rb_ov_hl",
-            (false, false) => "rb_ov_x",
-            (false, true) => "rb_ov_x_hl",
+        let sp = match (b.craftable, hot, o.furnace) {
+            (true, false, false) => "rb_ov",
+            (true, true, false) => "rb_ov_hl",
+            (false, false, false) => "rb_ov_x",
+            (false, true, false) => "rb_ov_x_hl",
+            (true, false, true) => "rb_fov",
+            (true, true, true) => "rb_fov_hl",
+            (false, false, true) => "rb_fov_x",
+            (false, true, true) => "rb_fov_x_hl",
         };
         p.blit(sp, b.x, b.y, 24.0, 24.0, uv, 0xFFFF_FFFF);
         for (ix, iy, alts) in &b.items {

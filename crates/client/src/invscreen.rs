@@ -364,11 +364,9 @@ impl Layout {
         use crate::recipebook::BookKind as B;
         match self.kind {
             Kind::Player | Kind::Tex("container_crafting", _) => Some(B::Crafting),
-            // TODO-323c: книга печей — модель готова, экран ещё крафтовый; пока отключена.
-            Kind::Tex("container_furnace" | "container_blast_furnace" | "container_smoker", _) => {
-                let _ = (B::Furnace, B::Blast, B::Smoker);
-                None
-            }
+            Kind::Tex("container_furnace", _) => Some(B::Furnace),
+            Kind::Tex("container_blast_furnace", _) => Some(B::Blast),
+            Kind::Tex("container_smoker", _) => Some(B::Smoker),
             _ => None,
         }
     }

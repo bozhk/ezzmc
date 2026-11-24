@@ -734,7 +734,14 @@ impl App {
                     }
                 }
                 // VANILLA: RecipeBookComponent#slotClicked — клик по результату/сетке гасит призрак.
-                if slot.is_some_and(|s| s <= if lay.is_player() { 4 } else { 9 }) {
+                if slot.is_some_and(|s| {
+                    s <= match lay.book_kind() {
+                        Some(recipebook::BookKind::Crafting) if lay.is_player() => 4,
+                        Some(recipebook::BookKind::Crafting) => 9,
+                        Some(_) => 2,
+                        None => 0,
+                    }
+                }) {
                     v.ghost.clear();
                 }
                 let now = std::time::Instant::now();
@@ -3968,6 +3975,28 @@ impl ApplicationHandler for App {
                                                             tooltip::stack_lines(lang, &*t, &st);
                                                         tooltip::draw_colored(
                                                             t, &lines, mx, my, gwf, ghf,
+                                                        );
+                                                    }
+                                                    if let Some(st) = recipescreen::hover_ghost(
+                                                        &v.ghost,
+                                                        &lay,
+                                                        gwf,
+                                                        ghf,
+                                                        now_ms as u128,
+                                                        mx,
+                                                        my,
+                                                    ) {
+                                                        let lines =
+                                                            tooltip::stack_lines(lang, &*t, &st);
+                                                        tooltip::draw_colored(
+                                                            t, &lines, mx, my, gwf, ghf,
+                                                        );
+                                                    }
+                                                    if let Some(n) = recipescreen::hover_filter(
+                                                        &v.recipes, &lay, lang, gwf, ghf, mx, my,
+                                                    ) {
+                                                        tooltip::draw_colored(
+                                                            t, &n, mx, my, gwf, ghf,
                                                         );
                                                     }
                                                     if let (true, Some(o)) =
