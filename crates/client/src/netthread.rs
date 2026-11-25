@@ -402,25 +402,25 @@ fn run(
     let ids = PacketIds::for_version(&ver);
     let (host, port) = ezzmc_net::srv::parse_address(addr);
     let mut c = Connection::connect(addr).map_err(|x| e(&x))?;
+    let own_uuid;
     let cfg = if ver.protocol == 763 {
         // 1.20.1 (в т. ч. Forge FML3): хендшейк с суффиксом, без Configuration, реестры из `login`.
         let fml_host = format!("{host}{}", ezzmc_net::v1201::FML3_SUFFIX);
         c.handshake(ver.protocol, &fml_host, port, Intent::Login)
             .map_err(|x| e(&x))?;
-        Box::new(
-            ezzmc_net::v1201::login(&mut c, &ids, name)
-                .map_err(|x| e(&x))?
-                .cfg,
-        )
+        let joined = ezzmc_net::v1201::login(&mut c, &ids, name).map_err(|x| e(&x))?;
+        own_uuid = joined.profile.id;
+        Box::new(joined.cfg)
     } else {
         c.handshake(ver.protocol, &host, port, Intent::Login)
             .map_err(|x| e(&x))?;
         // DEC-016: сессия лаунчера (Microsoft) → онлайн-вход, иначе offline.
-        match session() {
+        own_uuid = match session() {
             Some(sess) => login_online(&mut c, &ids, sess),
             None => login_offline(&mut c, &ids, name),
         }
-        .map_err(|x| e(&x))?;
+        .map_err(|x| e(&x))?
+        .id;
         let ConfigOutcome::Play(cfg) = configure(
             &mut c,
             &ids,
@@ -882,6 +882,7 @@ fn run(
                     // partial_tick считаем от фактического применения тика: сетевой поток может
                     // запаздывать относительно сетки, и сущности иначе замирают и прыгают.
                     l.own_id = h.player_id;
+                    l.own_uuid = own_uuid;
                     l.tick_time_at(std::time::Instant::now());
                     crate::itemphys::tick(l);
                     crate::itemphys::tick_falling(l);

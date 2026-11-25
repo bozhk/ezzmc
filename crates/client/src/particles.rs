@@ -6,6 +6,7 @@
 use crate::flammable::FLAMMABLE;
 use ezzmc_assets::bake::SpriteUv;
 use ezzmc_mesh::blockinfo;
+use ezzmc_protocol::nbt::Tag;
 use ezzmc_protocol::types::BlockPos;
 use ezzmc_render::particledraw::{ParticleAtlas, ParticleQuad};
 use ezzmc_world::biome_color::BiomeColors;
@@ -83,6 +84,8 @@ enum Kind {
     Firework,
     /// FireworkParticles.OverlayParticle (вспышка 4 тика).
     Flash,
+    /// FlyTowardsPositionParticle.VaultConnectionProvider (светится, LifetimeAlpha 0→0.6).
+    VaultConnection,
 }
 
 /// VANILLA: DripParticle.* — стадия капли.
@@ -537,6 +540,24 @@ impl Particle {
             }
             Kind::WaterDrop => self.water_drop_tick(level),
             Kind::Bubble => self.bubble_tick(level),
+            Kind::VaultConnection => {
+                // VANILLA: FlyTowardsPositionParticle#tick.
+                self.xo = self.x;
+                self.yo = self.y;
+                self.zo = self.z;
+                let expired = self.age >= self.lifetime;
+                self.age += 1;
+                if expired {
+                    self.removed = true;
+                } else {
+                    let pos = 1.0 - self.age as f32 / self.lifetime as f32;
+                    let pp = (1.0 - pos).powi(4);
+                    let pos = f64::from(pos);
+                    self.x = self.start[0] + self.xd * pos;
+                    self.y = self.start[1] + self.yd * pos - f64::from(pp * 1.2);
+                    self.z = self.start[2] + self.zd * pos;
+                }
+            }
             Kind::Portal => {
                 // VANILLA: PortalParticle#tick.
                 self.xo = self.x;
@@ -839,6 +860,8 @@ impl Particle {
             Kind::Huge => (240, 240),
             // VANILLA: ShriekParticle#getLightCoords = withBlock(…, 15).
             Kind::Shriek | Kind::Sculk => (240, sky),
+            // VANILLA: FlyTowardsPositionParticle#getLightCoords — isGlowing → withBlock(…, 15).
+            Kind::VaultConnection => (240, sky),
             // VANILLA: GlowParticle#getLightCoords — addSmoothBlockEmission(age/lifetime).
             Kind::Flame | Kind::Glow => {
                 let t = ((self.age as f32 + partial) / self.lifetime as f32).clamp(0.0, 1.0);
@@ -937,6 +960,72 @@ pub struct ParticleEngine {
     explosions: Vec<ExplosionInfo>,
     /// FireworkParticles.Starter (NoRenderParticle) в работе.
     starters: Vec<Starter>,
+    /// Хранилища (vault) рядом с камерой: кладёт worldview каждый тик.
+    vaults: Vec<VaultInfo>,
+    /// Игроки мира для connection-частиц: (uuid, позиция ног, высота бокса).
+    players: Vec<(u128, [f64; 3], f64)>,
+}
+
+/// Клиентское состояние хранилища. VANILLA: VaultSharedData (из update-тега `shared_data`)
+/// + свойства блока FACING/OMINOUS.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VaultInfo {
+    pub pos: [i32; 3],
+    /// Direction#getStepX/Z свойства `facing`.
+    pub facing: [i32; 2],
+    pub ominous: bool,
+    pub has_display_item: bool,
+    pub connected: Vec<u128>,
+    /// VANILLA: VaultConfig.DEFAULT.deactivationRange = 4.5.
+    pub range: f64,
+}
+
+impl VaultInfo {
+    /// Разбор блок-сущности хранилища. `tag` — update-тег (`shared_data` внутри).
+    pub fn from_block(pos: [i32; 3], facing: &str, ominous: bool, tag: Option<&Tag>) -> Self {
+        let sd = tag.and_then(|t| t.get("shared_data"));
+        let connected = match sd.and_then(|t| t.get("connected_players")) {
+            // VANILLA: UUIDUtil.CODEC — int[4], старшие слова первыми.
+            Some(Tag::List(l)) => l
+                .iter()
+                .filter_map(|u| match u {
+                    Tag::IntArray(a) if a.len() == 4 => Some(
+                        a.iter()
+                            .fold(0u128, |acc, w| (acc << 32) | u128::from(*w as u32)),
+                    ),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let range = match sd.and_then(|t| t.get("connected_particles_range")) {
+            Some(Tag::Double(d)) => *d,
+            _ => 4.5,
+        };
+        let facing = match facing {
+            "north" => [0, -1],
+            "south" => [0, 1],
+            "west" => [-1, 0],
+            "east" => [1, 0],
+            _ => [0, 0],
+        };
+        VaultInfo {
+            pos,
+            facing,
+            ominous,
+            has_display_item: sd.and_then(|t| t.get("display_item")).is_some(),
+            connected,
+            range,
+        }
+    }
+
+    fn flame(&self) -> &'static str {
+        if self.ominous {
+            "soul_fire_flame"
+        } else {
+            "small_flame"
+        }
+    }
 }
 
 /// VANILLA: ClientExplosionTracker.ExplosionInfo; частицы — (имя, scaling, speed, weight).
@@ -959,7 +1048,122 @@ impl ParticleEngine {
             seeds: Vec::new(),
             explosions: Vec::new(),
             starters: Vec::new(),
+            vaults: Vec::new(),
+            players: Vec::new(),
         }
+    }
+
+    /// Обновляет кеш хранилищ и игроков (перед `vault_tick` и событиями 3015).
+    pub fn set_vaults(&mut self, vaults: Vec<VaultInfo>, players: Vec<(u128, [f64; 3], f64)>) {
+        self.vaults = vaults;
+        self.players = players;
+    }
+
+    /// VANILLA: VaultBlockEntity.Client#tick (без updateDisplayItemSpin — это рендер предмета).
+    pub fn vault_tick(&mut self, game_time: i64) {
+        let vaults = std::mem::take(&mut self.vaults);
+        for v in &vaults {
+            if game_time % 20 == 0 {
+                self.vault_connection(v);
+            }
+            // emitIdleParticles
+            if self.rng.next_float() <= 0.5 {
+                let p = self.vault_inside_cage(v.pos);
+                self.add_smoke(p[0], p[1], p[2], 0.0, 0.0, 0.0);
+                if v.has_display_item {
+                    self.add_flame(v.flame(), p[0], p[1], p[2]);
+                }
+            }
+            // playIdleSounds
+            if v.has_display_item && self.rng.next_float() <= 0.02 {
+                let vol = self.rng.next_float() * 0.25 + 0.75;
+                let pitch = self.rng.next_float() + 0.5;
+                let c = |i: usize| f64::from(v.pos[i]) + 0.5;
+                crate::audio::play_at(
+                    "block.vault.ambient",
+                    crate::audio::Cat::Blocks,
+                    c(0),
+                    c(1),
+                    c(2),
+                    vol,
+                    pitch,
+                );
+            }
+        }
+        self.vaults = vaults;
+    }
+
+    /// VANILLA: VaultBlockEntity.Client#randomPosInsideCage.
+    fn vault_inside_cage(&mut self, p: [i32; 3]) -> [f64; 3] {
+        [
+            f64::from(p[0]) + 0.1 + self.rng.next_double() * 0.8,
+            f64::from(p[1]) + 0.25 + self.rng.next_double() * 0.5,
+            f64::from(p[2]) + 0.1 + self.rng.next_double() * 0.8,
+        ]
+    }
+
+    /// VANILLA: VaultBlockEntity.Client#emitConnectionParticlesForNearbyPlayers.
+    fn vault_connection(&mut self, v: &VaultInfo) {
+        if v.connected.is_empty() {
+            return;
+        }
+        // keyholePos: atBottomCenterOf(pos) + (stepX*0.5, 1.75, stepZ*0.5).
+        let key = [
+            f64::from(v.pos[0]) + 0.5 + f64::from(v.facing[0]) * 0.5,
+            f64::from(v.pos[1]) + 1.75,
+            f64::from(v.pos[2]) + 0.5 + f64::from(v.facing[1]) * 0.5,
+        ];
+        let players = std::mem::take(&mut self.players);
+        for uuid in &v.connected {
+            let Some((_, pp, h)) = players.iter().find(|p| p.0 == *uuid) else {
+                continue;
+            };
+            // isWithinConnectionRange: blockPosition().distSqr(vaultPos) <= range².
+            let d = |i: usize| f64::from(pp[i].floor() as i32 - v.pos[i]);
+            if d(0) * d(0) + d(1) * d(1) + d(2) * d(2) > v.range * v.range {
+                continue;
+            }
+            // emitConnectionParticlesForPlayer
+            let dir = [pp[0] - key[0], pp[1] + h / 2.0 - key[1], pp[2] - key[2]];
+            let n = 2 + self.rng.next_int_bound(4);
+            for _ in 0..n {
+                let mut r = [0.0; 3];
+                for (k, rk) in r.iter_mut().enumerate() {
+                    *rk = dir[k] + f64::from(self.rng.next_float() - 0.5);
+                }
+                self.add_vault_connection(key, r);
+            }
+        }
+        self.players = players;
+    }
+
+    /// VANILLA: FlyTowardsPositionParticle.VaultConnectionProvider.
+    fn add_vault_connection(&mut self, at: [f64; 3], d: [f64; 3]) {
+        if !self.allow() {
+            return;
+        }
+        let Some(set) = self.sets.get("vault_connection").cloned() else {
+            return;
+        };
+        let seed = self.seed();
+        let mut p = Particle::base(Kind::VaultConnection, at[0], at[1], at[2], seed);
+        p.sprite = set[p.rng.next_int_bound(set.len() as i32) as usize];
+        p.xd = d[0];
+        p.yd = d[1];
+        p.zd = d[2];
+        // xo = x + xd; x = xo (стартовая точка у игрока, частица летит к замочной скважине).
+        p.xo = at[0] + d[0];
+        p.yo = at[1] + d[1];
+        p.zo = at[2] + d[2];
+        p.x = p.xo;
+        p.y = p.yo;
+        p.z = p.zo;
+        p.has_physics = false;
+        p.quad_size = 0.1 * (p.rng.next_float() * 0.5 + 0.2) * 1.5;
+        let br = p.rng.next_float() * 0.6 + 0.4;
+        p.rgb = [0.9 * br, 0.9 * br, br];
+        p.lifetime = (p.rng.next_float() * 10.0) as i32 + 30;
+        self.add(p);
     }
 
     /// VANILLA: LevelRenderer#addParticle + calculateParticleLevel (MINIMAL — частицы не создаются;
@@ -979,6 +1183,19 @@ impl ParticleEngine {
 
     pub fn count(&self) -> usize {
         self.list.len()
+    }
+
+    /// Живые частицы связи хранилища (MCP state).
+    pub fn vault_connection_count(&self) -> usize {
+        self.list
+            .iter()
+            .filter(|p| p.kind == Kind::VaultConnection)
+            .count()
+    }
+
+    /// Хранилища в кеше клиентского тика (MCP state).
+    pub fn vault_count(&self) -> usize {
+        self.vaults.len()
     }
 
     #[allow(dead_code)] // сброс при смене мира (TODO-155)
@@ -3301,7 +3518,10 @@ impl ParticleEngine {
             }
             3014 | 3017 => self.trial_eject(pos),
             3015 => {
-                // VANILLA: VaultBlockEntity.Client#emitActivationParticles (без connection-частиц).
+                // VANILLA: VaultBlockEntity.Client#emitActivationParticles.
+                if let Some(v) = self.vaults.iter().find(|v| v.pos == pos).cloned() {
+                    self.vault_connection(&v);
+                }
                 let flame = if data == 0 {
                     "small_flame"
                 } else {
@@ -3597,10 +3817,14 @@ impl ParticleEngine {
                 continue;
             }
             // VANILLA: OverlayParticle#extract — setAlpha(0.6 - (age + a - 1) * 0.25 * 0.5).
-            let alpha = if p.kind == Kind::Flash {
-                0.6 - (p.age as f32 + partial - 1.0) * 0.25 * 0.5
-            } else {
-                p.alpha
+            let alpha = match p.kind {
+                Kind::Flash => 0.6 - (p.age as f32 + partial - 1.0) * 0.25 * 0.5,
+                // VANILLA: Particle.LifetimeAlpha(0, 0.6, 0.25, 1)#currentAlphaForAge.
+                Kind::VaultConnection => {
+                    let t = ((p.age as f32 + partial) / p.lifetime as f32 - 0.25) / 0.75;
+                    t.clamp(0.0, 1.0) * 0.6
+                }
+                _ => p.alpha,
             };
             out.push(ParticleQuad {
                 atlas: p.atlas,
@@ -4066,6 +4290,7 @@ mod tests {
         s.insert("smoke", vec![uv; 8]);
         s.insert("firework", vec![uv; 8]);
         s.insert("flash", vec![uv; 1]);
+        s.insert("vault_connection", vec![uv; 1]);
         s
     }
 
@@ -4090,6 +4315,42 @@ mod tests {
             }]
         );
         assert!(parse_fireworks(&b[..5]).is_empty());
+    }
+
+    #[test]
+    fn vault_connection_flies_to_keyhole() {
+        let uuid: u128 = 0x0000_0001_0000_0002_0000_0003_0000_0004;
+        let tag = Tag::Compound(vec![(
+            "shared_data".into(),
+            Tag::Compound(vec![(
+                "connected_players".into(),
+                Tag::List(vec![Tag::IntArray(vec![1, 2, 3, 4])]),
+            )]),
+        )]);
+        let v = VaultInfo::from_block([0, 64, 0], "south", false, Some(&tag));
+        assert_eq!(v.connected, [uuid]);
+        assert_eq!(v.range, 4.5);
+        assert!(!v.has_display_item);
+        let mut e = ParticleEngine::new(sets());
+        // Игрок далеко (blockPosition distSqr > 4.5²) — частиц связи нет.
+        e.set_vaults(vec![v.clone()], vec![(uuid, [10.5, 64.0, 0.5], 1.8)]);
+        e.vault_connection(&v);
+        assert_eq!(e.count(), 0);
+        e.set_vaults(vec![v.clone()], vec![(uuid, [2.5, 64.0, 3.5], 1.8)]);
+        e.vault_connection(&v);
+        let n = e.count();
+        assert!((2..=5).contains(&n), "{n}");
+        // Скважина south: (0.5, 65.75, 1.0); стартовая точка у игрока, последняя — у скважины.
+        let level = empty_level();
+        let p = e.list.front().unwrap();
+        assert_eq!(p.start, [0.5, 65.75, 1.0]);
+        assert!((p.x - 2.5).abs() <= 0.5 && (p.z - 3.5).abs() <= 0.5);
+        for _ in 0..29 {
+            e.tick(&level, [0.0; 3]);
+        }
+        let p = e.list.front().unwrap();
+        let pos = 1.0 - p.age as f64 / p.lifetime as f64;
+        assert!((p.x - (0.5 + p.xd * pos)).abs() < 1e-9);
     }
 
     #[test]

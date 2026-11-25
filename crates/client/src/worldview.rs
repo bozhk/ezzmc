@@ -155,6 +155,8 @@ pub struct WorldView {
     end_portal_draw: ezzmc_render::endportaldraw::EndPortalDraw,
     beacon_draw: ezzmc_render::beacondraw::BeaconDraw,
     beacons: crate::beacon::Beacons,
+    /// Хранилища (vault) рядом: клиентский тик блок-сущности.
+    vault_scan: crate::berscan::Scanner,
     beacon_batches: ezzmc_render::beacondraw::BeamBatches,
     end_portals: crate::endportal::EndPortals,
     end_portal_verts: Vec<ezzmc_render::endportaldraw::PortalVertex>,
@@ -863,6 +865,7 @@ impl WorldView {
                 "small_flame",
                 "sculk_charge_pop",
                 "trial_spawner_detection",
+                "vault_connection",
                 "shriek",
                 "sculk_charge",
                 "dust",
@@ -1199,6 +1202,7 @@ impl WorldView {
             end_portal_draw,
             beacon_draw,
             beacons: crate::beacon::Beacons::default(),
+            vault_scan: crate::berscan::Scanner::default(),
             beacon_batches: Default::default(),
             end_portals: crate::endportal::EndPortals::default(),
             end_portal_verts: Vec::new(),
@@ -2199,8 +2203,13 @@ impl WorldView {
     }
 
     /// Для MCP: (живые частицы, активные FireworkParticles.Starter).
-    pub fn particle_stats(&self) -> (usize, usize) {
-        (self.particles.count(), self.particles.starter_count())
+    pub fn particle_stats(&self) -> (usize, usize, usize, usize) {
+        (
+            self.particles.count(),
+            self.particles.starter_count(),
+            self.particles.vault_connection_count(),
+            self.particles.vault_count(),
+        )
     }
 
     /// Время мира для шейдеров (GameTime): `(game_time, partial_tick)`.
@@ -2335,6 +2344,47 @@ impl WorldView {
             Some(prev) => (now - prev).clamp(0, 10),
             None => 0,
         };
+        if n > 0 {
+            self.vault_scan.update(
+                level,
+                self.cam,
+                (self.queue.version, self.queue.block_version),
+                is_vault,
+            );
+            let vaults = self
+                .vault_scan
+                .list
+                .iter()
+                .map(|&(p, st)| {
+                    crate::particles::VaultInfo::from_block(
+                        p,
+                        st.property("facing").unwrap_or("north"),
+                        st.property("ominous") == Some("true"),
+                        crate::berscan::block_entity_tag(level, p),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let players = if vaults.iter().any(|v| !v.connected.is_empty()) {
+                // Level#getPlayerByUUID: свой игрок + чужие игроки из сущностей.
+                let a = self.player.aabb_pub();
+                let mut ps = vec![(level.own_uuid, self.player.pos, a[4] - a[1])];
+                let pt = ezzmc_world::entities::player_type();
+                ps.extend(
+                    level
+                        .entities
+                        .iter()
+                        .filter(|e| Some(e.ty) == pt)
+                        .filter_map(|e| {
+                            let (lo, hi) = e.hitbox()?;
+                            Some((e.uuid, e.pos, hi[1] - lo[1]))
+                        }),
+                );
+                ps
+            } else {
+                Vec::new()
+            };
+            self.particles.set_vaults(vaults, players);
+        }
         for _ in 0..n {
             // VANILLA: Minecraft#tick → level.animateTick(camera block) каждый клиентский тик.
             self.particles.animate_tick(
@@ -2344,6 +2394,8 @@ impl WorldView {
                 self.cam[2].floor() as i32,
             );
             self.particles.tick(level, self.cam);
+            // VANILLA: VaultBlockEntity.Client#tick — для каждого хранилища рядом.
+            self.particles.vault_tick(level.game_time);
             // VANILLA: FireworkRocketEntity#tick (клиент) — искра FIREWORK каждый тик
             // (life % 2 < 2 всегда истинно).
             for e in level.entities.iter().filter(|e| {
@@ -8145,4 +8197,8 @@ impl Drop for ProfDrop {
         crate::mobs::prof_phase(18, "дропы: запекание мешей", self.0.elapsed());
         crate::mobs::prof_phase(19, &format!("дропов {}", self.1), std::time::Duration::ZERO);
     }
+}
+
+fn is_vault(id: u32) -> bool {
+    ezzmc_world::block::BlockState::from_id(id).is_some_and(|s| s.name() == "vault")
 }

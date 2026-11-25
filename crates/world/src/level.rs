@@ -190,6 +190,8 @@ pub struct Level {
     pub riders: crate::riding::Riders,
     /// id сущности локального игрока (выставляет сетевой поток).
     pub own_id: i32,
+    /// UUID профиля локального игрока (login_finished; 0 — неизвестен).
+    pub own_uuid: u128,
     /// Флаги (#0 shared flags) локального игрока: бит 0 — горит (Entity#isOnFire).
     pub own_flags: u8,
     /// Entity#DATA_POSE локального игрока (ordinal Pose; 0 = STANDING).
@@ -266,6 +268,7 @@ impl Level {
             pickups: Vec::new(),
             riders: Default::default(),
             own_id: -1,
+            own_uuid: 0,
             own_flags: 0,
             own_pose: 0,
             own_sleep_pos: None,

@@ -275,8 +275,13 @@ impl App {
             "pitch": self.pitch,
         });
         if let Some(v) = &self.view {
-            let (count, starters) = v.particle_stats();
-            s["particles"] = json!({ "count": count, "firework_starters": starters });
+            let (count, starters, vault_conn, vaults) = v.particle_stats();
+            s["particles"] = json!({
+                "count": count,
+                "firework_starters": starters,
+                "vault_connection": vault_conn,
+                "vaults": vaults,
+            });
             s["joined"] = json!(v.joined && v.have_pos);
             s["pos"] = json!(v.player.pos);
             s["vel"] = json!(v.player.vel);

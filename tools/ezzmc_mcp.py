@@ -177,7 +177,7 @@ TOOLS = {
     "game_launch": ("Start ezzmc with a control socket (or attach to a running one). addr joins a server right away, e.g. 127.0.0.1:25611; name is the offline nickname. online=true logs in with the licensed account selected in the launcher (needed for online-mode servers like eu.loyisa.cn); default is offline.", S(addr=STR, name=STR, online={"type": "boolean"}, env={"type": "object"}), launch),
     "game_observe": ("BEST FIRST CALL: state + crosshair target + nearby entities + ASCII slice (floor/feet/head layers) in one answer. radius (default 6), entity_dist (20).", S(radius=INT, entity_dist=N), observe),
     "game_stop": ("Quit the game.", S(), stop),
-    "game_state": ("Screen (menu/play/inventory/chat/pause/dialog), joined, pos/block_pos, facing, yaw/pitch, health/food/xp, held/offhand/armor, in_water, world (dimension, day_time, weather, loaded chunks), target (crosshair), running task, chat lines, effects, fps, particles (count, firework_starters).", S(), "state"),
+    "game_state": ("Screen (menu/play/inventory/chat/pause/dialog), joined, pos/block_pos, facing, yaw/pitch, health/food/xp, held/offhand/armor, in_water, world (dimension, day_time, weather, loaded chunks), target (crosshair), running task, chat lines, effects, fps, particles (count, firework_starters, vault_connection, vaults).", S(), "state"),
     "game_join_server": ("Join a server, e.g. 127.0.0.1:25611, then call game_wait_joined.", S(addr=STR), "join_server"),
     "game_wait_joined": ("Wait until the world is joined and the position is known.", S(timeout_ms=INT), "wait_joined"),
     "game_dialog_button": ("Press a server dialog button by index (state.dialog.buttons; grid first, then footer).", S(index={"type": "integer"}), "dialog_button"),
