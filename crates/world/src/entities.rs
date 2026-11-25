@@ -60,6 +60,12 @@ pub struct Entity {
     pub beam_target: Option<[i32; 3]>,
     /// EndCrystal#DATA_SHOW_BOTTOM (#9, BOOLEAN; по умолчанию true).
     pub show_bottom: bool,
+    /// VANILLA: AreaEffectCloud#DATA_RADIUS (#8, по умолчанию 3.0).
+    pub cloud_radius: f32,
+    /// VANILLA: AreaEffectCloud#DATA_WAITING (#9).
+    pub cloud_waiting: bool,
+    /// VANILLA: AreaEffectCloud#DATA_PARTICLE (#10): имя типа частицы (`None` — не пришло/не разобрано).
+    pub cloud_particle: Option<&'static str>,
     /// Метаданные #16 типа BYTE (Bat#DATA_ID_FLAGS: бит 1 = висит).
     pub byte16: u8,
     /// Стак предмета (метаданные #8 у `item`).
@@ -169,6 +175,9 @@ impl Entity {
             sleep_pos: None,
             beam_target: None,
             show_bottom: true,
+            cloud_radius: 3.0,
+            cloud_waiting: false,
+            cloud_particle: None,
             byte16: 0,
             byte17: 0,
             byte18_set: false,
@@ -235,6 +244,20 @@ impl Entity {
         if self.proj == 3 {
             for (p, v) in self.pos.iter_mut().zip(self.vel) {
                 *p += v;
+            }
+            return;
+        }
+        // VANILLA: AbstractHurtingProjectile#tick (клиент) — applyInertia:
+        // Δ = (Δ + normalize(Δ)·accelerationPower)·0.95, затем setPos(pos + Δ). accelerationPower
+        // клиенту не передаётся (по умолчанию 0.1). Попадание обрабатывает сервер (discard).
+        // VANILLA-UNSURE: инерция в воде (0.8) и клиентский hit-test не учитываются.
+        if self.proj == 4 {
+            let v = self.vel;
+            let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            let k = if len < 1.0e-5 { 0.0 } else { 0.1 / len };
+            for i in 0..3 {
+                self.vel[i] = (v[i] + v[i] * k) * f64::from(0.95_f32);
+                self.pos[i] += self.vel[i];
             }
             return;
         }
@@ -484,6 +507,7 @@ fn projectile_kind(ty: usize) -> (u8, f64) {
         Some("splash_potion" | "lingering_potion") => (2, 0.05),
         Some("experience_bottle") => (2, 0.07),
         Some("eye_of_ender") => (3, 0.0),
+        Some("dragon_fireball") => (4, 0.0),
         _ => (0, 0.0),
     }
 }

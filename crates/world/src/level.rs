@@ -91,6 +91,50 @@ pub struct ClientClock {
 use crate::entities::{unpack_degrees, Entity};
 
 /// VANILLA: LpVec3#read.
+/// VANILLA: ParticleTypes.STREAM_CODEC — id типа (VarInt) + опции (ParticleTypes#register streamCodec).
+/// Возвращает имя и состояние блока для block-подобных частиц; `None` — неизвестный id или
+/// неподдерживаемые опции (item/vibration), после чего поток дальше не разобрать.
+fn read_particle(r: &mut Reader) -> ProtocolResult<Option<(&'static str, Option<u32>)>> {
+    let id = usize::try_from(r.var_int()?).unwrap_or(usize::MAX);
+    let Some(&name) = ezzmc_protocol::generated::r26_3::PARTICLE_TYPE.get(id) else {
+        return Ok(None);
+    };
+    let mut block = None;
+    match name {
+        "block" | "block_marker" | "falling_dust" | "dust_pillar" | "block_crumble" => {
+            block = u32::try_from(r.var_int()?).ok();
+        }
+        "dust" | "effect" | "instant_effect" | "geyser_base" | "geyser_poof" => {
+            r.i32()?;
+            r.f32()?;
+        }
+        "dust_color_transition" => {
+            r.i32()?;
+            r.i32()?;
+            r.f32()?;
+        }
+        "entity_effect" | "tinted_leaves" | "flash" | "geyser" | "geyser_plume" => {
+            r.i32()?;
+        }
+        "dragon_breath" | "sculk_charge" => {
+            r.f32()?;
+        }
+        "shriek" => {
+            r.var_int()?;
+        }
+        "trail" => {
+            r.f64()?;
+            r.f64()?;
+            r.f64()?;
+            r.i32()?;
+            r.var_int()?;
+        }
+        "item" | "vibration" => return Ok(None),
+        _ => {}
+    }
+    Ok(Some((name, block)))
+}
+
 fn read_lp_vec3(r: &mut Reader) -> ProtocolResult<[f64; 3]> {
     let lowest = r.u8()?;
     if lowest == 0 {
@@ -126,6 +170,14 @@ static TNT_TYPE: std::sync::LazyLock<Option<usize>> = std::sync::LazyLock::new(|
         .iter()
         .position(|n| *n == "tnt")
 });
+
+/// Id `area_effect_cloud` в реестре `entity_type` (26.3).
+static AREA_EFFECT_CLOUD_TYPE: std::sync::LazyLock<Option<usize>> =
+    std::sync::LazyLock::new(|| {
+        ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+            .iter()
+            .position(|n| *n == "area_effect_cloud")
+    });
 
 /// Id `item` в реестре `entity_type` (26.3).
 static ITEM_TYPE: std::sync::LazyLock<Option<usize>> = std::sync::LazyLock::new(|| {
@@ -513,44 +565,8 @@ impl Level {
             "level_particles" => {
                 // VANILLA: ClientboundLevelParticlesPacket (26.x): particle (id+options), overrideLimiter,
                 // alwaysShow, x,y,z (double), dist xyz, maxSpeed xyz (float), count (VarInt), randomizationType (VarInt).
-                let id = usize::try_from(r.var_int()?).unwrap_or(usize::MAX);
-                match ezzmc_protocol::generated::r26_3::PARTICLE_TYPE.get(id) {
-                    Some(&name) => {
-                        let mut block = None;
-                        // Опции частицы (ParticleTypes#register streamCodec); item/vibration — сложные, пропускаем пакет.
-                        match name {
-                            "block" | "block_marker" | "falling_dust" | "dust_pillar"
-                            | "block_crumble" => block = u32::try_from(r.var_int()?).ok(),
-                            "dust" | "effect" | "instant_effect" | "geyser_base"
-                            | "geyser_poof" => {
-                                r.i32()?;
-                                r.f32()?;
-                            }
-                            "dust_color_transition" => {
-                                r.i32()?;
-                                r.i32()?;
-                                r.f32()?;
-                            }
-                            "entity_effect" | "tinted_leaves" | "flash" | "geyser"
-                            | "geyser_plume" => {
-                                r.i32()?;
-                            }
-                            "dragon_breath" | "sculk_charge" => {
-                                r.f32()?;
-                            }
-                            "shriek" => {
-                                r.var_int()?;
-                            }
-                            "trail" => {
-                                r.f64()?;
-                                r.f64()?;
-                                r.f64()?;
-                                r.i32()?;
-                                r.var_int()?;
-                            }
-                            "item" | "vibration" => return Ok(LevelEvent::None),
-                            _ => {}
-                        }
+                match read_particle(&mut r)? {
+                    Some((name, block)) => {
                         let _override_limiter = r.bool()?;
                         let _always_show = r.bool()?;
                         let pos = [r.f64()?, r.f64()?, r.f64()?];
@@ -919,6 +935,17 @@ impl Level {
                             if idx == 17 {
                                 self.float15.insert(id, v);
                             }
+                            // VANILLA: AreaEffectCloud#DATA_RADIUS = #8.
+                            if idx == 8 {
+                                if let Some(e) = self
+                                    .entities
+                                    .map
+                                    .get_mut(&id)
+                                    .filter(|e| Some(e.ty) == *AREA_EFFECT_CLOUD_TYPE)
+                                {
+                                    e.cloud_radius = v;
+                                }
+                            }
                             // VANILLA: LivingEntity#DATA_HEALTH_ID = #9.
                             if idx == 9 {
                                 if let Some(e) = self.entities.map.get_mut(&id) {
@@ -971,6 +998,17 @@ impl Level {
                             let (t, p, l) = (r.var_int()?, r.var_int()?, r.var_int()?);
                             self.set_int_meta(id, idx, (t & 0xFF) | ((p & 0xFF) << 8) | (l << 16));
                         }
+                        // PARTICLE (AreaEffectCloud#DATA_PARTICLE #10).
+                        16 => {
+                            let Some((pname, _)) = read_particle(&mut r)? else {
+                                break;
+                            };
+                            if idx == 10 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    e.cloud_particle = Some(pname);
+                                }
+                            }
+                        }
                         // DIRECTION (Shulker#DATA_ATTACH_FACE_ID #16).
                         12 => {
                             let v = r.var_int()?;
@@ -1007,10 +1045,15 @@ impl Level {
                                     e.no_gravity = v != 0;
                                 }
                             }
-                            // VANILLA: EndCrystal#DATA_SHOW_BOTTOM (#9; у LivingEntity #9 — FLOAT, сюда не попадает).
+                            // VANILLA: EndCrystal#DATA_SHOW_BOTTOM / AreaEffectCloud#DATA_WAITING (#9;
+                            // у LivingEntity #9 — FLOAT, сюда не попадает).
                             if idx == 9 {
                                 if let Some(e) = self.entities.map.get_mut(&id) {
-                                    e.show_bottom = v != 0;
+                                    if Some(e.ty) == *AREA_EFFECT_CLOUD_TYPE {
+                                        e.cloud_waiting = v != 0;
+                                    } else {
+                                        e.show_bottom = v != 0;
+                                    }
                                 }
                             }
                             // VANILLA: AbstractBoat#DATA_ID_PADDLE_LEFT/RIGHT (Entity 0-7, VehicleEntity 8-10).

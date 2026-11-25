@@ -3278,6 +3278,8 @@ impl Mobs {
 }
 
 /// Текстура луча эндер-кристалла (рисуется `ParticleDraw::new_repeat`: V прокручивается).
+/// VANILLA: DragonFireballRenderer#TEXTURE_LOCATION.
+pub const DRAGON_FIREBALL_TEX: &str = "enderdragon/dragon_fireball";
 pub const BEAM_TEX: &str = "end_crystal/end_crystal_beam";
 
 /// VANILLA: EndCrystal#time — random.nextInt(100000) при создании + тики. Случайное смещение

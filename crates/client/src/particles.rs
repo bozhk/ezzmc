@@ -2858,6 +2858,11 @@ impl ParticleEngine {
         self.rng.next_gaussian()
     }
 
+    /// random.nextFloat() из генератора движка (клиентский тик сущностей).
+    pub fn rand_f32(&mut self) -> f32 {
+        self.rng.next_float()
+    }
+
     pub fn rand3(&mut self) -> (f64, f64, f64) {
         (
             self.rng.next_double(),

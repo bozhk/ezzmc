@@ -2421,6 +2421,46 @@ impl WorldView {
                 self.particles
                     .add_firework(e.pos[0], e.pos[1], e.pos[2], xa, -e.vel[1] * 0.5, za);
             }
+            // VANILLA: AbstractHurtingProjectile#createParticleTrail — DragonFireball#getTrailParticle
+            // = DRAGON_BREATH(power 1) в (x, y + 0.5, z) с нулевой скоростью, после шага.
+            for e in level.entities.iter().filter(|e| e.proj == 4) {
+                self.particles
+                    .add_dragon_breath(e.pos[0], e.pos[1] + 0.5, e.pos[2], 0.0, 0.0, 0.0);
+            }
+            // VANILLA: AreaEffectCloud#clientTick — частицы по кругу радиуса (waiting: 2 шт. в 0.2,
+            // через раз); у не-waiting скорость ((0.5 − r)·0.15, 0.01, (0.5 − r)·0.15).
+            // VANILLA-UNSURE: поддержан только DRAGON_BREATH; ENTITY_EFFECT (зелья) ещё не портирован.
+            for e in level
+                .entities
+                .iter()
+                .filter(|e| e.cloud_particle == Some("dragon_breath"))
+            {
+                let (waiting, radius) = (e.cloud_waiting, e.cloud_radius);
+                if waiting && self.particles.rand_f32() < 0.5 {
+                    continue;
+                }
+                let (count, pr) = if waiting {
+                    (2, 0.2_f32)
+                } else {
+                    (
+                        (std::f32::consts::PI * radius * radius).ceil() as i32,
+                        radius,
+                    )
+                };
+                for _ in 0..count {
+                    let angle = self.particles.rand_f32() * std::f32::consts::TAU;
+                    let dist = self.particles.rand_f32().sqrt() * pr;
+                    let x = e.pos[0] + f64::from(angle.cos() * dist);
+                    let z = e.pos[2] + f64::from(angle.sin() * dist);
+                    let (xa, ya, za) = if waiting {
+                        (0.0, 0.0, 0.0)
+                    } else {
+                        let (a, _, b) = self.particles.rand3();
+                        ((0.5 - a) * 0.15, f64::from(0.01_f32), (0.5 - b) * 0.15)
+                    };
+                    self.particles.add_dragon_breath(x, e.pos[1], z, xa, ya, za);
+                }
+            }
             // VANILLA: AbstractArrow#tick — 4 частицы CRIT вдоль хода крит-стрелы.
             for e in level.entities.iter().filter(|e| e.crit_arrow()) {
                 let m = [
@@ -3847,6 +3887,7 @@ impl WorldView {
             );
             self.entity_item_visible = true;
         }
+        self.bake_dragon_fireballs();
         for (name, root, light) in std::mem::take(&mut self.head_skulls) {
             if let Some((m, tex)) = crate::skull::item_model(name) {
                 m.bake(root, [255; 4], light, self.mobs.out(tex));
@@ -4932,6 +4973,67 @@ impl WorldView {
                 &mut item_data.1,
             );
             self.entity_item_visible = true;
+        }
+    }
+
+    /// VANILLA: DragonFireballRenderer#submit (26.3): scale(2), rotate(camera.orientation), квад
+    /// (x − 0.5, y − 0.25, 0) с UV (0,1)(1,1)(1,0)(0,0), entityCutout, блок-свет 15, нормаль (0,1,0).
+    fn bake_dragon_fireballs(&mut self) {
+        let mut list = Vec::new();
+        {
+            let Ok(guard) = self.net.level.lock() else {
+                return;
+            };
+            let Some(level) = guard.as_ref() else {
+                return;
+            };
+            let pt = f64::from(level.partial_tick());
+            for e in level.entities.iter().filter(|e| {
+                ezzmc_protocol::generated::r26_3::ENTITY_TYPE.get(e.ty) == Some(&"dragon_fireball")
+            }) {
+                let pos: [f64; 3] =
+                    std::array::from_fn(|i| e.prev_pos[i] + (e.pos[i] - e.prev_pos[i]) * pt);
+                let mut light = crate::particles::light_at(level, pos[0], pos[1], pos[2]);
+                light.0 = 15;
+                list.push((pos, light));
+            }
+        }
+        if list.is_empty() {
+            return;
+        }
+        // VANILLA: camera.orientation = rotationYXZ(π − yRot, −xRot, 0).
+        let orient = Mat4::from_euler(
+            glam::EulerRot::YXZ,
+            std::f32::consts::PI - self.yaw.to_radians(),
+            -self.pitch.to_radians(),
+            0.0,
+        );
+        let shade =
+            ezzmc_render::entitymodel::mix_light(orient.transform_vector3(Vec3::Y).normalize());
+        let c = (255.0 * shade).round() as u8;
+        let out = self.mobs.out(crate::mobs::DRAGON_FIREBALL_TEX);
+        for (pos, light) in list {
+            let rel = Vec3::new(
+                (pos[0] - self.cam[0]) as f32,
+                (pos[1] - self.cam[1]) as f32,
+                (pos[2] - self.cam[2]) as f32,
+            );
+            let m = Mat4::from_translation(rel) * Mat4::from_scale(Vec3::splat(2.0)) * orient;
+            for (x, y, u, v) in [
+                (0.0, 0.0, 0.0, 1.0),
+                (1.0, 0.0, 1.0, 1.0),
+                (1.0, 1.0, 1.0, 0.0),
+                (0.0, 1.0, 0.0, 0.0),
+            ] {
+                let p = m.transform_point3(Vec3::new(x - 0.5, y - 0.25, 0.0));
+                ezzmc_render::particledraw::push_vertex(
+                    out,
+                    p.to_array(),
+                    [u, v],
+                    [c, c, c, 255],
+                    light,
+                );
+            }
         }
     }
 
