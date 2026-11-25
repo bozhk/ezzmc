@@ -1,4 +1,4 @@
-//! Фон экрана титров/поэмы Энда.
+//! Фон экрана титров/поэмы Энда и экрана загрузки уровня через портал Энда.
 //! VANILLA: WinScreen#extractBackground (poem) — `fill(RenderPipelines.END_PORTAL, end_sky + end_portal,
 //! 0, 0, width, height)`, затем WinScreen#extractVignette — `blit(VIGNETTE, credits_vignette.png)`
 //! на весь экран, цвет -1 (белый). Отдельный проход без глубины, очистка чёрным.
@@ -59,8 +59,9 @@ impl CreditsBackground {
         }
     }
 
-    /// Очищает `target` и рисует портал + виньетку. `game_time`/`partial` — время мира
-    /// (VANILLA: GlobalSettingsUniform GameTime, как у портала в мире).
+    /// Очищает `target` и рисует портал + виньетку (`vignette = false` — только портал,
+    /// VANILLA: LevelLoadingScreen#extractBackground END_PORTAL). `game_time`/`partial` — время
+    /// мира (VANILLA: GlobalSettingsUniform GameTime, как у портала в мире).
     pub fn draw(
         &mut self,
         device: &wgpu::Device,
@@ -68,6 +69,7 @@ impl CreditsBackground {
         target: &wgpu::TextureView,
         game_time: i64,
         partial: f32,
+        vignette: bool,
     ) {
         let verts: [PortalVertex; 4] = [
             [-1.0, -1.0, 0.0, LAYERS],
@@ -95,7 +97,9 @@ impl CreditsBackground {
                 ..Default::default()
             });
             self.portal.draw(&mut pass);
-            self.vignette.draw(&mut pass);
+            if vignette {
+                self.vignette.draw(&mut pass);
+            }
         }
         queue.submit([enc.finish()]);
     }

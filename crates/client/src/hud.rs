@@ -423,6 +423,39 @@ pub fn draw_portal_overlay(
     p.blit(KEY, 0.0, 0.0, gw, gh, [0.0, v0, 1.0, v1], argb);
 }
 
+/// VANILLA: LevelLoadingScreen#extractBackground (NETHER_PORTAL) — `blitSprite(GUI_OPAQUE_TEXTURED_BACKGROUND,
+/// nether_portal)` на весь экран. Конвейер без блендинга: альфа текстуры (155..232) не учитывается,
+/// поэтому грузится копия с альфой 255. `frame` — кадр анимации (клиентский тик).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_portal_loading_bg(
+    p: &mut GuiPainter,
+    dev: &wgpu::Device,
+    q: &wgpu::Queue,
+    rm: &ResourceManager,
+    gw: f32,
+    gh: f32,
+    frame: u32,
+) {
+    const KEY: &str = "nether_portal_opaque";
+    if !p.has(KEY) {
+        let Some(img) = rm
+            .read("assets/minecraft/textures/block/nether_portal.png")
+            .and_then(|d| ezzmc_assets::texture::Image::decode_png(&d).ok())
+        else {
+            return;
+        };
+        let mut px = img.to_rgba8();
+        for a in px.iter_mut().skip(3).step_by(4) {
+            *a = 255;
+        }
+        p.add_texture(dev, q, KEY, &px, img.width, img.height, false);
+    }
+    let n = 32u32;
+    let f = frame % n;
+    let (v0, v1) = (f as f32 / n as f32, (f + 1) as f32 / n as f32);
+    p.blit(KEY, 0.0, 0.0, gw, gh, [0.0, v0, 1.0, v1], 0xFFFF_FFFF);
+}
+
 /// VANILLA: ScreenEffectRenderer#submitWater — underwater.png, UV ×4 со сдвигом по взгляду, альфа 0.1·яркость.
 /// Квад на весь экран с UV 4 развёрнут тайлами (GUI-сэмплер не повторяет текстуру).
 #[allow(clippy::too_many_arguments)]

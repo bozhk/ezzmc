@@ -120,37 +120,7 @@ impl WinScreen {
         if !self.poem {
             return;
         }
-        let img = |p: &str| {
-            let i = rm
-                .read(p)
-                .and_then(|d| ezzmc_assets::texture::Image::decode_png(&d).ok());
-            if i.is_none() {
-                tracing::error!("WinScreen: нет текстуры {p}");
-            }
-            i.map(|i| (i.to_rgba8(), i.width, i.height))
-        };
-        let (Some(sky), Some(portal), Some(vig)) = (
-            img("assets/minecraft/textures/environment/end_sky.png"),
-            img("assets/minecraft/textures/entity/end_portal/end_portal.png"),
-            img("assets/minecraft/textures/misc/credits_vignette.png"),
-        ) else {
-            return;
-        };
-        fn rgba((d, w, h): &(Vec<u8>, u32, u32)) -> Rgba<'_> {
-            Rgba {
-                data: d.as_slice(),
-                width: *w,
-                height: *h,
-            }
-        }
-        self.bg = Some(CreditsBackground::new(
-            device,
-            queue,
-            format,
-            &rgba(&sky),
-            &rgba(&portal),
-            &rgba(&vig),
-        ));
+        self.bg = end_background(rm, device, queue, format);
     }
 
     /// VANILLA: WinScreen#calculateScrollSpeed — 5 + 15 за каждый зажатый Ctrl.
@@ -198,7 +168,7 @@ impl WinScreen {
         t.begin(w, h);
         // VANILLA: extractBackground (END_PORTAL на весь экран) + extractVignette.
         if let Some(bg) = self.bg.as_mut() {
-            bg.draw(dev, q, view, game_time, partial);
+            bg.draw(dev, q, view, game_time, partial, true);
         } else {
             t.fill(0.0, 0.0, gw as f32, gh as f32, 0xFF00_0000);
             t.flush(dev, q, view, w, h);
@@ -381,4 +351,45 @@ fn split_styled(t: &TextRenderer, s: &str, max: f32) -> Vec<String> {
         start = next;
     }
     out
+}
+
+/// GPU-фон END_PORTAL (end_sky + end_portal + credits_vignette): поэма WinScreen и
+/// LevelLoadingScreen с причиной END_PORTAL. Без текстур — `None` (чёрный фон).
+pub fn end_background(
+    rm: &ResourceManager,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    format: wgpu::TextureFormat,
+) -> Option<CreditsBackground> {
+    let img = |p: &str| {
+        let i = rm
+            .read(p)
+            .and_then(|d| ezzmc_assets::texture::Image::decode_png(&d).ok());
+        if i.is_none() {
+            tracing::error!("фон END_PORTAL: нет текстуры {p}");
+        }
+        i.map(|i| (i.to_rgba8(), i.width, i.height))
+    };
+    let (Some(sky), Some(portal), Some(vig)) = (
+        img("assets/minecraft/textures/environment/end_sky.png"),
+        img("assets/minecraft/textures/entity/end_portal/end_portal.png"),
+        img("assets/minecraft/textures/misc/credits_vignette.png"),
+    ) else {
+        return None;
+    };
+    fn rgba((d, w, h): &(Vec<u8>, u32, u32)) -> Rgba<'_> {
+        Rgba {
+            data: d.as_slice(),
+            width: *w,
+            height: *h,
+        }
+    }
+    Some(CreditsBackground::new(
+        device,
+        queue,
+        format,
+        &rgba(&sky),
+        &rgba(&portal),
+        &rgba(&vig),
+    ))
 }

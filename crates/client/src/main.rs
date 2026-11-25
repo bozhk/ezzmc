@@ -188,6 +188,8 @@ struct App {
     dead_screen: bool,
     /// Экран концовки (End Poem + титры, TODO-357/358).
     win_screen: Option<winscreen::WinScreen>,
+    /// Фон LevelLoadingScreen с причиной END_PORTAL (создаётся при первом показе).
+    loading_bg: Option<ezzmc_render::creditsbg::CreditsBackground>,
     /// VANILLA: InBedChatScreen открыт (локальный игрок спит).
     in_bed: bool,
     /// Курсор уже захвачен после входа в мир.
@@ -881,16 +883,17 @@ impl App {
         let ready = joined
             && (self.win_screen.is_some()
                 || v.win_game
-                || v.net.level.lock().ok().is_some_and(|g| {
-                    g.as_ref().is_some_and(|l| {
-                        l.chunks
-                            .get(
-                                (v.cam[0] / 16.0).floor() as i32,
-                                (v.cam[2] / 16.0).floor() as i32,
-                            )
-                            .is_some()
+                || !v.respawn_wait
+                    && v.net.level.lock().ok().is_some_and(|g| {
+                        g.as_ref().is_some_and(|l| {
+                            l.chunks
+                                .get(
+                                    (v.cam[0] / 16.0).floor() as i32,
+                                    (v.cam[2] / 16.0).floor() as i32,
+                                )
+                                .is_some()
+                        })
                     })
-                })
                 || self
                     .loading_since
                     .is_some_and(|t| t.elapsed() >= std::time::Duration::from_secs(30)));
@@ -1014,6 +1017,29 @@ impl App {
             self.menu_active = false;
             if let Some(w) = &self.window {
                 self.mouse.grab(w);
+            }
+        }
+        // VANILLA: handleRespawn → startWaitingForNewLevel: LevelLoadingScreen с причиной
+        // (смерть — OTHER, Нижний мир/Энд — фон портала); закрывается, когда чанк игрока принят.
+        let loading = self.view.as_mut().and_then(|v| v.loading_in.take());
+        if let Some(reason) = loading.filter(|_| self.gui.is_some()) {
+            tracing::info!("LevelLoadingScreen: respawn, причина {reason:?}");
+            if self.inv_open {
+                self.close_inv(true);
+            }
+            if let Some(g) = &mut self.gui {
+                g.open_loading_reason(reason);
+            }
+            if self.connect_phase != 2 {
+                self.loading_since = Some(std::time::Instant::now());
+            }
+            self.connect_phase = 2;
+            self.menu_active = true;
+            self.chat.open = false;
+            self.input.release_all();
+            self.keys.release_all();
+            if let Some(w) = &self.window {
+                self.mouse.release(w);
             }
         }
     }
@@ -4325,6 +4351,21 @@ impl ApplicationHandler for App {
                             if let Some(v) = &self.view {
                                 gui.social_sync(social_players(v), &v.hidden_players);
                             }
+                            // VANILLA: LevelLoadingScreen#extractBackground — фон портала поверх мира.
+                            let portal = gui.loading_portal();
+                            if portal == Some(ui::LoadingReason::EndPortal)
+                                && self.loading_bg.is_none()
+                            {
+                                if let Some(rm) = &self.hud_rm {
+                                    self.loading_bg = winscreen::end_background(
+                                        rm,
+                                        &g.device,
+                                        &g.queue,
+                                        sc.config.format,
+                                    );
+                                }
+                            }
+                            let loading_bg = &mut self.loading_bg;
                             let mut world = self.view.as_mut();
                             let shot = sc.draw_and_present(g, f, cap, |view, w, h| {
                                 if let Some(v) = world.as_mut() {
@@ -4336,6 +4377,34 @@ impl ApplicationHandler for App {
                                         v.draw_map_labels(t, &self.item_lang, w, h);
                                         v.flush_nametags(t, g, view, w, h);
                                     }
+                                }
+                                match portal {
+                                    Some(ui::LoadingReason::EndPortal) => {
+                                        if let Some(bg) = loading_bg.as_mut() {
+                                            let (gt, pt) =
+                                                world.as_ref().map_or((0, 0.0), |v| v.level_time());
+                                            bg.draw(&g.device, &g.queue, view, gt, pt, false);
+                                        }
+                                    }
+                                    // VANILLA: blitSprite(GUI_OPAQUE_TEXTURED_BACKGROUND, nether_portal)
+                                    // на весь экран; кадр анимации — по клиентским тикам (50 мс).
+                                    Some(ui::LoadingReason::NetherPortal) => {
+                                        if let Some(rm) = self.hud_rm.as_ref() {
+                                            let k = t.scale();
+                                            p.begin(k);
+                                            hud::draw_portal_loading_bg(
+                                                p,
+                                                &g.device,
+                                                &g.queue,
+                                                rm,
+                                                w as f32 / k as f32,
+                                                h as f32 / k as f32,
+                                                (now_ms / 50) as u32,
+                                            );
+                                            p.flush(&g.device, &g.queue, view, w, h, None);
+                                        }
+                                    }
+                                    _ => {}
                                 }
                                 act = gui.render(
                                     &g.device, &g.queue, view, w, h, t, p, dt as f32, now_ms,
@@ -4845,6 +4914,7 @@ fn main() {
         inv_creative: false,
         dead_screen: false,
         win_screen: None,
+        loading_bg: None,
         in_bed: false,
         was_joined: false,
         world_job: None,

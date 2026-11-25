@@ -155,6 +155,35 @@ impl Page {
     }
 }
 
+/// VANILLA: LevelLoadingScreen.Reason — фон экрана загрузки уровня.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum LoadingReason {
+    /// Спрайт nether_portal на весь экран.
+    NetherPortal,
+    /// END_PORTAL fill (end_sky + end_portal) на весь экран.
+    EndPortal,
+    /// Панорама + фон меню.
+    #[default]
+    Other,
+}
+
+impl LoadingReason {
+    /// VANILLA: ClientPacketListener#determineLevelLoadingReason.
+    pub fn determine(player_died: bool, dim: &str, old_dim: &str) -> Self {
+        const NETHER: &str = "minecraft:the_nether";
+        const END: &str = "minecraft:the_end";
+        if player_died {
+            Self::Other
+        } else if dim == NETHER || old_dim == NETHER {
+            Self::NetherPortal
+        } else if dim == END || old_dim == END {
+            Self::EndPortal
+        } else {
+            Self::Other
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Screen {
     Title,
@@ -320,6 +349,8 @@ pub struct Gui {
     pending_text: String,
     spin: f32,
     in_game: bool,
+    /// Фон `Screen::Loading` (VANILLA: LevelLoadingScreen#reason).
+    loading_reason: LoadingReason,
     /// Строки экрана привязок клавиш (App обновляет, пока `wants_binds`).
     pub binds: Vec<BindRow>,
     /// Привязка, ожидающая нажатия клавиши/кнопки (её ловит App).
@@ -485,6 +516,7 @@ impl Gui {
             pending_text: String::new(),
             spin: 0.0,
             in_game: false,
+            loading_reason: LoadingReason::Other,
             binds: Vec::new(),
             listening: None,
             reset_keys: false,
@@ -773,10 +805,23 @@ impl Gui {
 
     /// VANILLA: LevelLoadingScreen — «Loading terrain...».
     pub fn open_loading(&mut self) {
+        self.open_loading_reason(LoadingReason::Other);
+    }
+
+    /// VANILLA: ClientPacketListener#startWaitingForNewLevel — открыть LevelLoadingScreen
+    /// (уже открыт — LevelLoadingScreen#update меняет только причину).
+    pub fn open_loading_reason(&mut self, reason: LoadingReason) {
+        self.loading_reason = reason;
         self.st.dlg = None;
         self.st.stack = vec![Screen::Loading];
         self.st.scroll = 0.0;
         self.in_game = false;
+    }
+
+    /// Фон текущего экрана загрузки, если он открыт и рисуется не меню (портал Нижнего мира/Энда).
+    pub fn loading_portal(&self) -> Option<LoadingReason> {
+        (cur(&self.st) == Screen::Loading && self.loading_reason != LoadingReason::Other)
+            .then_some(self.loading_reason)
     }
 
     /// Экран подключения/загрузки уровня сейчас активен.
@@ -1014,8 +1059,11 @@ impl Gui {
             let st = &mut self.st;
             let opts = &mut self.opts;
             let screen = cur(st);
+            // VANILLA: LevelLoadingScreen#extractBackground — у порталов фон рисует App до GUI.
+            let portal_bg =
+                screen == Screen::Loading && self.loading_reason != LoadingReason::Other;
             // Фон: панорама + затемнение (VANILLA: Screen#extractPanorama; размытие не делаем).
-            if !self.in_game {
+            if !self.in_game && !portal_bg {
                 f.p.blit(
                     "overlay",
                     0.0,
@@ -1036,8 +1084,9 @@ impl Gui {
                     | Screen::Structure
                     | Screen::Jigsaw
                     | Screen::TestBlock
-            ) {
-                // фон нарисован до Frame (см. выше)
+            ) || portal_bg
+            {
+                // фон нарисован до Frame (см. выше) / порталом
             } else if screen != Screen::Title {
                 // VANILLA: Screen#extractMenuBackground — тайл 32×32 (menu_background / inworld_).
                 let bg = if self.in_game {
@@ -1225,7 +1274,7 @@ impl Gui {
             }
         }
         // Панорама (куб) + спрайты, затем текст/заливки.
-        let pano = if self.in_game {
+        let pano = if self.in_game || self.loading_portal().is_some() {
             None
         } else {
             Some((10.0, -self.spin))
@@ -3072,3 +3121,42 @@ fn option_row(f: &mut Frame, opts: &mut Options, d: &Def, x: f32, y: f32, w: f32
 
 /// Options#hideSplashTexts (обновляется каждый кадр из options).
 pub static HIDE_SPLASH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+mod loading_reason_tests {
+    use super::LoadingReason;
+
+    #[test]
+    fn determine_matches_vanilla() {
+        let d = LoadingReason::determine;
+        assert_eq!(
+            d(false, "minecraft:the_nether", "minecraft:overworld"),
+            LoadingReason::NetherPortal
+        );
+        assert_eq!(
+            d(false, "minecraft:overworld", "minecraft:the_nether"),
+            LoadingReason::NetherPortal
+        );
+        assert_eq!(
+            d(false, "minecraft:the_end", "minecraft:overworld"),
+            LoadingReason::EndPortal
+        );
+        assert_eq!(
+            d(false, "minecraft:overworld", "minecraft:the_end"),
+            LoadingReason::EndPortal
+        );
+        // Nether проверяется раньше End.
+        assert_eq!(
+            d(false, "minecraft:the_end", "minecraft:the_nether"),
+            LoadingReason::NetherPortal
+        );
+        assert_eq!(
+            d(true, "minecraft:the_nether", "minecraft:the_end"),
+            LoadingReason::Other
+        );
+        assert_eq!(
+            d(false, "minecraft:overworld", "minecraft:overworld"),
+            LoadingReason::Other
+        );
+    }
+}

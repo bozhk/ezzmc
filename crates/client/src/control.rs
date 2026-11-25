@@ -268,6 +268,8 @@ impl App {
                 "music": self.music.track_key(),
             },
             "screen": screen,
+            // VANILLA: LevelLoadingScreen.Reason текущего фона (null — экран загрузки не портальный).
+            "loading_portal": self.gui.as_ref().filter(|_| self.connect_phase == 2).and_then(|g| g.loading_portal()).map(|r| format!("{r:?}")),
             "hud_hidden": self.hud_hidden,
             "frames": self.frames,
             "fps": self.fps,

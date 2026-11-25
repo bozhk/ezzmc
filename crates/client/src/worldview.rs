@@ -111,6 +111,11 @@ pub struct WorldView {
     pub death_in: Option<Option<ezzmc_protocol::text::Component>>,
     /// Пришёл Respawn: экран смерти закрыть.
     pub respawn_in: bool,
+    /// Пришёл Respawn: открыть LevelLoadingScreen с этой причиной (забирает App).
+    pub loading_in: Option<crate::ui::LoadingReason>,
+    /// После Respawn ещё не пришёл ни один чанк (VANILLA: LevelLoadTracker.WaitingForServer —
+    /// старые чанки не считаются готовым уровнем).
+    pub respawn_wait: bool,
     /// VANILLA: game_event WIN_GAME (4; в 26.3 param не проверяется) — показать End Poem / титры.
     pub win_game: bool,
     /// Экран смерти уже запрошен (до Respawn): повторные combat_kill/set_health(0) не открывают его снова.
@@ -1329,6 +1334,8 @@ impl WorldView {
             score: 0,
             death_in: None,
             respawn_in: false,
+            loading_in: None,
+            respawn_wait: false,
             win_game: false,
             death_pending: false,
             health_seen: false,
@@ -1712,8 +1719,10 @@ impl WorldView {
                 NetEvt::WinGame => {
                     self.win_game = true;
                 }
-                NetEvt::Respawned => {
+                NetEvt::Respawned(reason) => {
                     self.respawn_in = true;
+                    self.loading_in = Some(reason);
+                    self.respawn_wait = true;
                     self.death_pending = false;
                     // VANILLA: новый LocalPlayer — flashOnSetHealth, hurtTime, deathTime сброшены.
                     self.health_seen = false;
@@ -1903,6 +1912,9 @@ impl WorldView {
                 }
                 NetEvt::Level(l) => match l {
                     LevelEvent::ChunkLoaded { x, z } | LevelEvent::LightUpdated { x, z } => {
+                        if matches!(l, LevelEvent::ChunkLoaded { .. }) {
+                            self.respawn_wait = false;
+                        }
                         self.mark_column_area(x, z);
                     }
                     LevelEvent::BlockEntityChanged(p) => self.be_changed.push([p.x, p.y, p.z]),

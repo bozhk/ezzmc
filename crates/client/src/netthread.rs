@@ -212,8 +212,8 @@ pub enum NetEvt {
     ShowDeathScreen(bool),
     /// VANILLA: handleGameEvent ARROW_HIT_PLAYER (6) — «дзынь» при попадании своей стрелы.
     ArrowHitPlayer,
-    /// Пакет Respawn (VANILLA: handleRespawn закрывает DeathScreen).
-    Respawned,
+    /// Пакет Respawn (VANILLA: handleRespawn закрывает DeathScreen и открывает LevelLoadingScreen).
+    Respawned(crate::ui::LoadingReason),
     /// VANILLA: ClientboundGameEventPacket WIN_GAME (4, param==1) — открыть WinScreen.
     WinGame,
     /// VANILLA: handlePlayerCombatKill для локального игрока: причина смерти.
@@ -988,6 +988,12 @@ fn run(
                             // VANILLA: handleRespawn — новый ClientLevel только при смене измерения
                             // (смерть в том же измерении оставляет мир и чанки).
                             let changed = spawn.dimension != cur_dim;
+                            // VANILLA: determineLevelLoadingReason(oldPlayer.isDeadOrDying(), new, old).
+                            let reason = crate::ui::LoadingReason::determine(
+                                player_dead,
+                                &spawn.dimension,
+                                &cur_dim,
+                            );
                             cur_dim = spawn.dimension.clone();
                             crate::itemdyn::set_dimension(&spawn.dimension);
                             crate::itemdyn::set_death(
@@ -1006,7 +1012,7 @@ fn run(
                                     l.own_sleep_pos = None;
                                 }
                             }
-                            let _ = tx.send(NetEvt::Respawned);
+                            let _ = tx.send(NetEvt::Respawned(reason));
                             let _ = tx.send(NetEvt::GameMode(spawn.game_type));
                             if !changed {
                                 continue;
