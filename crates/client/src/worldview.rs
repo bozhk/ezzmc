@@ -3879,6 +3879,8 @@ impl WorldView {
                     ezzmc_render::particledraw::ParticleDraw::new_mask
                 } else if tex == crate::mobs::SWIRL_TEX {
                     ezzmc_render::particledraw::ParticleDraw::new_additive
+                } else if tex == crate::mobs::BEAM_TEX {
+                    ezzmc_render::particledraw::ParticleDraw::new_repeat
                 } else {
                     ezzmc_render::particledraw::ParticleDraw::new
                 };

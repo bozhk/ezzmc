@@ -867,6 +867,9 @@ struct MobAnim {
     dr_flame_ticks: i32,
     /// EnderDragonPart: позиции (ноги) 8 частей с последнего тика (EnderDragon#tickPart).
     dr_parts: Option<[[f64; 3]; 8]>,
+    /// EnderDragon#nearestCrystal (id сущности) и ГПСЧ для checkCrystals.
+    dr_crystal: Option<i32>,
+    dr_rng: u32,
 }
 
 /// VANILLA: EnderDragon#aiStep — tickPart для head/neck/body/tail1..3/wing1/wing2 (yRotA клиента = 0).
@@ -948,6 +951,52 @@ pub struct DragonFx {
 }
 
 impl MobAnim {
+    /// VANILLA: EnderDragon#checkCrystals — забыть убранный кристалл; с шансом 1/10 выбрать ближайший
+    /// EndCrystal в getBoundingBox().inflate(32) (bbox дракона 16×8). Лечение — забота сервера.
+    fn check_crystals(&mut self, e: &ezzmc_world::entities::Entity, level: &Level) {
+        if self
+            .dr_crystal
+            .is_some_and(|id| !level.entities.map.contains_key(&id))
+        {
+            self.dr_crystal = None;
+        }
+        if self.dr_rng == 0 {
+            self.dr_rng = (e.id as u32) | 1;
+        }
+        self.dr_rng ^= self.dr_rng << 13;
+        self.dr_rng ^= self.dr_rng >> 17;
+        self.dr_rng ^= self.dr_rng << 5;
+        if self.dr_rng % 10 != 0 {
+            return;
+        }
+        let lo = [e.pos[0] - 40.0, e.pos[1] - 32.0, e.pos[2] - 40.0];
+        let hi = [e.pos[0] + 40.0, e.pos[1] + 40.0, e.pos[2] + 40.0];
+        let mut best: Option<(f64, i32)> = None;
+        for c in level.entities.iter() {
+            if !ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+                .get(c.ty)
+                .is_some_and(|n| *n == "end_crystal")
+            {
+                continue;
+            }
+            // Бокс кристалла 2×2×2 от ног.
+            let inside = c.pos[0] + 1.0 > lo[0]
+                && c.pos[0] - 1.0 < hi[0]
+                && c.pos[1] + 2.0 > lo[1]
+                && c.pos[1] < hi[1]
+                && c.pos[2] + 1.0 > lo[2]
+                && c.pos[2] - 1.0 < hi[2];
+            if !inside {
+                continue;
+            }
+            let d = (0..3).map(|i| (c.pos[i] - e.pos[i]).powi(2)).sum::<f64>();
+            if best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, c.id));
+            }
+        }
+        self.dr_crystal = best.map(|(_, id)| id);
+    }
+
     /// VANILLA: EnderDragon#aiStep (клиентская часть) — flapTime и DragonFlightHistory#record.
     fn tick_dragon(
         &mut self,
@@ -1993,6 +2042,10 @@ impl Mobs {
                         0.0
                     };
                     anim.tick_dragon(e, phase, egg_dist, &mut self.dragon_fx);
+                    // VANILLA: EnderDragon#aiStep — checkCrystals только у живого дракона.
+                    if e.health != 0.0 {
+                        anim.check_crystals(e, level);
+                    }
                 }
                 if sp.kind == Kind::Wither {
                     anim.tick_wither(e, level, anim.av.body_rot(1.0));
@@ -2057,12 +2110,14 @@ impl Mobs {
             } else {
                 max_d
             };
-            if dx * dx + dy * dy + dz * dz > max_d * max_d {
+            // VANILLA: EndCrystal#shouldRenderAtSqrDistance / EndCrystalRenderer#shouldRender — с лучом всегда.
+            let beam = sp.kind == Kind::EndCrystal && e.beam_target.is_some();
+            if dx * dx + dy * dy + dz * dz > max_d * max_d && !beam {
                 continue;
             }
             // VANILLA: EntityRenderer#shouldRender — AABB.inflate(0.5) против Frustum; дракон: noCulling.
             // Анимация уже протикана выше, пропускаем только запекание вершин.
-            if sp.kind != Kind::EnderDragon {
+            if sp.kind != Kind::EnderDragon && !beam {
                 if let (Some(fr), Some((lo, hi))) = (frustum, e.hitbox()) {
                     let lo = [lo[0] - 0.5, lo[1] - 0.5, lo[2] - 0.5];
                     let hi = [hi[0] + 0.5, hi[1] + 0.5, hi[2] + 0.5];
@@ -2244,6 +2299,32 @@ impl Mobs {
             // VANILLA: EnderDragonRenderer#submit — свой root: R_y(−yRot[7])·R_x(Δy[5,10]·10)·T(0,0,1)·S(−1,−1,1)·T(0,−1.501,0).
             // VANILLA: EndCrystalRenderer#submit — без разворота и флипа: S(2)·T(0,−0.5,0).
             let root = if sp.kind == Kind::EndCrystal {
+                // VANILLA: EndCrystalRenderer#submit — луч из центра beamTarget к кристаллу.
+                if let Some(t) = e.beam_target {
+                    let d = [
+                        f64::from(t[0]) + 0.5 - pos[0],
+                        f64::from(t[1]) + 0.5 - pos[1],
+                        f64::from(t[2]) + 0.5 - pos[2],
+                    ];
+                    let time = crystal_time(e, pt);
+                    let origin = Vec3::new(
+                        (pos[0] + d[0] - cam[0]) as f32,
+                        (pos[1] + d[1] - cam[1]) as f32,
+                        (pos[2] + d[2] - cam[2]) as f32,
+                    );
+                    let delta = Vec3::new(
+                        -d[0] as f32,
+                        -d[1] as f32 + animals::end_crystal_y(time),
+                        -d[2] as f32,
+                    );
+                    crystal_beam(
+                        self.data.entry(BEAM_TEX).or_default(),
+                        origin,
+                        delta,
+                        time,
+                        light,
+                    );
+                }
                 Mat4::from_translation(Vec3::new(
                     (pos[0] - cam[0]) as f32,
                     (pos[1] - cam[1]) as f32,
@@ -2268,6 +2349,37 @@ impl Mobs {
             } else {
                 root
             };
+            // VANILLA: EnderDragonRenderer#submit/extractRenderState — луч к nearestCrystal
+            // (позиция кристалла + EndCrystalRenderer#getY), без оверлея урона.
+            if sp.kind == Kind::EnderDragon {
+                if let Some(c) = anim.dr_crystal.and_then(|id| level.entities.map.get(&id)) {
+                    let time = crystal_time(c, pt);
+                    let cy = f64::from(animals::end_crystal_y(time));
+                    let cp = [
+                        lerp(c.prev_pos[0], c.pos[0]),
+                        lerp(c.prev_pos[1], c.pos[1]) + cy,
+                        lerp(c.prev_pos[2], c.pos[2]),
+                    ];
+                    let origin = Vec3::new(
+                        (pos[0] - cam[0]) as f32,
+                        (pos[1] - cam[1]) as f32,
+                        (pos[2] - cam[2]) as f32,
+                    );
+                    let delta = Vec3::new(
+                        (cp[0] - pos[0]) as f32,
+                        (cp[1] - pos[1]) as f32,
+                        (cp[2] - pos[2]) as f32,
+                    );
+                    let age = e.age as f32 + pt;
+                    crystal_beam(
+                        self.data.entry(BEAM_TEX).or_default(),
+                        origin,
+                        delta,
+                        age,
+                        light,
+                    );
+                }
+            }
             // VANILLA: LivingEntityRenderer#getOverlayCoords — красный оверлей, пока hurtTime>0.
             let hurt = e
                 .hurt_at
@@ -2698,7 +2810,7 @@ impl Mobs {
                         Kind::Silverfish => animals::silverfish_anim(model, state.age_in_ticks),
                         Kind::Endermite => animals::endermite_anim(model, state.age_in_ticks),
                         Kind::EndCrystal => {
-                            animals::end_crystal_anim(model, state.age_in_ticks, true)
+                            animals::end_crystal_anim(model, crystal_time(e, pt), e.show_bottom)
                         }
                         Kind::Rabbit => animals::rabbit_anim(model, yr, xr),
                         Kind::Turtle => animals::turtle_anim(model, yr, xr, wp, ws, e.on_ground),
@@ -3162,6 +3274,63 @@ impl Mobs {
         if let Some(Some(d)) = self.draws.get(MASK_TEX) {
             d.draw(pass);
         }
+    }
+}
+
+/// Текстура луча эндер-кристалла (рисуется `ParticleDraw::new_repeat`: V прокручивается).
+pub const BEAM_TEX: &str = "end_crystal/end_crystal_beam";
+
+/// VANILLA: EndCrystal#time — random.nextInt(100000) при создании + тики. Случайное смещение
+/// выводим из id (у ванили оно тоже случайное и у каждого клиента своё).
+fn crystal_time(e: &ezzmc_world::entities::Entity, pt: f32) -> f32 {
+    let off = (e.id as u32).wrapping_mul(0x9E37_79B1) % 100_000;
+    off as f32 + e.age as f32 + pt
+}
+
+/// VANILLA: EnderDragonRenderer#submitCrystalBeams — 8 граней конуса (радиус 0.15 → 0.75), начало в
+/// `origin` + (0, 2, 0), ось к `origin + delta`; цвет чёрный у основания, белый у конца, V сдвигается
+/// на −0.01 за тик. Нормаль (0, −1, 0) в позе → minecraft_mix_light.
+fn crystal_beam(out: &mut Vec<u8>, origin: Vec3, delta: Vec3, time: f32, light: (u8, u8)) {
+    use ezzmc_render::particledraw::push_vertex;
+    let (dx, dy, dz) = (delta.x, delta.y, delta.z);
+    let horiz = (dx * dx + dz * dz).sqrt();
+    let length = (dx * dx + dy * dy + dz * dz).sqrt();
+    // Только f64::atan2: f32::atan2 → atan2f зацикливается (заглушка glibc_compat.rs).
+    let ry = -(f64::from(dz).atan2(f64::from(dx))) as f32 - std::f32::consts::FRAC_PI_2;
+    let rx = -(f64::from(horiz).atan2(f64::from(dy))) as f32 - std::f32::consts::FRAC_PI_2;
+    let pose = Mat4::from_translation(origin + Vec3::new(0.0, 2.0, 0.0))
+        * Mat4::from_rotation_y(ry)
+        * Mat4::from_rotation_x(rx);
+    let shade = ezzmc_render::entitymodel::mix_light(
+        pose.transform_vector3(Vec3::NEG_Y).normalize_or_zero(),
+    );
+    let w = (255.0 * shade).round() as u8;
+    let (black, white) = ([0, 0, 0, 255], [w, w, w, 255]);
+    let v0 = -time * 0.01;
+    let v1 = length / 32.0 - time * 0.01;
+    let (mut last_sin, mut last_cos, mut last_u) = (0.0f32, 0.75f32, 0.0f32);
+    for i in 1..=8 {
+        let a = i as f32 * std::f32::consts::TAU / 8.0;
+        let (sin, cos) = (a.sin() * 0.75, a.cos() * 0.75);
+        let u = i as f32 / 8.0;
+        let p = |x: f32, y: f32, z: f32| pose.transform_point3(Vec3::new(x, y, z)).to_array();
+        push_vertex(
+            out,
+            p(last_sin * 0.2, last_cos * 0.2, 0.0),
+            [last_u, v0],
+            black,
+            light,
+        );
+        push_vertex(
+            out,
+            p(last_sin, last_cos, length),
+            [last_u, v1],
+            white,
+            light,
+        );
+        push_vertex(out, p(sin, cos, length), [u, v1], white, light);
+        push_vertex(out, p(sin * 0.2, cos * 0.2, 0.0), [u, v0], black, light);
+        (last_sin, last_cos, last_u) = (sin, cos, u);
     }
 }
 

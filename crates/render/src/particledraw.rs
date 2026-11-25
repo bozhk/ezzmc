@@ -148,7 +148,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, particles, false,
-            false, false, None, false, false,
+            false, false, None, false, false, false,
         )
     }
 
@@ -168,7 +168,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, true, false,
-            false, None, false, false,
+            false, None, false, false, false,
         )
     }
 
@@ -187,7 +187,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, true,
-            false, None, false, false,
+            false, None, false, false, false,
         )
     }
 
@@ -206,7 +206,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, false,
-            false, None, true, false,
+            false, None, true, false, false,
         )
     }
 
@@ -226,7 +226,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, false,
-            true, None, false, false,
+            true, None, false, false, false,
         )
     }
 
@@ -264,6 +264,7 @@ impl ParticleDraw {
             Some(g),
             false,
             false,
+            false,
         )
     }
 
@@ -282,7 +283,27 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, false,
-            false, None, false, true,
+            false, None, false, true, false,
+        )
+    }
+
+    /// Луч эндер-кристалла. VANILLA: RenderPipelines#END_CRYSTAL_BEAM — ENTITY_SNIPPET, ALPHA_CUTOUT 0.1,
+    /// без отсечения; UV прокручиваются по V, поэтому сэмплер с повтором.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_repeat(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color: wgpu::TextureFormat,
+        depth: wgpu::TextureFormat,
+        projection: &wgpu::Buffer,
+        fog: &wgpu::Buffer,
+        lightmap: &wgpu::TextureView,
+        blocks: &wgpu::TextureView,
+        texture: Option<(&[u8], u32, u32)>,
+    ) -> Self {
+        Self::new_ex(
+            device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, false,
+            false, None, false, false, true,
         )
     }
 
@@ -307,6 +328,7 @@ impl ParticleDraw {
         item_glint: Option<(&[u8], u32, u32)>,
         mask: bool,
         additive: bool,
+        repeat: bool,
     ) -> Self {
         let vf = wgpu::ShaderStages::VERTEX_FRAGMENT;
         let uni = |binding| wgpu::BindGroupLayoutEntry {
@@ -379,6 +401,8 @@ impl ParticleDraw {
         });
         let (filter, addr) = if glint && !item_glint.is_some() {
             (wgpu::FilterMode::Linear, wgpu::AddressMode::Repeat)
+        } else if repeat {
+            (wgpu::FilterMode::Nearest, wgpu::AddressMode::Repeat)
         } else {
             (wgpu::FilterMode::Nearest, wgpu::AddressMode::ClampToEdge)
         };

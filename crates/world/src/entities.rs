@@ -56,6 +56,10 @@ pub struct Entity {
     pub pose: i32,
     /// LivingEntity#SLEEPING_POS (#14): клетка кровати.
     pub sleep_pos: Option<[i32; 3]>,
+    /// EndCrystal#DATA_BEAM_TARGET (#8, OPTIONAL_BLOCK_POS).
+    pub beam_target: Option<[i32; 3]>,
+    /// EndCrystal#DATA_SHOW_BOTTOM (#9, BOOLEAN; по умолчанию true).
+    pub show_bottom: bool,
     /// Метаданные #16 типа BYTE (Bat#DATA_ID_FLAGS: бит 1 = висит).
     pub byte16: u8,
     /// Стак предмета (метаданные #8 у `item`).
@@ -163,6 +167,8 @@ impl Entity {
             ints: Vec::new(),
             pose: 0,
             sleep_pos: None,
+            beam_target: None,
+            show_bottom: true,
             byte16: 0,
             byte17: 0,
             byte18_set: false,

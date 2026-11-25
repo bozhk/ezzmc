@@ -958,6 +958,12 @@ impl Level {
                                     e.sleep_pos = pos;
                                 }
                             }
+                            // VANILLA: EndCrystal#DATA_BEAM_TARGET (#8).
+                            if idx == 8 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    e.beam_target = pos;
+                                }
+                            }
                         }
                         // VANILLA: EntityDataSerializers#VILLAGER_DATA — holder(type), holder(profession), level (VarInt ×3).
                         // Пакуем в int-мету: type | profession<<8 | level<<16.
@@ -999,6 +1005,12 @@ impl Level {
                             if idx == 5 {
                                 if let Some(e) = self.entities.map.get_mut(&id) {
                                     e.no_gravity = v != 0;
+                                }
+                            }
+                            // VANILLA: EndCrystal#DATA_SHOW_BOTTOM (#9; у LivingEntity #9 — FLOAT, сюда не попадает).
+                            if idx == 9 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    e.show_bottom = v != 0;
                                 }
                             }
                             // VANILLA: AbstractBoat#DATA_ID_PADDLE_LEFT/RIGHT (Entity 0-7, VehicleEntity 8-10).
