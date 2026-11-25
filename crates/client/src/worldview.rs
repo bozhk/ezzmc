@@ -5610,6 +5610,8 @@ impl WorldView {
                     l.game_time,
                     l.partial_tick(),
                 );
+            } else {
+                self.clouds.hide();
             }
         }
         // VANILLA: WeatherEffectRenderer#extractRenderState + prepare.
@@ -7956,18 +7958,23 @@ fn probe_colors(
             }
         }
     }
+    // VANILLA: EnvironmentAttributeSystem — слой измерения (dimension_type.attributes) под
+    // биомным: у биомов Энда нет visual/fog_color/sky_color → #181318 / #000000 из the_end.
+    let dim = l.dimension.as_ref();
+    let dim_sky = dim
+        .and_then(|d| d.attr_color("visual/sky_color"))
+        .unwrap_or(ezzmc_render::sky::DEFAULT_SKY_COLOR);
+    let dim_fog = dim
+        .and_then(|d| d.attr_color("visual/fog_color"))
+        .unwrap_or(defaults.base_fog);
     let of = |id: u32| -> [u32; 3] {
         match biomes.get(id as usize) {
             Some(Some(b)) => [
-                b.sky_color.unwrap_or(ezzmc_render::sky::DEFAULT_SKY_COLOR),
-                b.fog_color.unwrap_or(defaults.base_fog),
+                b.sky_color.unwrap_or(dim_sky),
+                b.fog_color.unwrap_or(dim_fog),
                 b.water_fog_color.unwrap_or(defaults.water_fog_color),
             ],
-            _ => [
-                ezzmc_render::sky::DEFAULT_SKY_COLOR,
-                defaults.base_fog,
-                defaults.water_fog_color,
-            ],
+            _ => [dim_sky, dim_fog, defaults.water_fog_color],
         }
     };
     let mut result: Option<[u32; 3]> = None;

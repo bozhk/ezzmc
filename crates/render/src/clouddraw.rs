@@ -346,6 +346,13 @@ impl CloudDraw {
         );
     }
 
+    /// Облака в этом кадре не рисуются (CloudRenderer#prepare не вызван: другой скайбокс или
+    /// прозрачный цвет). Без этого `draw` выводил старую сетку со старой матрицей вида.
+    pub fn hide(&mut self) {
+        self.quads = 0;
+        self.need_rebuild = true;
+    }
+
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
         let (Some((_, bg, _)), Some((ib, _))) = (&self.faces, &self.index) else {
             return;
