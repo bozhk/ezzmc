@@ -4856,6 +4856,18 @@ mod boat_tests {
     use super::*;
 
     #[test]
+    fn end_crystal_scales_survive_reset() {
+        // VANILLA: EndCrystalModel — inner_glass ×0.875, cube ×0.765625 (PartPose#withScale).
+        let mut m = end_crystal_mesh();
+        m.reset_pose();
+        end_crystal_anim(&mut m, 10.0, true);
+        let s = |n| m.parts[m.index(n).unwrap()].scale.x;
+        assert_eq!(s("outer_glass"), 1.0);
+        assert_eq!(s("inner_glass"), 0.875);
+        assert_eq!(s("cube"), 0.765_625);
+    }
+
+    #[test]
     fn boat_parts_and_paddle_anim() {
         assert_eq!(boat_mesh(false, false).parts.len(), 7);
         assert_eq!(boat_mesh(true, false).parts.len(), 3);
@@ -7240,7 +7252,7 @@ pub fn end_crystal_mesh() -> Model {
     let glass = [BoxDef::new([0.0, 0.0], [-4.0, -4.0, -4.0], [8.0, 8.0, 8.0])];
     let outer = m.add("outer_glass", None, Pose::offset(0.0, 24.0, 0.0), &glass);
     let inner = m.add("inner_glass", Some(outer), Pose::default(), &glass);
-    m.parts[inner].scale = glam::Vec3::splat(0.875);
+    m.set_initial_scale(inner, 0.875);
     let cube = m.add(
         "cube",
         Some(inner),
@@ -7251,7 +7263,7 @@ pub fn end_crystal_mesh() -> Model {
             [8.0, 8.0, 8.0],
         )],
     );
-    m.parts[cube].scale = glam::Vec3::splat(0.765_625);
+    m.set_initial_scale(cube, 0.765_625);
     m.add(
         "base",
         None,

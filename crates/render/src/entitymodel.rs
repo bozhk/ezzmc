@@ -181,6 +181,8 @@ pub struct Part {
     pub pose: Pose,
     /// VANILLA: ModelPart#xScale/yScale/zScale (меняется keyframe-анимацией).
     pub scale: Vec3,
+    /// Масштаб из PartPose#withScale (ModelPart#initialPose); к нему возвращает `reset_pose`.
+    pub initial_scale: Vec3,
     pub visible: bool,
     cubes: Vec<Cube>,
 }
@@ -276,6 +278,7 @@ impl Model {
             initial: pose,
             pose,
             scale: Vec3::ONE,
+            initial_scale: Vec3::ONE,
             visible: true,
             cubes,
         });
@@ -286,11 +289,17 @@ impl Model {
         self.parts.iter().position(|p| p.name == name)
     }
 
-    /// VANILLA: Model#resetPose — все части в исходное положение.
+    /// VANILLA: PartPose#withScale — масштаб части в исходной позе (переживает `reset_pose`).
+    pub fn set_initial_scale(&mut self, part: usize, s: f32) {
+        self.parts[part].initial_scale = Vec3::splat(s);
+        self.parts[part].scale = Vec3::splat(s);
+    }
+
+    /// VANILLA: Model#resetPose — все части в исходное положение (ModelPart#resetPose: и масштаб).
     pub fn reset_pose(&mut self) {
         for p in &mut self.parts {
             p.pose = p.initial;
-            p.scale = Vec3::ONE;
+            p.scale = p.initial_scale;
         }
     }
 
