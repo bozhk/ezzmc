@@ -2093,6 +2093,9 @@ impl WorldView {
                             }
                         }
                     }
+                    LevelEvent::GlobalEffect { ty, pos } => {
+                        crate::levelsound::play_global(ty, [pos.x, pos.y, pos.z], self.cam);
+                    }
                     LevelEvent::Effect { ty, pos, data } if ty != 2001 => {
                         self.particles.level_event(ty, [pos.x, pos.y, pos.z], data);
                         // VANILLA: LevelEventHandler#playJukeboxSong / stopJukeboxSongAndNotifyNearby.
@@ -2422,6 +2425,39 @@ impl WorldView {
                         -m[0],
                         -m[1] + 0.2,
                         -m[2],
+                    );
+                }
+            }
+            // VANILLA: EyeOfEnder#tick/spawnParticles (клиент) — после шага: origin = pos − Δ·0.25;
+            // в воде 4 BUBBLE со скоростью Δ, иначе PORTAL (±0.3 по x/z, y−0.5).
+            // VANILLA-UNSURE: isInWater — по точке origin (у ванили — пересечение AABB с водой).
+            for e in level.entities.iter().filter(|e| e.proj == 3) {
+                let v = e.vel;
+                let o = [
+                    e.pos[0] - v[0] * 0.25,
+                    e.pos[1] - v[1] * 0.25,
+                    e.pos[2] - v[2] * 0.25,
+                ];
+                let in_water = ezzmc_mesh::blockinfo::fluid(level.chunks.block(
+                    o[0].floor() as i32,
+                    o[1].floor() as i32,
+                    o[2].floor() as i32,
+                ))
+                .is_some_and(|f| !f.lava);
+                if in_water {
+                    for _ in 0..4 {
+                        self.particles
+                            .add_bubble(o[0], o[1], o[2], v[0], v[1], v[2]);
+                    }
+                } else {
+                    let (rx, _, rz) = self.particles.rand3();
+                    self.particles.add_portal(
+                        o[0] + rx * 0.6 - 0.3,
+                        o[1] - 0.5,
+                        o[2] + rz * 0.6 - 0.3,
+                        v[0],
+                        v[1],
+                        v[2],
                     );
                 }
             }
@@ -4803,6 +4839,7 @@ impl WorldView {
                         | "snowball"
                         | "egg"
                         | "experience_bottle"
+                        | "eye_of_ender"
                 ) {
                     continue;
                 }
@@ -4818,13 +4855,22 @@ impl WorldView {
                 if d2 > 64.0 * 64.0 {
                     continue;
                 }
+                // VANILLA: EyeOfEnder#shouldRenderAtSqrDistance — первые 2 тика не видно у камеры.
+                if name == "eye_of_ender" && e.age < 2 && d2 < 12.25 {
+                    continue;
+                }
                 let lr = |a: f32, b: f32| a + (b - a) * pt;
+                let mut light = crate::particles::light_at(level, pos[0], pos[1] + 0.1, pos[2]);
+                // VANILLA: ThrownItemRenderer(fullBright = true) у EYE_OF_ENDER — блок-свет 15.
+                if name == "eye_of_ender" {
+                    light.0 = 15;
+                }
                 let dy = (e.yaw - e.prev_yaw + 540.0).rem_euclid(360.0) - 180.0;
                 list.push(P {
                     kind: name,
                     pos,
                     rot: (e.prev_yaw + dy * pt, lr(e.prev_pitch, e.pitch)),
-                    light: crate::particles::light_at(level, pos[0], pos[1] + 0.1, pos[2]),
+                    light,
                     stack: e.item.clone(),
                     shake: e.shake as f32 - pt,
                 });
@@ -4849,6 +4895,8 @@ impl WorldView {
             };
             let (name, cx) = match p.stack.as_ref().and_then(crate::handitem::stack_ctx) {
                 Some(v) => v,
+                // VANILLA: EyeOfEnder#getDefaultItem = ENDER_EYE (у типа и предмета разные имена).
+                None if p.kind == "eye_of_ender" => ("ender_eye", crate::itemicon::Ctx::default()),
                 None => (p.kind, crate::itemicon::Ctx::default()),
             };
             let Some(mesh) = self.hand_items.as_mut().and_then(|h| h.get(rm, name, &cx)) else {
@@ -7012,6 +7060,15 @@ impl WorldView {
                     self.player.swing();
                     let _ = self.net.cmd.send(crate::netthread::NetCmd::Swing);
                 }
+            } else if held_name == Some("ender_eye")
+                && t.state.name() == "end_portal_frame"
+                && t.state.property("eye") == Some("false")
+            {
+                // VANILLA: EnderEyeItem#useOn — пустая рамка: клиент сразу SUCCESS (взмах), глаз
+                // вставляет сервер (level event 1503 + блок).
+                consumed = true;
+                self.player.swing();
+                let _ = self.net.cmd.send(crate::netthread::NetCmd::Swing);
             } else if is_block && held_name.is_some() && placeable {
                 consumed = true;
                 self.player.swing();

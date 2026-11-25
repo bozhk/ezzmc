@@ -68,7 +68,7 @@ pub struct Entity {
     pub snap: bool,
     /// PrimedTnt#DATA_FUSE_ID (метаданные #8, INT); -1 — не взведённый TNT.
     pub fuse: i32,
-    /// Снаряд, который клиент ведёт сам: 0 нет, 1 стрела, 2 бросаемый предмет.
+    /// Снаряд, который клиент ведёт сам: 0 нет, 1 стрела, 2 бросаемый предмет, 3 Око Эндера.
     pub proj: u8,
     /// Гравитация снаряда за тик.
     pub gravity: f64,
@@ -222,6 +222,14 @@ impl Entity {
             self.shake -= 1;
         }
         if self.stuck || self.vel == [0.0; 3] {
+            return;
+        }
+        // VANILLA: EyeOfEnder#tick (клиент) — setPos(position + deltaMovement): без гравитации,
+        // сопротивления и столкновений; скорость задаёт только сервер (updateDeltaMovement).
+        if self.proj == 3 {
+            for (p, v) in self.pos.iter_mut().zip(self.vel) {
+                *p += v;
+            }
             return;
         }
         // VANILLA: ThrowableProjectile#tick — сначала applyGravity + applyInertia (0.99), потом
@@ -469,6 +477,7 @@ fn projectile_kind(ty: usize) -> (u8, f64) {
         Some("ender_pearl" | "snowball" | "egg" | "blue_egg" | "brown_egg") => (2, 0.03),
         Some("splash_potion" | "lingering_potion") => (2, 0.05),
         Some("experience_bottle") => (2, 0.07),
+        Some("eye_of_ender") => (3, 0.0),
         _ => (0, 0.0),
     }
 }
@@ -581,6 +590,22 @@ mod tests {
         assert_eq!(e.pos, [1.0, 2.0, 3.0]);
         assert!(!e.interpolating());
         assert_eq!((e.yaw, e.pitch), (90.0, 10.0));
+    }
+
+    #[test]
+    fn eye_of_ender_flies_by_velocity_through_blocks() {
+        // VANILLA: EyeOfEnder#tick (клиент) — setPos(position + deltaMovement), без физики.
+        let eye = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+            .iter()
+            .position(|n| *n == "eye_of_ender")
+            .expect("eye_of_ender есть в реестре 26.3");
+        let mut e = Entity::new(1, 0, eye, [0.0; 3], 0.0, 0.0, 0.0);
+        e.vel = [0.5, 0.1, -0.25];
+        e.tick_projectile(&|_, _, _| true, &[]);
+        e.tick_projectile(&|_, _, _| true, &[]);
+        assert_eq!(e.pos, [1.0, 0.2, -0.5]);
+        assert_eq!(e.vel, [0.5, 0.1, -0.25]);
+        assert!(!e.stuck);
     }
 
     #[test]

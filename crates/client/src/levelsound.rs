@@ -100,6 +100,33 @@ fn entry(ty: i32) -> Option<(&'static str, Cat, f32, P)> {
     })
 }
 
+/// VANILLA: LevelEventHandler#globalLevelEvent — звук на 2 блока от камеры в сторону события.
+pub fn play_global(ty: i32, pos: [i32; 3], cam: [f64; 3]) {
+    let (ev, vol) = match ty {
+        1023 => ("entity.wither.spawn", 1.0),
+        1028 => ("entity.ender_dragon.death", 5.0),
+        1038 => ("block.end_portal.spawn", 1.0),
+        _ => return,
+    };
+    let d = [
+        f64::from(pos[0]) + 0.5 - cam[0],
+        f64::from(pos[1]) + 0.5 - cam[1],
+        f64::from(pos[2]) + 0.5 - cam[2],
+    ];
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    // VANILLA: Vec3#normalize — длина < 1e-5 → нулевой вектор.
+    let k = if len < 1.0e-5 { 0.0 } else { 2.0 / len };
+    audio::play_at(
+        ev,
+        H,
+        cam[0] + d[0] * k,
+        cam[1] + d[1] * k,
+        cam[2] + d[2] * k,
+        vol,
+        1.0,
+    );
+}
+
 /// Звук события; `data` нужен 1009 (тушение огня).
 pub fn play(ty: i32, pos: [i32; 3], data: i32) {
     let c = [

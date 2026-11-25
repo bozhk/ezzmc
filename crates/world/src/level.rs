@@ -57,6 +57,12 @@ pub enum LevelEvent {
         pos: BlockPos,
         data: i32,
     },
+    /// VANILLA: ClientboundLevelEventPacket с globalEvent = true (1023 визер, 1028 смерть дракона,
+    /// 1038 открытие портала в Энд) → LevelEventHandler#globalLevelEvent.
+    GlobalEffect {
+        ty: i32,
+        pos: BlockPos,
+    },
     /// VANILLA: ClientboundLevelParticlesPacket. `block` — состояние для block-подобных частиц.
     Particles(ParticlesPacket),
 }
@@ -493,11 +499,17 @@ impl Level {
                 b1: r.u8()?,
                 block: u32::try_from(r.var_int()?).unwrap_or(0),
             },
-            "level_event" => LevelEvent::Effect {
-                ty: r.i32()?,
-                pos: BlockPos::read(&mut r)?,
-                data: r.i32()?,
-            },
+            "level_event" => {
+                let ty = r.i32()?;
+                let pos = BlockPos::read(&mut r)?;
+                let data = r.i32()?;
+                // VANILLA: ClientPacketListener#handleLevelEvent — isGlobalEvent → globalLevelEvent.
+                if r.bool()? {
+                    LevelEvent::GlobalEffect { ty, pos }
+                } else {
+                    LevelEvent::Effect { ty, pos, data }
+                }
+            }
             "level_particles" => {
                 // VANILLA: ClientboundLevelParticlesPacket (26.x): particle (id+options), overrideLimiter,
                 // alwaysShow, x,y,z (double), dist xyz, maxSpeed xyz (float), count (VarInt), randomizationType (VarInt).
