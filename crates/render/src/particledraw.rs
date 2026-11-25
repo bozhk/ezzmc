@@ -28,6 +28,11 @@ pub struct ParticleQuad {
     pub color: [u8; 4],
     /// block, sky в единицах 0..240 (уровень*16; Flame: плавное addSmoothBlockEmission).
     pub light: (u16, u16),
+    /// VANILLA: QuadParticleRenderState#add с кватернионом (extractRotatedQuad): оси квада
+    /// (right, up) в мировых координатах вместо билборда камеры.
+    pub axes: Option<([f32; 3], [f32; 3])>,
+    /// VANILLA: SingleQuadParticle#roll — поворот вокруг оси взгляда (радианы).
+    pub roll: f32,
 }
 
 const VERTEX_SIZE: usize = 32;
@@ -66,6 +71,15 @@ pub fn push_vertex_raw(
 }
 
 fn build(out: &mut Vec<u8>, q: &ParticleQuad, right: [f32; 3], up: [f32; 3]) {
+    let (right, up) = q.axes.unwrap_or((right, up));
+    let (right, up) = if q.roll == 0.0 {
+        (right, up)
+    } else {
+        let (s, c) = q.roll.sin_cos();
+        let r = |i: usize| right[i] * c + up[i] * s;
+        let u = |i: usize| -right[i] * s + up[i] * c;
+        ([r(0), r(1), r(2)], [u(0), u(1), u(2)])
+    };
     let corner = |x: f32, y: f32| {
         [
             q.pos[0] + (right[0] * x + up[0] * y) * q.size,
@@ -1314,6 +1328,8 @@ mod tests {
             v1: 1.0,
             color: [255; 4],
             light: (0, 240),
+            axes: None,
+            roll: 0.0,
         };
         let mut out = Vec::new();
         build(&mut out, &q, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);

@@ -858,6 +858,13 @@ impl WorldView {
                 "soul_fire_flame",
                 "copper_fire_flame",
                 "lava",
+                "underwater",
+                "egg_crack",
+                "small_flame",
+                "sculk_charge_pop",
+                "trial_spawner_detection",
+                "shriek",
+                "sculk_charge",
                 "dust",
                 "note",
                 "large_smoke",
@@ -875,6 +882,19 @@ impl WorldView {
                 "explosion",
                 "poof",
                 "glow",
+                "bubble_column_up",
+                "current_down",
+                "happy_villager",
+                "effect",
+                "instant_effect",
+                "cloud",
+                "white_smoke",
+                "electric_spark",
+                "wax_on",
+                "wax_off",
+                "scrape",
+                "firework",
+                "flash",
             ] {
                 let list: Vec<_> = rm
                     .read(&format!("assets/minecraft/particles/{name}.json"))
@@ -1922,10 +1942,155 @@ impl WorldView {
                             }
                         }
                     }
-                    LevelEvent::Effect { ty, pos, data } if ty != 2001 => {
-                        if ty == 2000 {
-                            self.particles.shoot_smoke(data, pos.x, pos.y, pos.z);
+                    LevelEvent::Effect {
+                        ty: ty @ (2014 | 3008),
+                        pos,
+                        data,
+                    } => {
+                        // VANILLA: LevelEventHandler 2014 (addDestroyBlockEffect) / 3008 (+ звук кисти).
+                        if let Some(st) = BlockState::from_id(data as u32) {
+                            if ty == 3008 {
+                                let ev = match st.name() {
+                                    "suspicious_sand" => Some("item.brush.brushing.sand.complete"),
+                                    "suspicious_gravel" => {
+                                        Some("item.brush.brushing.gravel.complete")
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(ev) = ev {
+                                    crate::audio::play_at(
+                                        ev,
+                                        crate::audio::Cat::Players,
+                                        f64::from(pos.x) + 0.5,
+                                        f64::from(pos.y) + 0.5,
+                                        f64::from(pos.z) + 0.5,
+                                        1.0,
+                                        1.0,
+                                    );
+                                }
+                            }
+                            if let Ok(g) = self.net.level.lock() {
+                                if let Some(level) = g.as_ref() {
+                                    let models = &self.models;
+                                    self.particles.destroy_block(pos, st, &mut |s, p| {
+                                        Self::terrain_look(models, level, s, p)
+                                    });
+                                }
+                            }
                         }
+                    }
+                    LevelEvent::Effect {
+                        ty: 2013,
+                        pos,
+                        data,
+                    } => {
+                        // VANILLA: LevelEventHandler 2013 → ParticleUtils#spawnSmashAttackParticles.
+                        if let Ok(g) = self.net.level.lock() {
+                            if let Some(level) = g.as_ref() {
+                                let st = level.chunks.block(pos.x, pos.y, pos.z);
+                                let models = &self.models;
+                                self.particles.smash(pos, st, data, &mut |s, p| {
+                                    Self::terrain_look(models, level, s, p)
+                                });
+                            }
+                        }
+                    }
+                    LevelEvent::Effect {
+                        ty: 3006,
+                        pos,
+                        data,
+                    } if data >> 6 == 0 => {
+                        // VANILLA: LevelEventHandler 3006 (count == 0): звук + sculk_charge_pop.
+                        crate::audio::play_at(
+                            "block.sculk.charge",
+                            crate::audio::Cat::Blocks,
+                            f64::from(pos.x) + 0.5,
+                            f64::from(pos.y) + 0.5,
+                            f64::from(pos.z) + 0.5,
+                            1.0,
+                            1.0,
+                        );
+                        let solid = match self.net.level.lock() {
+                            Ok(g) => g.as_ref().is_some_and(|l| {
+                                l.chunks
+                                    .block(pos.x, pos.y, pos.z)
+                                    .props()
+                                    .is_some_and(|p| p.has(ezzmc_world::block::FLAG_CAN_OCCLUDE))
+                            }),
+                            Err(_) => false,
+                        };
+                        self.particles.sculk_pop([pos.x, pos.y, pos.z], solid);
+                    }
+                    LevelEvent::Effect {
+                        ty: 3006,
+                        pos,
+                        data,
+                    } => {
+                        self.particles.sculk_charge([pos.x, pos.y, pos.z], data);
+                    }
+                    LevelEvent::Effect { ty: 3007, pos, .. } => {
+                        // VANILLA: LevelEventHandler 3007 (SculkShriekerBlock.TOP_Y = 0.5).
+                        let (x, y, z) = (
+                            f64::from(pos.x) + 0.5,
+                            f64::from(pos.y) + 0.5,
+                            f64::from(pos.z) + 0.5,
+                        );
+                        for i in 0..10 {
+                            self.particles.add_shriek(x, y, z, i * 5);
+                        }
+                        let waterlogged = self.net.level.lock().ok().is_some_and(|g| {
+                            g.as_ref().is_some_and(|l| {
+                                l.chunks.block(pos.x, pos.y, pos.z).property("waterlogged")
+                                    == Some("true")
+                            })
+                        });
+                        if !waterlogged {
+                            let pitch = 0.6 + self.particles.rand3().0 as f32 * 0.4;
+                            crate::audio::play_at(
+                                "block.sculk_shrieker.shriek",
+                                crate::audio::Cat::Blocks,
+                                x,
+                                y,
+                                z,
+                                2.0,
+                                pitch,
+                            );
+                        }
+                    }
+                    LevelEvent::Effect { ty: 1504, pos, .. } => {
+                        // VANILLA: LevelEventHandler 1504 → PointedDripstoneBlock#spawnDripParticle.
+                        if let Ok(g) = self.net.level.lock() {
+                            if let Some(level) = g.as_ref() {
+                                self.particles.stalactite_drip(level, [pos.x, pos.y, pos.z]);
+                            }
+                        }
+                    }
+                    LevelEvent::Effect {
+                        ty: ty @ (2019 | 2020),
+                        pos,
+                        data,
+                    } => {
+                        // VANILLA: LevelEventHandler 2019/2020 → ClientLevel#addBreakingBlockEffects.
+                        if let Ok(g) = self.net.level.lock() {
+                            if let Some(level) = g.as_ref() {
+                                let st = level.chunks.block(pos.x, pos.y, pos.z);
+                                if !st.is_air() {
+                                    if ty == 2020 {
+                                        crate::blocksound::brk(st.name(), pos.x, pos.y, pos.z);
+                                    }
+                                    let models = &self.models;
+                                    self.particles.crack(
+                                        pos,
+                                        st,
+                                        data.clamp(0, 5) as u8,
+                                        &mut |s, p| Self::terrain_look(models, level, s, p),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    LevelEvent::Effect { ty, pos, data } if ty != 2001 => {
+                        self.particles.level_event(ty, [pos.x, pos.y, pos.z], data);
                         // VANILLA: LevelEventHandler#playJukeboxSong / stopJukeboxSongAndNotifyNearby.
                         if ty == 1010 {
                             self.now_playing = Some(data);
@@ -2033,6 +2198,11 @@ impl WorldView {
         })
     }
 
+    /// Для MCP: (живые частицы, активные FireworkParticles.Starter).
+    pub fn particle_stats(&self) -> (usize, usize) {
+        (self.particles.count(), self.particles.starter_count())
+    }
+
     /// Время мира для шейдеров (GameTime): `(game_time, partial_tick)`.
     pub fn level_time(&self) -> (i64, f32) {
         match self.net.level.lock().as_deref() {
@@ -2137,6 +2307,22 @@ impl WorldView {
         for (p, w, h) in std::mem::take(&mut level.death_poofs) {
             self.particles.death_poof(p, w, h);
         }
+        // VANILLA: FireworkRocketEntity#handleEntityEvent(17) → getExplosions() → createFireworks.
+        for ev in std::mem::take(&mut level.firework_explosions) {
+            let explosions = ev
+                .item
+                .as_ref()
+                .and_then(|st| {
+                    let id = ezzmc_protocol::generated::r26_3::DATA_COMPONENT_TYPE
+                        .iter()
+                        .position(|x| *x == "fireworks")? as u32;
+                    st.patch.added.iter().find(|(i, _)| *i == id)
+                })
+                .map(|(_, b)| crate::particles::parse_fireworks(b))
+                .unwrap_or_default();
+            self.particles
+                .create_fireworks(ev.pos, ev.vel, explosions, ev.play_sound);
+        }
         let level: &Level = level;
         let now = level.game_time;
         crate::itemdyn::update(
@@ -2157,7 +2343,17 @@ impl WorldView {
                 self.cam[1].floor() as i32,
                 self.cam[2].floor() as i32,
             );
-            self.particles.tick(level);
+            self.particles.tick(level, self.cam);
+            // VANILLA: FireworkRocketEntity#tick (клиент) — искра FIREWORK каждый тик
+            // (life % 2 < 2 всегда истинно).
+            for e in level.entities.iter().filter(|e| {
+                ezzmc_protocol::generated::r26_3::ENTITY_TYPE.get(e.ty) == Some(&"firework_rocket")
+            }) {
+                let xa = self.particles.gaussian() * 0.05;
+                let za = self.particles.gaussian() * 0.05;
+                self.particles
+                    .add_firework(e.pos[0], e.pos[1], e.pos[2], xa, -e.vel[1] * 0.5, za);
+            }
             // VANILLA: AbstractArrow#tick — 4 частицы CRIT вдоль хода крит-стрелы.
             for e in level.entities.iter().filter(|e| e.crit_arrow()) {
                 let m = [

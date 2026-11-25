@@ -138,6 +138,16 @@ pub struct Pickup {
     pub life: u32,
 }
 
+/// Взрыв ракеты: позиция и скорость ракеты, предмет из DATA_ID_FIREWORKS_ITEM (#8),
+/// `!isSilent()`. VANILLA: FireworkRocketEntity#handleEntityEvent (26.3).
+#[derive(Clone, Debug)]
+pub struct FireworkEvent {
+    pub pos: [f64; 3],
+    pub vel: [f64; 3],
+    pub item: Option<ezzmc_protocol::item::ItemStack>,
+    pub play_sound: bool,
+}
+
 pub struct Level {
     pub chunks: ChunkCache,
     /// VANILLA: Level#getWorldBorder (клиентская копия, пересоздаётся с уровнем).
@@ -196,6 +206,8 @@ pub struct Level {
     pub pearl_hits: Vec<[f64; 3]>,
     /// VANILLA: LivingEntity#makePoofParticles (entity_event 60): (позиция, ширина, высота).
     pub death_poofs: Vec<([f64; 3], f64, f64)>,
+    /// VANILLA: FireworkRocketEntity#handleEntityEvent(17) → ClientLevel#createFireworks.
+    pub firework_explosions: Vec<FireworkEvent>,
     /// VANILLA: LivingEntity#handleDamageEvent (hurt) / handleEntityEvent 3 (death): (тип, позиция, смерть?).
     pub mob_sounds: Vec<(usize, [f64; 3], bool)>,
     /// Урон локальному игроку (damage_event/hurt_animation на own_id): `Some(yaw)` для hurt_animation — hurtDir.
@@ -261,6 +273,7 @@ impl Level {
             vehicle_resync: false,
             pearl_hits: Vec::new(),
             death_poofs: Vec::new(),
+            firework_explosions: Vec::new(),
             mob_sounds: Vec::new(),
             own_hurts: Vec::new(),
             sky_flash_time: 0,
@@ -630,6 +643,19 @@ impl Level {
                             e.hurt_dur = 1.0;
                             e.death_at.get_or_insert_with(std::time::Instant::now);
                         }
+                        17 => {
+                            // VANILLA: FireworkRocketEntity#handleEntityEvent(17) → createFireworks.
+                            if ezzmc_protocol::generated::r26_3::ENTITY_TYPE.get(e.ty)
+                                == Some(&"firework_rocket")
+                            {
+                                self.firework_explosions.push(FireworkEvent {
+                                    pos: e.pos,
+                                    vel: e.vel,
+                                    item: e.item.clone(),
+                                    play_sound: !e.silent,
+                                });
+                            }
+                        }
                         19 => e.squid_reset = e.squid_reset.wrapping_add(1),
                         60 => {
                             // VANILLA: LivingEntity#handleEntityEvent 60 → makePoofParticles.
@@ -931,6 +957,11 @@ impl Level {
                         }
                         8 => {
                             let v = r.u8()?;
+                            if idx == 4 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    e.silent = v != 0;
+                                }
+                            }
                             if idx == 16 || idx == 17 {
                                 if let Some(e) = self.entities.map.get_mut(&id) {
                                     if idx == 16 {
@@ -975,7 +1006,22 @@ impl Level {
                         }
                         6 => {
                             if r.bool()? {
-                                break;
+                                let tag = ezzmc_protocol::nbt::read_network(&mut r)?;
+                                if idx == 2 {
+                                    let text = tag
+                                        .as_ref()
+                                        .and_then(|t| {
+                                            ezzmc_protocol::text::Component::from_nbt(t).ok()
+                                        })
+                                        .map(|c| c.to_plain(&|_| None));
+                                    if let Some(e) = self.entities.map.get_mut(&id) {
+                                        e.custom_name = text;
+                                    }
+                                }
+                            } else if idx == 2 {
+                                if let Some(e) = self.entities.map.get_mut(&id) {
+                                    e.custom_name = None;
+                                }
                             }
                         }
                         7 => {

@@ -134,6 +134,11 @@ impl Mouse {
         if self.grabbed {
             return;
         }
+        // Без фокуса XGrabPointer (X11/XWayland) не получает ответа и вешает поток навсегда;
+        // захват повторит обработчик Focused(true).
+        if !w.has_focus() {
+            return;
+        }
         self.locked = w.set_cursor_grab(CursorGrabMode::Locked).is_ok();
         let ok = self.locked || w.set_cursor_grab(CursorGrabMode::Confined).is_ok();
         if ok {
@@ -161,7 +166,7 @@ impl Mouse {
 
     /// Повторный запрос захвата (указатель вошёл в окно / первое движение после захвата).
     pub fn regrab(&mut self, w: &Window) {
-        if self.grabbed {
+        if self.grabbed && w.has_focus() {
             let _ = w.set_cursor_grab(CursorGrabMode::None);
             self.grabbed = false;
             self.grab(w);

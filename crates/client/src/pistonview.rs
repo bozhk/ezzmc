@@ -537,6 +537,11 @@ pub fn bake_falling(
             lerp(e.prev_pos[1], e.pos[1]),
             lerp(e.prev_pos[2], e.pos[2]),
         ];
+        // VANILLA: Entity#shouldRender → shouldRenderAtSqrDistance: дальше 64 блоков (при размере <1) не рисуется.
+        let d = [pos[0] - cam[0], pos[1] - cam[1], pos[2] - cam[2]];
+        if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 64.0 * 64.0 {
+            continue;
+        }
         // shouldRender: getBlockState() != level.getBlockState(blockPosition()).
         if level.chunks.block(
             e.pos[0].floor() as i32,

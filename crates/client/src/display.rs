@@ -139,7 +139,9 @@ pub fn scaled_size(fb_w: u32, fb_h: u32, scale: u32) -> (u32, u32) {
 /// VANILLA: enableVsync → Fifo; иначе Immediate (с откатом внутри Swapchain).
 pub fn present_mode(vsync: bool) -> ezzmc_render::PresentMode {
     if vsync {
-        ezzmc_render::PresentMode::Vsync
+        // Не ваниль: Mailbox вместо Fifo — Fifo-present блокирует поток, пока окно не в фокусе/перекрыто
+        // (кадровые колбэки композитора не приходят) и замораживает тики и сеть. Темп держит FrameLimiter.
+        ezzmc_render::PresentMode::Mailbox
     } else {
         ezzmc_render::PresentMode::Immediate
     }
@@ -210,7 +212,7 @@ mod tests {
 
     #[test]
     fn vsync_maps_to_present_mode() {
-        assert_eq!(present_mode(true), ezzmc_render::PresentMode::Vsync);
+        assert_eq!(present_mode(true), ezzmc_render::PresentMode::Mailbox);
         assert_eq!(present_mode(false), ezzmc_render::PresentMode::Immediate);
     }
 }

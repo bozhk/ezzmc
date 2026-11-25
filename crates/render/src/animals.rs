@@ -7233,3 +7233,87 @@ pub fn copper_golem_anim(
         }
     }
 }
+
+/// VANILLA: EndCrystalModel#createBodyLayer (64×32): base 12×4×12, outer_glass 8³, inner_glass (0.875), cube (0.765625).
+pub fn end_crystal_mesh() -> Model {
+    let mut m = Model::new([64.0, 32.0]);
+    let glass = [BoxDef::new([0.0, 0.0], [-4.0, -4.0, -4.0], [8.0, 8.0, 8.0])];
+    let outer = m.add("outer_glass", None, Pose::offset(0.0, 24.0, 0.0), &glass);
+    let inner = m.add("inner_glass", Some(outer), Pose::default(), &glass);
+    m.parts[inner].scale = glam::Vec3::splat(0.875);
+    let cube = m.add(
+        "cube",
+        Some(inner),
+        Pose::default(),
+        &[BoxDef::new(
+            [32.0, 0.0],
+            [-4.0, -4.0, -4.0],
+            [8.0, 8.0, 8.0],
+        )],
+    );
+    m.parts[cube].scale = glam::Vec3::splat(0.765_625);
+    m.add(
+        "base",
+        None,
+        Pose::default(),
+        &[BoxDef::new(
+            [0.0, 16.0],
+            [-6.0, 0.0, -6.0],
+            [12.0, 4.0, 12.0],
+        )],
+    );
+    m
+}
+
+/// VANILLA: EndCrystalRenderer#getY(timeInTicks).
+pub fn end_crystal_y(age_in_ticks: f32) -> f32 {
+    let mut hh = (age_in_ticks * 0.2).sin() / 2.0 + 0.5;
+    hh = (hh * hh + hh) * 0.4;
+    hh - 1.4
+}
+
+/// VANILLA: EndCrystalModel#setupAnim (покачивание + вращение стеклянных рамок и ядра).
+/// `ModelPart#rotateBy`: итоговый кватернион раскладывается обратно в углы ZYX.
+pub fn end_crystal_anim(m: &mut Model, age_in_ticks: f32, shows_bottom: bool) {
+    use glam::{Quat, Vec3};
+    if let Some(b) = m.index("base") {
+        m.parts[b].visible = shows_bottom;
+    }
+    let spin = (age_in_ticks * 3.0).to_radians();
+    let s45 = std::f32::consts::FRAC_PI_4.sin();
+    let tilt = Quat::from_axis_angle(
+        Vec3::new(s45, 0.0, s45).normalize(),
+        std::f32::consts::FRAC_PI_3,
+    );
+    let set = |p: &mut Pose, q: Quat| {
+        // Только f64::atan2: f32::atan2 → atan2f зацикливается из-за заглушки glibc_compat.rs.
+        let m = glam::Mat3::from_quat(q);
+        let f = |v: f32| f64::from(v);
+        let cy = (f(m.x_axis.x).powi(2) + f(m.x_axis.y).powi(2)).sqrt();
+        let (z, y, x) = if cy > 1e-6 {
+            (
+                f(m.x_axis.y).atan2(f(m.x_axis.x)),
+                (-f(m.x_axis.z)).atan2(cy),
+                f(m.y_axis.z).atan2(f(m.z_axis.z)),
+            )
+        } else {
+            (
+                0.0,
+                (-f(m.x_axis.z)).atan2(cy),
+                (-f(m.z_axis.y)).atan2(f(m.y_axis.y)),
+            )
+        };
+        (p.z_rot, p.y_rot, p.x_rot) = (z as f32, y as f32, x as f32);
+    };
+    if let Some(o) = m.index("outer_glass") {
+        m.parts[o].pose.y += end_crystal_y(age_in_ticks) * 16.0 / 2.0;
+        // Axis.YP.rotationDegrees(a).rotateAxis(π/3, …) = Ry(a) · Raxis.
+        set(&mut m.parts[o].pose, Quat::from_rotation_y(spin) * tilt);
+    }
+    // setAngleAxis(π/3, …).rotateY(a) = Raxis · Ry(a).
+    for n in ["inner_glass", "cube"] {
+        if let Some(i) = m.index(n) {
+            set(&mut m.parts[i].pose, tilt * Quat::from_rotation_y(spin));
+        }
+    }
+}

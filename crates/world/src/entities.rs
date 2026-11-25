@@ -26,6 +26,10 @@ pub struct Entity {
     pub on_ground: bool,
     /// Общие флаги (метаданные #0): 1 = присед, 8 = спринт, 16 = плавание.
     pub flags: u8,
+    /// VANILLA: Entity#DATA_CUSTOM_NAME (#2, OPTIONAL_COMPONENT).
+    pub custom_name: Option<String>,
+    /// VANILLA: Entity#DATA_SILENT (#4, BOOLEAN).
+    pub silent: bool,
     /// Метаданные мобов (индекс по ванили): Mob#15 флаги, AgeableMob#16 детёныш, Creeper#16 swellDir,
     /// #17 powered, Sheep#18 цвет|стрижка. Какой смысл — решает тип сущности.
     pub mob_flags: u8,
@@ -144,6 +148,8 @@ impl Entity {
             prev_head_yaw: head,
             on_ground: false,
             flags: 0,
+            custom_name: None,
+            silent: false,
             mob_flags: 0,
             baby: false,
             swell_dir: 0,

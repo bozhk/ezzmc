@@ -53,6 +53,10 @@ enum Kind {
     Terrain,
     /// BaseAshSmokeParticle (дым).
     Smoke,
+    /// SculkChargeParticle / SculkChargePopParticle (full-bright, спрайт по возрасту).
+    Sculk,
+    /// ShriekParticle (двойной повёрнутый квад, задержка).
+    Shriek,
     /// FlameParticle (RisingParticle).
     Flame,
     /// LavaParticle.
@@ -75,6 +79,10 @@ enum Kind {
     DragonBreath,
     /// EndRodParticle (SimpleAnimatedParticle с затуханием цвета).
     EndRod,
+    /// FireworkParticles.SparkParticle (SimpleAnimatedParticle + twinkle + fade).
+    Firework,
+    /// FireworkParticles.OverlayParticle (вспышка 4 тика).
+    Flash,
 }
 
 /// VANILLA: DripParticle.* — стадия капли.
@@ -85,6 +93,12 @@ enum Stage {
     FallWater,
     FallLava,
     LandLava,
+    /// VANILLA: DripParticle.DripstoneWaterHangProvider / DripstoneLavaHangProvider.
+    StoneHangWater,
+    StoneHangLava,
+    /// VANILLA: DripstoneFallAndLandParticle (со звуком падения капли).
+    StoneFallWater,
+    StoneFallLava,
 }
 
 impl Stage {
@@ -93,18 +107,88 @@ impl Stage {
             Stage::HangWater => "dripping_water",
             Stage::HangLava => "dripping_lava",
             Stage::FallWater => "falling_water",
-            Stage::FallLava => "falling_lava",
+            Stage::FallLava | Stage::StoneFallLava => "falling_lava",
             Stage::LandLava => "landing_lava",
+            Stage::StoneHangWater => "dripping_water",
+            Stage::StoneHangLava => "dripping_lava",
+            Stage::StoneFallWater => "falling_water",
         }
     }
 
     fn is_hang(self) -> bool {
-        matches!(self, Stage::HangWater | Stage::HangLava)
+        matches!(
+            self,
+            Stage::HangWater | Stage::HangLava | Stage::StoneHangWater | Stage::StoneHangLava
+        )
     }
 
     fn lava(self) -> bool {
-        matches!(self, Stage::HangLava | Stage::FallLava | Stage::LandLava)
+        matches!(
+            self,
+            Stage::HangLava
+                | Stage::FallLava
+                | Stage::LandLava
+                | Stage::StoneHangLava
+                | Stage::StoneFallLava
+        )
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DripFluid {
+    Empty,
+    Water,
+    Lava,
+}
+
+/// VANILLA: SpeleothemBlock#isFreeHangingStalactite.
+fn free_hanging_stalactite(st: BlockState) -> bool {
+    st.name() == "pointed_dripstone"
+        && st.property("vertical_direction") == Some("down")
+        && st.property("thickness") == Some("tip")
+        && st.property("waterlogged") != Some("true")
+}
+
+/// VANILLA: PointedDripstoneBlock#getFluidAboveStalactite (findRootBlock, 11 шагов).
+/// Возвращает жидкость над корнем и позицию блока над корнем.
+fn fluid_above_stalactite(level: &Level, x: i32, y: i32, z: i32) -> Option<(DripFluid, [i32; 3])> {
+    let st = level.chunks.block(x, y, z);
+    let is_stalactite = |s: BlockState| {
+        s.name() == "pointed_dripstone" && s.property("vertical_direction") == Some("down")
+    };
+    if !is_stalactite(st) {
+        return None;
+    }
+    // findRootBlock: вверх до первого блока, не являющегося pointed_dripstone; путь — только tip_direction=down
+    let mut root_y = None;
+    for i in 1..11 {
+        let s = level.chunks.block(x, y + i, z);
+        if s.name() != "pointed_dripstone" {
+            root_y = Some(y + i);
+            break;
+        }
+        if !is_stalactite(s) {
+            return None;
+        }
+    }
+    let root_y = root_y?;
+    let above = [x, root_y + 1, z];
+    let a = level.chunks.block(above[0], above[1], above[2]);
+    // VANILLA-UNSURE: mud + !WATER_EVAPORATES → вода
+    let nether = level
+        .dimension
+        .as_ref()
+        .is_some_and(|d| d.has_ceiling && !d.has_skylight);
+    let fluid = if a.name() == "mud" && !nether {
+        DripFluid::Water
+    } else {
+        match blockinfo::fluid(a) {
+            Some(f) if f.lava => DripFluid::Lava,
+            Some(_) => DripFluid::Water,
+            None => DripFluid::Empty,
+        }
+    };
+    Some((fluid, above))
 }
 
 struct Particle {
@@ -147,6 +231,16 @@ struct Particle {
     drip: Option<Stage>,
     /// Следующая стадия капли / splash, порождаемая после тика: (стадия или None=splash, x, y, z).
     pending_drip: Option<(Option<Stage>, [f64; 3])>,
+    /// ShriekParticle#delay.
+    delay: i32,
+    /// SculkChargeParticle#roll.
+    roll: f32,
+    /// FireworkParticles.SparkParticle: целевой цвет затухания и мерцание.
+    fade: Option<[f32; 3]>,
+    twinkle: bool,
+    /// SparkParticle#trail и флаг «породить искру шлейфа после тика».
+    trail: bool,
+    pending_trail: bool,
 }
 
 fn collision_boxes(state: BlockState) -> &'static [[f64; 6]] {
@@ -302,6 +396,12 @@ impl Particle {
             pending_smoke: None,
             drip: None,
             pending_drip: None,
+            delay: 0,
+            roll: 0.0,
+            fade: None,
+            twinkle: false,
+            trail: false,
+            pending_trail: false,
         };
         p.set_size(0.2, 0.2);
         p.set_pos(x, y, z);
@@ -476,6 +576,32 @@ impl Particle {
                     self.zd *= f64::from(self.friction);
                 }
             }
+            // VANILLA: FireworkParticles.SparkParticle#tick (SimpleAnimatedParticle).
+            Kind::Firework => {
+                self.base_tick(level);
+                self.sprite_from_age();
+                if self.age > self.lifetime / 2 {
+                    self.alpha = 1.0
+                        - (self.age as f32 - (self.lifetime / 2) as f32)
+                            / self.lifetime.max(1) as f32;
+                    if let Some(fade) = self.fade {
+                        for (c, f) in self.rgb.iter_mut().zip(fade) {
+                            *c += (f - *c) * 0.2;
+                        }
+                    }
+                }
+                // VANILLA: SparkParticle#tick — искра шлейфа каждые 2 тика первой половины жизни.
+                if self.trail
+                    && !self.removed
+                    && self.age < self.lifetime / 2
+                    && (self.age + self.lifetime) % 2 == 0
+                {
+                    self.pending_trail = true;
+                }
+            }
+            // VANILLA: OverlayParticle — Particle#tick (gravity 0, скорость 0), lifetime 4;
+            // альфа считается в extract.
+            Kind::Flash => self.base_tick(level),
             // VANILLA: SimpleAnimatedParticle#tick (EndRodParticle: fade 0xF2DEC9, без коллизий).
             Kind::EndRod => {
                 self.base_tick(level);
@@ -490,6 +616,18 @@ impl Particle {
                 }
             }
             Kind::Flame => self.base_tick(level),
+            Kind::Sculk => {
+                self.base_tick(level);
+                self.sprite_from_age();
+            }
+            // VANILLA: ShriekParticle#tick.
+            Kind::Shriek => {
+                if self.delay > 0 {
+                    self.delay -= 1;
+                } else {
+                    self.base_tick(level);
+                }
+            }
             // VANILLA: GlowParticle#tick.
             Kind::Glow => {
                 self.base_tick(level);
@@ -536,7 +674,7 @@ impl Particle {
         self.yo = self.y;
         self.zo = self.z;
         // preMoveUpdate
-        if stage == Stage::HangLava {
+        if matches!(stage, Stage::HangLava | Stage::StoneHangLava) {
             let l = self.lifetime as f32;
             self.rgb = [1.0, 16.0 / (40.0 - l + 16.0), 4.0 / (40.0 - l + 8.0)];
         }
@@ -545,10 +683,11 @@ impl Particle {
         if was <= 0 {
             self.removed = true;
             if stage.is_hang() {
-                let next = if stage == Stage::HangLava {
-                    Stage::FallLava
-                } else {
-                    Stage::FallWater
+                let next = match stage {
+                    Stage::HangLava => Stage::FallLava,
+                    Stage::StoneHangLava => Stage::StoneFallLava,
+                    Stage::StoneHangWater => Stage::StoneFallWater,
+                    _ => Stage::FallWater,
                 };
                 self.pending_drip = Some((Some(next), [self.x, self.y, self.z]));
             }
@@ -564,11 +703,29 @@ impl Particle {
             self.zd *= 0.02;
         } else if self.on_ground && stage != Stage::LandLava {
             self.removed = true;
-            let next = if stage == Stage::FallLava {
+            let next = if matches!(stage, Stage::FallLava | Stage::StoneFallLava) {
                 Some(Stage::LandLava)
             } else {
                 None
             };
+            if matches!(stage, Stage::StoneFallWater | Stage::StoneFallLava) {
+                // VANILLA: DripstoneFallAndLandParticle#postMoveUpdate (randomBetween(0.3, 1.0))
+                let ev = if stage == Stage::StoneFallLava {
+                    "block.pointed_dripstone.drip_lava"
+                } else {
+                    "block.pointed_dripstone.drip_water"
+                };
+                let vol = 0.3 + self.rng.next_float() * 0.7;
+                crate::audio::play_at(
+                    ev,
+                    crate::audio::Cat::Blocks,
+                    self.x,
+                    self.y,
+                    self.z,
+                    vol,
+                    1.0,
+                );
+            }
             self.pending_drip = Some((next, [self.x, self.y, self.z]));
             return;
         }
@@ -677,9 +834,11 @@ impl Particle {
         match self.kind {
             Kind::Lava => (240, sky),
             // VANILLA: SimpleAnimatedParticle#getLightCoords = 15728880.
-            Kind::EndRod => (240, 240),
+            Kind::EndRod | Kind::Firework | Kind::Flash => (240, 240),
             // VANILLA: HugeExplosionParticle#getLightCoords = 15728880.
             Kind::Huge => (240, 240),
+            // VANILLA: ShriekParticle#getLightCoords = withBlock(…, 15).
+            Kind::Shriek | Kind::Sculk => (240, sky),
             // VANILLA: GlowParticle#getLightCoords — addSmoothBlockEmission(age/lifetime).
             Kind::Flame | Kind::Glow => {
                 let t = ((self.age as f32 + partial) / self.lifetime as f32).clamp(0.0, 1.0);
@@ -698,6 +857,11 @@ impl Particle {
 
     fn quad_size(&self, partial: f32) -> f32 {
         match self.kind {
+            // VANILLA: ShriekParticle#getQuadSize.
+            Kind::Shriek => {
+                self.quad_size
+                    * ((self.age as f32 + partial) / self.lifetime as f32 * 0.75).clamp(0.0, 1.0)
+            }
             Kind::Smoke | Kind::Crit | Kind::DragonBreath => {
                 self.quad_size
                     * ((self.age as f32 + partial) / self.lifetime as f32 * 32.0).clamp(0.0, 1.0)
@@ -716,6 +880,11 @@ impl Particle {
                 let s = (self.age as f32 + partial) / self.lifetime as f32;
                 let s = 1.0 - s;
                 self.quad_size * (1.0 - s * s)
+            }
+            // VANILLA: FireworkParticles.OverlayParticle#getQuadSize.
+            Kind::Flash => {
+                // Отрицательный размер = квад, повёрнутый на 180°, как в ванили.
+                7.1 * ((self.age as f32 + partial - 1.0) * 0.25 * std::f32::consts::PI).sin()
             }
             _ => self.quad_size,
         }
@@ -766,6 +935,8 @@ pub struct ParticleEngine {
     seeds: Vec<([f64; 3], i32)>,
     /// ClientExplosionTracker: ожидающие взрывы.
     explosions: Vec<ExplosionInfo>,
+    /// FireworkParticles.Starter (NoRenderParticle) в работе.
+    starters: Vec<Starter>,
 }
 
 /// VANILLA: ClientExplosionTracker.ExplosionInfo; частицы — (имя, scaling, speed, weight).
@@ -787,6 +958,7 @@ impl ParticleEngine {
             status: 0,
             seeds: Vec::new(),
             explosions: Vec::new(),
+            starters: Vec::new(),
         }
     }
 
@@ -801,6 +973,10 @@ impl ParticleEngine {
     }
 
     #[allow(dead_code)] // F3 `P:` — отладочный экран (TODO-155)
+    pub fn starter_count(&self) -> usize {
+        self.starters.len()
+    }
+
     pub fn count(&self) -> usize {
         self.list.len()
     }
@@ -822,11 +998,15 @@ impl ParticleEngine {
     }
 
     /// VANILLA: ParticleEngine#tick — тик всех частиц, удаление мёртвых.
-    pub fn tick(&mut self, level: &Level) {
+    pub fn tick(&mut self, level: &Level, cam: [f64; 3]) {
         let mut smokes = Vec::new();
         let mut drips = Vec::new();
+        let mut trails = Vec::new();
         for p in &mut self.list {
             p.tick(level);
+            if std::mem::take(&mut p.pending_trail) {
+                trails.push((p.x, p.y, p.z, p.rgb, p.fade, p.twinkle));
+            }
             if let Some(s) = p.pending_smoke.take() {
                 smokes.push(s);
             }
@@ -844,6 +1024,10 @@ impl ParticleEngine {
         for s in smokes {
             self.add_smoke(s[0], s[1], s[2], s[3], s[4], s[5]);
         }
+        for (x, y, z, rgb, fade, twinkle) in trails {
+            self.add_trail_spark(x, y, z, rgb, fade, twinkle);
+        }
+        self.tick_starters(cam);
         self.tick_explosions(level);
     }
 
@@ -991,6 +1175,11 @@ impl ParticleEngine {
 
     /// VANILLA: FlameParticle.Provider / RisingParticle#<init> (`name`: flame, soul_fire_flame, …).
     pub fn add_flame(&mut self, name: &str, x: f64, y: f64, z: f64) {
+        self.add_flame_v(name, x, y, z, [0.0; 3]);
+    }
+
+    /// VANILLA: RisingParticle (xd = xd*0.01 + xa) — пламя со скоростью.
+    pub fn add_flame_v(&mut self, name: &str, x: f64, y: f64, z: f64, v: [f64; 3]) {
         if !self.allow() {
             return;
         }
@@ -1000,11 +1189,15 @@ impl ParticleEngine {
         let seed = self.seed();
         let mut p = Particle::with_speed(Kind::Flame, x, y, z, 0.0, 0.0, 0.0, seed);
         p.sprite = set[p.rng.next_int_bound(set.len() as i32) as usize];
+        if name == "small_flame" {
+            // VANILLA: FlameParticle.SmallFlameProvider — scale(0.5).
+            p.quad_size *= 0.5;
+        }
         p.has_physics = false;
         p.friction = 0.96;
-        p.xd *= f64::from(0.01_f32);
-        p.yd *= f64::from(0.01_f32);
-        p.zd *= f64::from(0.01_f32);
+        p.xd = p.xd * f64::from(0.01_f32) + v[0];
+        p.yd = p.yd * f64::from(0.01_f32) + v[1];
+        p.zd = p.zd * f64::from(0.01_f32) + v[2];
         let r = &mut p.rng;
         p.x += f64::from((r.next_float() - r.next_float()) * 0.05);
         p.y += f64::from((r.next_float() - r.next_float()) * 0.05);
@@ -1015,6 +1208,338 @@ impl ParticleEngine {
         p.xo = px;
         p.yo = py;
         p.zo = pz;
+        self.add(p);
+    }
+
+    /// VANILLA: SculkChargePopParticle.Provider (без физики, friction 0.96, lifetime 6..9).
+    pub fn add_sculk_pop(&mut self, x: f64, y: f64, z: f64, v: [f64; 3]) {
+        if !self.allow() {
+            return;
+        }
+        let Some(set) = self.sets.get("sculk_charge_pop").cloned() else {
+            return;
+        };
+        let seed = self.seed();
+        let mut p = Particle::with_speed(Kind::Sculk, x, y, z, v[0], v[1], v[2], seed);
+        p.xd = v[0];
+        p.yd = v[1];
+        p.zd = v[2];
+        p.friction = 0.96;
+        p.has_physics = false;
+        p.gravity = 0.0;
+        p.lifetime = p.rng.next_int_bound(4) + 6;
+        p.set = Some(set);
+        p.sprite_from_age();
+        self.add(p);
+    }
+
+    /// VANILLA: SculkChargeParticle.Provider (scale 1.5, lifetime nextInt(12)+8, roll).
+    pub fn add_sculk_charge(&mut self, x: f64, y: f64, z: f64, v: [f64; 3], roll: f32) {
+        if !self.allow() {
+            return;
+        }
+        let Some(set) = self.sets.get("sculk_charge").cloned() else {
+            return;
+        };
+        let seed = self.seed();
+        let mut p = Particle::with_speed(Kind::Sculk, x, y, z, v[0], v[1], v[2], seed);
+        p.xd = v[0];
+        p.yd = v[1];
+        p.zd = v[2];
+        p.friction = 0.96;
+        p.has_physics = false;
+        p.gravity = 0.0;
+        p.quad_size *= 1.5;
+        p.roll = roll;
+        p.lifetime = p.rng.next_int_bound(12) + 8;
+        p.set = Some(set);
+        p.sprite_from_age();
+        self.add(p);
+    }
+
+    /// VANILLA: LevelEventHandler 3006 (count > 0): звук + sculk_charge по граням.
+    pub fn sculk_charge(&mut self, pos: [i32; 3], data: i32) {
+        let count = data >> 6;
+        let (cx, cy, cz) = (
+            f64::from(pos[0]) + 0.5,
+            f64::from(pos[1]) + 0.5,
+            f64::from(pos[2]) + 0.5,
+        );
+        if self.rng.next_float() < 0.3 + count as f32 * 0.1 {
+            let c = count as f32;
+            let vol = 0.15 + 0.02 * c * c * self.rng.next_float();
+            let pitch = 0.4 + 0.3 * c * self.rng.next_float();
+            crate::audio::play_at(
+                "block.sculk.charge",
+                crate::audio::Cat::Blocks,
+                cx,
+                cy,
+                cz,
+                vol,
+                pitch,
+            );
+        }
+        let bits = data & 63;
+        // Direction.values(): DOWN, UP, NORTH, SOUTH, WEST, EAST
+        let dirs = [
+            [0, -1, 0],
+            [0, 1, 0],
+            [0, 0, -1],
+            [0, 0, 1],
+            [-1, 0, 0],
+            [1, 0, 0],
+        ];
+        for (i, step) in dirs.into_iter().enumerate() {
+            let (roll, factor) = if bits == 0 {
+                (
+                    if i == 0 { std::f32::consts::PI } else { 0.0 },
+                    if i < 2 { 0.65 } else { 0.57 },
+                )
+            } else if bits & (1 << i) != 0 {
+                (if i == 1 { std::f32::consts::PI } else { 0.0 }, 0.35)
+            } else {
+                continue;
+            };
+            let n = self.rng.next_int_bound(count + 1);
+            for _ in 0..n {
+                let mut sp = [0.0; 3];
+                for s in &mut sp {
+                    *s = (self.rng.next_double() * 2.0 - 1.0) * f64::from(0.005_f32);
+                }
+                let c = [cx, cy, cz];
+                let mut q = [0.0; 3];
+                let mut v = [0.0; 3];
+                for a in 0..3 {
+                    if step[a] == 0 {
+                        q[a] = c[a] + (self.rng.next_double() - 0.5);
+                        v[a] = sp[a];
+                    } else {
+                        q[a] = c[a] + f64::from(step[a]) * factor;
+                    }
+                }
+                self.add_sculk_charge(q[0], q[1], q[2], v, roll);
+            }
+        }
+    }
+
+    /// VANILLA: TrialSpawnerDetectionParticle.Provider (scale 1.5).
+    pub fn add_trial_detect(&mut self, x: f64, y: f64, z: f64) {
+        if !self.allow() {
+            return;
+        }
+        let Some(set) = self.sets.get("trial_spawner_detection").cloned() else {
+            return;
+        };
+        let seed = self.seed();
+        let mut p = Particle::with_speed(Kind::Smoke, x, y, z, 0.0, 0.0, 0.0, seed);
+        p.friction = 0.96;
+        p.gravity = -0.1;
+        p.speed_up_blocked = true;
+        p.xd *= 0.0;
+        p.yd *= 0.9;
+        p.zd *= 0.0;
+        p.quad_size *= 0.75 * 1.5;
+        let r = 0.5 + p.rng.next_float() * 0.5;
+        p.lifetime = ((8.0 / r * 1.5) as i32).max(1);
+        p.has_physics = true;
+        p.set = Some(set);
+        p.sprite_from_age();
+        self.add(p);
+    }
+
+    /// VANILLA: LevelEventHandler 3007 → ShriekParticle.Provider (delay = i*5).
+    pub fn add_shriek(&mut self, x: f64, y: f64, z: f64, delay: i32) {
+        if !self.allow() {
+            return;
+        }
+        let Some(set) = self.sets.get("shriek").cloned() else {
+            return;
+        };
+        let seed = self.seed();
+        let mut p = Particle::with_speed(Kind::Shriek, x, y, z, 0.0, 0.0, 0.0, seed);
+        p.sprite = set[p.rng.next_int_bound(set.len() as i32) as usize];
+        p.quad_size = 0.85;
+        p.delay = delay;
+        p.lifetime = 30;
+        p.gravity = 0.0;
+        p.xd = 0.0;
+        p.yd = 0.1;
+        p.zd = 0.0;
+        self.add(p);
+    }
+
+    /// VANILLA: TrialSpawner#addSpawnParticles (20× smoke + flame).
+    fn trial_spawn(&mut self, pos: [i32; 3], flame: &str) {
+        for _ in 0..20 {
+            let x = f64::from(pos[0]) + 0.5 + (self.rng.next_double() - 0.5) * 2.0;
+            let y = f64::from(pos[1]) + 0.5 + (self.rng.next_double() - 0.5) * 2.0;
+            let z = f64::from(pos[2]) + 0.5 + (self.rng.next_double() - 0.5) * 2.0;
+            self.add_smoke(x, y, z, 0.0, 0.0, 0.0);
+            self.add_flame(flame, x, y, z);
+        }
+    }
+
+    /// VANILLA: TrialSpawner#addEjectItemParticles (20× small_flame + smoke).
+    fn trial_eject(&mut self, pos: [i32; 3]) {
+        for _ in 0..20 {
+            let x = f64::from(pos[0]) + 0.4 + self.rng.next_double() * 0.2;
+            let y = f64::from(pos[1]) + 0.4 + self.rng.next_double() * 0.2;
+            let z = f64::from(pos[2]) + 0.4 + self.rng.next_double() * 0.2;
+            let (xa, ya, za) = (
+                self.rng.next_gaussian() * 0.02,
+                self.rng.next_gaussian() * 0.02,
+                self.rng.next_gaussian() * 0.02,
+            );
+            self.add_flame_v("small_flame", x, y, z, [xa, ya, za * 0.25]);
+            self.add_smoke(x, y, z, xa, ya, za);
+        }
+    }
+
+    /// VANILLA: ParticleUtils#spawnSmashAttackParticles (dust_pillar по блоку под ударом).
+    pub fn smash(
+        &mut self,
+        pos: BlockPos,
+        state: BlockState,
+        count: i32,
+        look: &mut dyn FnMut(BlockState, BlockPos) -> Option<TerrainLook>,
+    ) {
+        if !spawns_terrain_particles(state) {
+            return;
+        }
+        let Some(l) = look(state, pos) else {
+            return;
+        };
+        let c = [
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y) + 1.0,
+            f64::from(pos.z) + 0.5,
+        ];
+        let n1 = (count as f32 / 3.0).ceil() as i32;
+        let n2 = (count as f32 / 1.5).ceil() as i32;
+        let f02 = f64::from(0.2_f32);
+        let f005 = f64::from(0.05_f32);
+        for i in 0..(n1 + n2) {
+            let (x, z, k) = if i < n1 {
+                (
+                    c[0] + self.rng.next_gaussian() / 2.0,
+                    c[2] + self.rng.next_gaussian() / 2.0,
+                    f02,
+                )
+            } else {
+                let j = f64::from(i - n1);
+                (
+                    c[0] + 3.5 * j.cos() + self.rng.next_gaussian() / 2.0,
+                    c[2] + 3.5 * j.sin() + self.rng.next_gaussian() / 2.0,
+                    f005,
+                )
+            };
+            let (xd, yd, zd) = (
+                self.rng.next_gaussian() * k,
+                self.rng.next_gaussian() * k,
+                self.rng.next_gaussian() * k,
+            );
+            self.add_terrain(x, c[1], z, xd, yd, zd, l);
+            // DustPillarProvider: setParticleSpeed + lifetime.
+            if let Some(p) = self.list.back_mut() {
+                p.xd = p.rng.next_gaussian() / 30.0;
+                p.yd = yd + p.rng.next_gaussian() / 2.0;
+                p.zd = p.rng.next_gaussian() / 30.0;
+                p.lifetime = p.rng.next_int_bound(20) + 20;
+            }
+        }
+    }
+
+    /// VANILLA: LevelEventHandler case 3006 (count == 0): sculk_charge_pop.
+    pub fn sculk_pop(&mut self, pos: [i32; 3], solid: bool) {
+        let (n, spread) = if solid {
+            (40, 0.45_f32)
+        } else {
+            (20, 0.25_f32)
+        };
+        for _ in 0..n {
+            let v = [
+                2.0 * self.rng.next_float() - 1.0,
+                2.0 * self.rng.next_float() - 1.0,
+                2.0 * self.rng.next_float() - 1.0,
+            ];
+            let sp = f64::from(spread);
+            self.add_sculk_pop(
+                f64::from(pos[0]) + 0.5 + f64::from(v[0]) * sp,
+                f64::from(pos[1]) + 0.5 + f64::from(v[1]) * sp,
+                f64::from(pos[2]) + 0.5 + f64::from(v[2]) * sp,
+                [
+                    f64::from(v[0] * 0.07),
+                    f64::from(v[1] * 0.07),
+                    f64::from(v[2] * 0.07),
+                ],
+            );
+        }
+    }
+
+    /// VANILLA: SuspendedTownParticle.EggCrackProvider (без физики, friction 0.99).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_egg_crack(&mut self, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+        if !self.allow() {
+            return;
+        }
+        let Some(set) = self.sets.get("egg_crack").cloned() else {
+            return;
+        };
+        let seed = self.seed();
+        let mut p = Particle::with_speed(Kind::Smoke, x, y, z, xa, ya, za, seed);
+        p.sprite = set[p.rng.next_int_bound(set.len() as i32) as usize];
+        let br = p.rng.next_float() * 0.1 + 0.2;
+        let _ = br; // setColor(1,1,1) из провайдера перекрывает серый
+        p.rgb = [1.0; 3];
+        p.set_size(0.02, 0.02);
+        p.quad_size *= p.rng.next_float() * 0.6 + 0.5;
+        p.xd *= f64::from(0.02_f32);
+        p.yd *= f64::from(0.02_f32);
+        p.zd *= f64::from(0.02_f32);
+        p.lifetime = (20.0 / (f64::from(p.rng.next_float()) * 0.8 + 0.2)) as i32;
+        p.has_physics = false;
+        p.friction = 0.99;
+        p.gravity = 0.0;
+        self.add(p);
+    }
+
+    /// VANILLA: LevelEventHandler#singleBlockTeleportationParticles (portal вдоль линии to→pos).
+    fn block_teleport(&mut self, pos: [i32; 3], data: i32, rad: [i32; 3]) {
+        let to = [
+            f64::from(pos[0] + ((data >> 16) & 0xFF) - rad[0]),
+            f64::from(pos[1] + ((data >> 8) & 0xFF) - rad[1]),
+            f64::from(pos[2] + (data & 0xFF) - rad[2]),
+        ];
+        let from = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
+        for _ in 0..128 {
+            let d = self.rng.next_double();
+            let xa = f64::from((self.rng.next_float() - 0.5) * 0.2);
+            let ya = f64::from((self.rng.next_float() - 0.5) * 0.2);
+            let za = f64::from((self.rng.next_float() - 0.5) * 0.2);
+            let x = to[0] + (from[0] - to[0]) * d + (self.rng.next_double() - 0.5) + 0.5;
+            let y = to[1] + (from[1] - to[1]) * d + self.rng.next_double() - 0.5;
+            let z = to[2] + (from[2] - to[2]) * d + (self.rng.next_double() - 0.5) + 0.5;
+            self.add_portal(x, y, z, xa, ya, za);
+        }
+    }
+
+    /// VANILLA: SuspendedParticle.UnderwaterProvider (SuspendedParticle#<init>, без физики).
+    pub fn add_underwater(&mut self, x: f64, y: f64, z: f64) {
+        if !self.allow() {
+            return;
+        }
+        let Some(set) = self.sets.get("underwater").cloned() else {
+            return;
+        };
+        let seed = self.seed();
+        let mut p = Particle::with_speed(Kind::Smoke, x, y - 0.125, z, 0.0, 0.0, 0.0, seed);
+        p.sprite = set[p.rng.next_int_bound(set.len() as i32) as usize];
+        p.set_size(0.01, 0.01);
+        p.quad_size *= p.rng.next_float() * 0.6 + 0.2;
+        p.lifetime = (16.0 / (f64::from(p.rng.next_float()) * 0.8 + 0.2)) as i32;
+        p.has_physics = false;
+        p.friction = 1.0;
+        p.gravity = 0.0;
         self.add(p);
     }
 
@@ -1076,12 +1601,51 @@ impl ParticleEngine {
                     let py = if wall { py + 0.22 } else { py };
                     self.add_smoke(px, py, pz, 0.0, 0.0, 0.0);
                     self.add_flame(flame, px, py, pz);
+                } else if name == "pointed_dripstone" {
+                    // VANILLA: PointedDripstoneBlock#animateTick
+                    if free_hanging_stalactite(st) {
+                        let rv = self.rng.next_float();
+                        if rv <= 0.12 {
+                            if let Some((fluid, above)) = fluid_above_stalactite(level, x, y, z) {
+                                if rv < 0.02 || fluid != DripFluid::Empty {
+                                    self.drip_from_stalactite(level, x, y, z, fluid, above);
+                                }
+                            }
+                        }
+                    }
                 } else if name == "lava" {
-                    // VANILLA: LavaFluid#animateTick (звук — после аудио)
+                    // VANILLA: LavaFluid#animateTick (lava_pop + звуки lava.pop / lava.ambient)
                     let above = level.chunks.block(x, y + 1, z);
-                    if above.is_air() && self.rng.next_int_bound(100) == 0 {
-                        let (lx, lz) = (fx + self.rng.next_double(), fz + self.rng.next_double());
-                        self.add_lava(lx, fy + 1.0, lz);
+                    if above.is_air() {
+                        if self.rng.next_int_bound(100) == 0 {
+                            let (lx, lz) =
+                                (fx + self.rng.next_double(), fz + self.rng.next_double());
+                            self.add_lava(lx, fy + 1.0, lz);
+                            let vol = 0.2 + self.rng.next_float() * 0.2;
+                            let pit = 0.9 + self.rng.next_float() * 0.15;
+                            crate::audio::play_at(
+                                "block.lava.pop",
+                                crate::audio::Cat::Ambient,
+                                lx,
+                                fy + 1.0,
+                                lz,
+                                vol,
+                                pit,
+                            );
+                        }
+                        if self.rng.next_int_bound(200) == 0 {
+                            let vol = 0.2 + self.rng.next_float() * 0.2;
+                            let pit = 0.9 + self.rng.next_float() * 0.15;
+                            crate::audio::play_at(
+                                "block.lava.ambient",
+                                crate::audio::Cat::Ambient,
+                                fx,
+                                fy,
+                                fz,
+                                vol,
+                                pit,
+                            );
+                        }
                     }
                 } else if (name == "redstone_torch" || name == "redstone_wall_torch")
                     && st.property("lit") == Some("true")
@@ -1177,15 +1741,230 @@ impl ParticleEngine {
                     self.fire_tick(level, name == "soul_fire", x, y, z);
                 } else if (name == "campfire" || name == "soul_campfire")
                     && st.property("lit") == Some("true")
-                    && self.rng.next_int_bound(5) == 0
                 {
-                    // VANILLA: CampfireBlock#animateTick (звук — после аудио; дым — block entity)
-                    for _ in 0..(self.rng.next_int_bound(1) + 1) {
-                        self.add_lava(fx + 0.5, fy + 0.5, fz + 0.5);
+                    // VANILLA: CampfireBlock#animateTick (звук 1/10, искры 1/5).
+                    if self.rng.next_int_bound(10) == 0 {
+                        let vol = 0.5 + self.rng.next_float();
+                        let pit = self.rng.next_float() * 0.7 + 0.6;
+                        crate::audio::play_at(
+                            "block.campfire.crackle",
+                            crate::audio::Cat::Blocks,
+                            fx + 0.5,
+                            fy + 0.5,
+                            fz + 0.5,
+                            vol,
+                            pit,
+                        );
+                    }
+                    if self.rng.next_int_bound(5) == 0 {
+                        for _ in 0..(self.rng.next_int_bound(1) + 1) {
+                            self.add_lava(fx + 0.5, fy + 0.5, fz + 0.5);
+                        }
+                    }
+                } else if name == "ender_chest" {
+                    // VANILLA: EnderChestBlock#animateTick (3 частицы portal вокруг сундука).
+                    for _ in 0..3 {
+                        let flip_x = f64::from(self.rng.next_int_bound(2) * 2 - 1);
+                        let flip_z = f64::from(self.rng.next_int_bound(2) * 2 - 1);
+                        let px = fx + 0.5 + 0.25 * flip_x;
+                        let py = fy + f64::from(self.rng.next_float());
+                        let pz = fz + 0.5 + 0.25 * flip_z;
+                        let xa = f64::from(self.rng.next_float()) * flip_x;
+                        let ya = (f64::from(self.rng.next_float()) - 0.5) * 0.125;
+                        let za = f64::from(self.rng.next_float()) * flip_z;
+                        self.add_portal(px, py, pz, xa, ya, za);
+                    }
+                } else if name == "nether_portal" {
+                    // VANILLA: NetherPortalBlock#animateTick (звук 1/100 + 4 частицы portal).
+                    if self.rng.next_int_bound(100) == 0 {
+                        let pit = self.rng.next_float() * 0.4 + 0.8;
+                        crate::audio::play_at(
+                            "block.portal.ambient",
+                            crate::audio::Cat::Blocks,
+                            fx + 0.5,
+                            fy + 0.5,
+                            fz + 0.5,
+                            0.5,
+                            pit,
+                        );
+                    }
+                    let x_axis = level.chunks.block(x - 1, y, z).name() == "nether_portal"
+                        || level.chunks.block(x + 1, y, z).name() == "nether_portal";
+                    for _ in 0..4 {
+                        let mut px = fx + self.rng.next_double();
+                        let py = fy + self.rng.next_double();
+                        let mut pz = fz + self.rng.next_double();
+                        let mut xa = (f64::from(self.rng.next_float()) - 0.5) * 0.5;
+                        let ya = (f64::from(self.rng.next_float()) - 0.5) * 0.5;
+                        let mut za = (f64::from(self.rng.next_float()) - 0.5) * 0.5;
+                        let flip = f64::from(self.rng.next_int_bound(2) * 2 - 1);
+                        if x_axis {
+                            pz = fz + 0.5 + 0.25 * flip;
+                            za = f64::from(self.rng.next_float() * 2.0) * flip;
+                        } else {
+                            px = fx + 0.5 + 0.25 * flip;
+                            xa = f64::from(self.rng.next_float() * 2.0) * flip;
+                        }
+                        self.add_portal(px, py, pz, xa, ya, za);
+                    }
+                } else if matches!(name, "furnace" | "blast_furnace" | "smoker")
+                    && st.property("lit") == Some("true")
+                {
+                    // VANILLA: FurnaceBlock / BlastFurnaceBlock / SmokerBlock#animateTick.
+                    if self.rng.next_double() < 0.1 {
+                        let ev = match name {
+                            "blast_furnace" => "block.blastfurnace.fire_crackle",
+                            "smoker" => "block.smoker.smoke",
+                            _ => "block.furnace.fire_crackle",
+                        };
+                        crate::audio::play_at(
+                            ev,
+                            crate::audio::Cat::Blocks,
+                            fx + 0.5,
+                            fy,
+                            fz + 0.5,
+                            1.0,
+                            1.0,
+                        );
+                    }
+                    if name == "smoker" {
+                        self.add_smoke(fx + 0.5, fy + 1.1, fz + 0.5, 0.0, 0.0, 0.0);
+                    } else {
+                        let ss = self.rng.next_double() * 0.6 - 0.3;
+                        let (dx, dz) = match st.property("facing") {
+                            Some("west") => (-0.52, ss),
+                            Some("east") => (0.52, ss),
+                            Some("north") => (ss, -0.52),
+                            Some("south") => (ss, 0.52),
+                            _ => (ss, 0.52),
+                        };
+                        let dy_max = if name == "blast_furnace" { 9.0 } else { 6.0 };
+                        let dy = self.rng.next_double() * dy_max / 16.0;
+                        let (px, py, pz) = (fx + 0.5 + dx, fy + dy, fz + 0.5 + dz);
+                        self.add_smoke(px, py, pz, 0.0, 0.0, 0.0);
+                        if name == "furnace" {
+                            self.add_flame("flame", px, py, pz);
+                        }
+                    }
+                } else if name == "brewing_stand" {
+                    // VANILLA: BrewingStandBlock#animateTick.
+                    let px = fx + 0.4 + f64::from(self.rng.next_float()) * 0.2;
+                    let py = fy + 0.7 + f64::from(self.rng.next_float()) * 0.3;
+                    let pz = fz + 0.4 + f64::from(self.rng.next_float()) * 0.2;
+                    self.add_smoke(px, py, pz, 0.0, 0.0, 0.0);
+                } else if name == "end_portal" {
+                    // VANILLA: EndPortalBlock#animateTick.
+                    let px = fx + self.rng.next_double();
+                    let pz = fz + self.rng.next_double();
+                    self.add_smoke(px, fy + 0.8, pz, 0.0, 0.0, 0.0);
+                } else if name == "end_gateway" {
+                    // VANILLA: EndGatewayBlock#animateTick (1 частица portal; без BE getParticleAmount).
+                    let mut px = fx + self.rng.next_double();
+                    let py = fy + self.rng.next_double();
+                    let mut pz = fz + self.rng.next_double();
+                    let mut xa = (self.rng.next_double() - 0.5) * 0.5;
+                    let ya = (self.rng.next_double() - 0.5) * 0.5;
+                    let mut za = (self.rng.next_double() - 0.5) * 0.5;
+                    let flip = f64::from(self.rng.next_int_bound(2) * 2 - 1);
+                    if self.rng.next_boolean() {
+                        pz = fz + 0.5 + 0.25 * flip;
+                        za = f64::from(self.rng.next_float() * 2.0) * flip;
+                    } else {
+                        px = fx + 0.5 + 0.25 * flip;
+                        xa = f64::from(self.rng.next_float() * 2.0) * flip;
+                    }
+                    self.add_portal(px, py, pz, xa, ya, za);
+                } else if name == "bubble_column" {
+                    // VANILLA: BubbleColumnBlock#animateTick.
+                    if st.property("drag") == Some("true") {
+                        self.add_named_bubble(
+                            "current_down",
+                            fx + 0.5,
+                            fy + 0.8,
+                            fz,
+                            0.0,
+                            0.0,
+                            0.0,
+                        );
+                        if self.rng.next_int_bound(200) == 0 {
+                            let vol = 0.2 + self.rng.next_float() * 0.2;
+                            let pit = 0.9 + self.rng.next_float() * 0.15;
+                            crate::audio::play_at(
+                                "block.bubble_column.whirlpool_ambient",
+                                crate::audio::Cat::Blocks,
+                                fx,
+                                fy,
+                                fz,
+                                vol,
+                                pit,
+                            );
+                        }
+                    } else {
+                        self.add_named_bubble(
+                            "bubble_column_up",
+                            fx + 0.5,
+                            fy,
+                            fz + 0.5,
+                            0.0,
+                            0.04,
+                            0.0,
+                        );
+                        let (rx, ry, rz) = (
+                            f64::from(self.rng.next_float()),
+                            f64::from(self.rng.next_float()),
+                            f64::from(self.rng.next_float()),
+                        );
+                        self.add_named_bubble(
+                            "bubble_column_up",
+                            fx + rx,
+                            fy + ry,
+                            fz + rz,
+                            0.0,
+                            0.04,
+                            0.0,
+                        );
+                        if self.rng.next_int_bound(200) == 0 {
+                            let vol = 0.2 + self.rng.next_float() * 0.2;
+                            let pit = 0.9 + self.rng.next_float() * 0.15;
+                            crate::audio::play_at(
+                                "block.bubble_column.upwards_ambient",
+                                crate::audio::Cat::Blocks,
+                                fx,
+                                fy,
+                                fz,
+                                vol,
+                                pit,
+                            );
+                        }
                     }
                 }
                 // VANILLA: ClientLevel#doAnimateTick — капли жидкости
                 if let Some(fl) = blockinfo::fluid(st) {
+                    if !fl.lava {
+                        // VANILLA: WaterFluid#animateTick (течение: water.ambient 1/64; иначе underwater 1/10).
+                        if !fl.source && !fl.falling {
+                            if self.rng.next_int_bound(64) == 0 {
+                                let vol = self.rng.next_float() * 0.25 + 0.75;
+                                let pit = self.rng.next_float() + 0.5;
+                                crate::audio::play_at(
+                                    "block.water.ambient",
+                                    crate::audio::Cat::Ambient,
+                                    fx + 0.5,
+                                    fy + 0.5,
+                                    fz + 0.5,
+                                    vol,
+                                    pit,
+                                );
+                            }
+                        } else if self.rng.next_int_bound(10) == 0 {
+                            let (ux, uy, uz) = (
+                                fx + self.rng.next_double(),
+                                fy + self.rng.next_double(),
+                                fz + self.rng.next_double(),
+                            );
+                            self.add_underwater(ux, uy, uz);
+                        }
+                    }
                     if self.rng.next_int_bound(10) == 0 {
                         let stage = if fl.lava {
                             Stage::HangLava
@@ -1198,6 +1977,49 @@ impl ParticleEngine {
                     }
                 }
             }
+        }
+    }
+
+    /// VANILLA: PointedDripstoneBlock#spawnDripParticle (данные: фактический блок над корнем).
+    fn drip_from_stalactite(
+        &mut self,
+        level: &Level,
+        x: i32,
+        y: i32,
+        z: i32,
+        fluid: DripFluid,
+        above: [i32; 3],
+    ) {
+        let st = level.chunks.block(x, y, z);
+        let off = blockinfo::block_offset(st, x, z);
+        let (px, py, pz) = (
+            f64::from(x) + 0.5 + f64::from(off[0]),
+            // STALACTITE_DRIP_START_PIXEL (5/16) − 1/16
+            f64::from(y) + 0.3125 - 0.0625,
+            f64::from(z) + 0.5 + f64::from(off[2]),
+        );
+        let lava = match fluid {
+            DripFluid::Lava => true,
+            DripFluid::Water => false,
+            // VANILLA-UNSURE: DEFAULT_DRIPSTONE_PARTICLE — в Нижнем мире lava, иначе water
+            DripFluid::Empty => level
+                .dimension
+                .as_ref()
+                .is_some_and(|d| d.has_ceiling && !d.has_skylight),
+        };
+        let _ = above;
+        let stage = if lava {
+            Stage::StoneHangLava
+        } else {
+            Stage::StoneHangWater
+        };
+        self.add_drip(stage, px, py, pz);
+    }
+
+    /// VANILLA: LevelEventHandler 1504 → PointedDripstoneBlock#spawnDripParticle.
+    pub fn stalactite_drip(&mut self, level: &Level, pos: [i32; 3]) {
+        if let Some((fluid, above)) = fluid_above_stalactite(level, pos[0], pos[1], pos[2]) {
+            self.drip_from_stalactite(level, pos[0], pos[1], pos[2], fluid, above);
         }
     }
 
@@ -1496,6 +2318,41 @@ impl ParticleEngine {
     }
 
     /// VANILLA: BubbleParticle#<init>.
+    /// VANILLA: BubbleColumnUpParticle / WaterCurrentDownParticle (упрощённо через Bubble).
+    pub fn add_named_bubble(
+        &mut self,
+        name: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+        xa: f64,
+        ya: f64,
+        za: f64,
+    ) {
+        if !self.allow() {
+            return;
+        }
+        let Some(set) = self
+            .sets
+            .get(name)
+            .or_else(|| self.sets.get("bubble"))
+            .cloned()
+        else {
+            return;
+        };
+        let seed = self.seed();
+        let mut p = Particle::base(Kind::Bubble, x, y, z, seed);
+        p.sprite = set[0];
+        p.set_size(0.02, 0.02);
+        p.quad_size =
+            0.1 * (p.rng.next_float() * 0.5 + 0.5) * 2.0 * (p.rng.next_float() * 0.6 + 0.2);
+        p.xd = xa;
+        p.yd = ya;
+        p.zd = za;
+        p.lifetime = (8.0 / (f64::from(p.rng.next_float()) * 0.8 + 0.2)) as i32;
+        self.add(p);
+    }
+
     pub fn add_bubble(&mut self, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
         if !self.allow() {
             return;
@@ -1746,20 +2603,20 @@ impl ParticleEngine {
         p.gravity = 0.06;
         p.drip = Some(stage);
         match stage {
-            Stage::HangWater => {
+            Stage::HangWater | Stage::StoneHangWater => {
                 p.gravity *= 0.02;
                 p.lifetime = 40;
                 p.rgb = [0.2, 0.3, 1.0];
             }
-            Stage::HangLava => {
+            Stage::HangLava | Stage::StoneHangLava => {
                 p.gravity *= 0.02;
                 p.lifetime = 40;
             }
-            Stage::FallWater => {
+            Stage::FallWater | Stage::StoneFallWater => {
                 p.lifetime = (64.0 / (f64::from(p.rng.next_float()) * 0.8 + 0.2)) as i32;
                 p.rgb = [0.2, 0.3, 1.0];
             }
-            Stage::FallLava => {
+            Stage::FallLava | Stage::StoneFallLava => {
                 p.lifetime = (64.0 / (f64::from(p.rng.next_float()) * 0.8 + 0.2)) as i32;
                 p.rgb = [1.0, 0.2857143, 0.083_333_336];
             }
@@ -1777,6 +2634,11 @@ impl ParticleEngine {
             return;
         }
         self.add_ash("smoke", 1.0, None, x, y, z, xa, ya, za);
+    }
+
+    /// Гаусс из генератора движка (для random.nextGaussian() сущностей).
+    pub fn gaussian(&mut self) -> f64 {
+        self.rng.next_gaussian()
     }
 
     pub fn rand3(&mut self) -> (f64, f64, f64) {
@@ -2027,6 +2889,472 @@ impl ParticleEngine {
         }
     }
 
+    /// Простая цветная частица из набора спрайтов `name` (для эффектов зелий, happy_villager, wax, cloud).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_tinted(
+        &mut self,
+        name: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+        xa: f64,
+        ya: f64,
+        za: f64,
+        rgb: [f32; 3],
+        gravity: f32,
+        lifetime: i32,
+    ) {
+        if !self.allow() {
+            return;
+        }
+        let Some(set) = self.sets.get(name).cloned() else {
+            return;
+        };
+        let seed = self.seed();
+        let mut p = Particle::base(Kind::Smoke, x, y, z, seed);
+        p.sprite = set[0];
+        p.set = Some(set);
+        p.xd = xa;
+        p.yd = ya;
+        p.zd = za;
+        p.rgb = rgb;
+        p.gravity = gravity;
+        p.friction = 0.96;
+        p.quad_size = 0.1 * (p.rng.next_float() * 0.5 + 0.5) * 2.0;
+        p.lifetime = lifetime.max(1);
+        p.sprite_from_age();
+        self.add(p);
+    }
+
+    /// VANILLA: GlowParticle.{ElectricSpark,Scrape,WaxOff,WaxOn}Provider — `aux` = xAux/yAux/zAux.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_glow_variant(&mut self, name: &str, x: f64, y: f64, z: f64, aux: [f64; 3]) {
+        if !self.allow() {
+            return;
+        }
+        let Some(set) = self.sets.get(name).cloned() else {
+            return;
+        };
+        let seed = self.seed();
+        let mut p = Particle::with_speed(Kind::Glow, x, y, z, 0.0, 0.0, 0.0, seed);
+        p.friction = 0.96;
+        p.speed_up_blocked = true;
+        p.quad_size *= 0.75;
+        p.has_physics = false;
+        let (rgb, speed, life) = match name {
+            "electric_spark" => (
+                [1.0, 0.9, 1.0],
+                [aux[0] * 0.25, aux[1] * 0.25, aux[2] * 0.25],
+                p.rng.next_int_bound(2) + 2,
+            ),
+            "scrape" => (
+                if p.rng.next_boolean() {
+                    [0.29, 0.58, 0.51]
+                } else {
+                    [0.43, 0.77, 0.62]
+                },
+                [aux[0] * 0.01, aux[1] * 0.01, aux[2] * 0.01],
+                p.rng.next_int_bound(30) + 10,
+            ),
+            _ => (
+                if name == "wax_on" {
+                    [0.91, 0.55, 0.08]
+                } else {
+                    [1.0, 0.9, 1.0]
+                },
+                [aux[0] * 0.01 / 2.0, aux[1] * 0.01, aux[2] * 0.01 / 2.0],
+                p.rng.next_int_bound(30) + 10,
+            ),
+        };
+        p.rgb = rgb;
+        p.xd = speed[0];
+        p.yd = speed[1];
+        p.zd = speed[2];
+        p.lifetime = life.max(1);
+        p.set = Some(set);
+        p.sprite_from_age();
+        self.add(p);
+    }
+
+    /// VANILLA: ParticleUtils#spawnParticlesOnBlockFaces (скорости getRandomSpeedRanges, step 0.55).
+    fn on_block_faces(&mut self, name: &str, pos: [i32; 3], lo: i32, hi: i32) {
+        let c = [
+            f64::from(pos[0]) + 0.5,
+            f64::from(pos[1]) + 0.5,
+            f64::from(pos[2]) + 0.5,
+        ];
+        // Direction.values(): DOWN, UP, NORTH, SOUTH, WEST, EAST
+        for step in [
+            [0, -1, 0],
+            [0, 1, 0],
+            [0, 0, -1],
+            [0, 0, 1],
+            [-1, 0, 0],
+            [1, 0, 0],
+        ] {
+            let n = lo + self.rng.next_int_bound(hi - lo + 1);
+            for _ in 0..n {
+                let sp = [
+                    self.rng.next_double() - 0.5,
+                    self.rng.next_double() - 0.5,
+                    self.rng.next_double() - 0.5,
+                ];
+                let mut q = [0.0; 3];
+                let mut v = [0.0; 3];
+                for a in 0..3 {
+                    if step[a] == 0 {
+                        q[a] = c[a] + (self.rng.next_double() - 0.5);
+                        v[a] = sp[a];
+                    } else {
+                        q[a] = c[a] + f64::from(step[a]) * 0.55;
+                    }
+                }
+                if name == "egg_crack" {
+                    self.add_egg_crack(q[0], q[1], q[2], v[0], v[1], v[2]);
+                } else {
+                    self.add_glow_variant(name, q[0], q[1], q[2], v);
+                }
+            }
+        }
+    }
+
+    /// VANILLA: ParticleUtils#spawnParticlesAlongAxis (radius 0.125, 10..19 искр).
+    fn along_axis(&mut self, name: &str, pos: [i32; 3], axis: usize) {
+        let c = [
+            f64::from(pos[0]) + 0.5,
+            f64::from(pos[1]) + 0.5,
+            f64::from(pos[2]) + 0.5,
+        ];
+        let n = 10 + self.rng.next_int_bound(10);
+        for _ in 0..n {
+            let mut q = [0.0; 3];
+            let mut v = [0.0; 3];
+            for a in 0..3 {
+                q[a] = c[a]
+                    + (self.rng.next_double() * 2.0 - 1.0) * if a == axis { 0.5 } else { 0.125 };
+            }
+            for (a, va) in v.iter_mut().enumerate() {
+                if a == axis {
+                    *va = self.rng.next_double() * 2.0 - 1.0;
+                }
+            }
+            self.add_glow_variant(name, q[0], q[1], q[2], v);
+        }
+    }
+
+    /// VANILLA: LevelEventHandler#levelEvent (26.3) — частицы событий мира.
+    pub fn level_event(&mut self, ty: i32, pos: [i32; 3], data: i32) {
+        let (fx, fy, fz) = (f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2]));
+        match ty {
+            2000 => self.shoot_smoke(data, pos[0], pos[1], pos[2]),
+            2010 => {
+                // VANILLA: LevelEventHandler#shootParticles(WHITE_SMOKE).
+                let (dx, dy, dz) = match data {
+                    0 => (0.0, -1.0, 0.0),
+                    1 => (0.0, 1.0, 0.0),
+                    2 => (0.0, 0.0, -1.0),
+                    3 => (0.0, 0.0, 1.0),
+                    4 => (-1.0, 0.0, 0.0),
+                    5 => (1.0, 0.0, 0.0),
+                    _ => (0.0, 0.0, 0.0),
+                };
+                for _ in 0..10 {
+                    let sp = self.rng.next_double() * 0.2 + 0.01;
+                    let (px, py, pz) = (
+                        fx + 0.5 + dx * 0.6 + (self.rng.next_double() - 0.5) * 0.3,
+                        fy + 0.5 + dy * 0.6 + (self.rng.next_double() - 0.5) * 0.3,
+                        fz + 0.5 + dz * 0.6 + (self.rng.next_double() - 0.5) * 0.3,
+                    );
+                    let (xa, ya, za) = (
+                        dx * sp + self.rng.next_gaussian() * 0.01,
+                        dy * sp + self.rng.next_gaussian() * 0.01,
+                        dz * sp + self.rng.next_gaussian() * 0.01,
+                    );
+                    self.add_ash(
+                        "white_smoke",
+                        1.0,
+                        Some([0.9, 0.9, 0.9]),
+                        px,
+                        py,
+                        pz,
+                        xa,
+                        ya,
+                        za,
+                    );
+                }
+            }
+            1500 => {
+                // VANILLA: ComposterBlock#handleFill — happy_villager сверху блока.
+                for _ in 0..10 {
+                    let px = fx + self.rng.next_double() * 0.75 + 0.125;
+                    let py = fy + 0.6 + self.rng.next_double() * 0.4;
+                    let pz = fz + self.rng.next_double() * 0.75 + 0.125;
+                    let (xa, ya, za) = (
+                        self.rng.next_gaussian() * 0.02,
+                        self.rng.next_gaussian() * 0.02,
+                        self.rng.next_gaussian() * 0.02,
+                    );
+                    self.add_tinted(
+                        "happy_villager",
+                        px,
+                        py,
+                        pz,
+                        xa,
+                        ya,
+                        za,
+                        [1.0, 1.0, 1.0],
+                        0.0,
+                        20,
+                    );
+                }
+            }
+            1501 => {
+                // VANILLA: LevelEventHandler case 1501 — шипение лавы (8× LARGE_SMOKE).
+                for _ in 0..8 {
+                    let px = fx + self.rng.next_double();
+                    let pz = fz + self.rng.next_double();
+                    self.add_ash("large_smoke", 2.5, None, px, fy + 1.2, pz, 0.0, 0.0, 0.0);
+                }
+            }
+            1502 => {
+                // VANILLA: LevelEventHandler case 1502 — перегорание редстоун-факела (5× SMOKE).
+                for _ in 0..5 {
+                    let px = fx + self.rng.next_double() * 0.6 + 0.2;
+                    let py = fy + self.rng.next_double() * 0.6 + 0.2;
+                    let pz = fz + self.rng.next_double() * 0.6 + 0.2;
+                    self.add_smoke(px, py, pz, 0.0, 0.0, 0.0);
+                }
+            }
+            1503 => {
+                // VANILLA: LevelEventHandler case 1503 — вставка Ока Эндера в рамку (16× SMOKE).
+                for _ in 0..16 {
+                    let px = fx + (5.0 + self.rng.next_double() * 6.0) / 16.0;
+                    let pz = fz + (5.0 + self.rng.next_double() * 6.0) / 16.0;
+                    self.add_smoke(px, fy + 0.8125, pz, 0.0, 0.0, 0.0);
+                }
+            }
+            1505 | 2011 | 2012 => {
+                // VANILLA: BoneMealItem#addGrowthParticles / ParticleUtils#spawnParticleInBlock.
+                let n = if data <= 0 { 15 } else { data.min(64) };
+                for _ in 0..n {
+                    let px = fx + self.rng.next_double();
+                    let py = fy + self.rng.next_double();
+                    let pz = fz + self.rng.next_double();
+                    let (xa, ya, za) = (
+                        self.rng.next_gaussian() * 0.02,
+                        self.rng.next_gaussian() * 0.02,
+                        self.rng.next_gaussian() * 0.02,
+                    );
+                    self.add_tinted(
+                        "happy_villager",
+                        px,
+                        py,
+                        pz,
+                        xa,
+                        ya,
+                        za,
+                        [1.0, 1.0, 1.0],
+                        0.0,
+                        20,
+                    );
+                }
+            }
+            2002 | 2007 => {
+                // VANILLA: LevelEventHandler#potionSplashParticles (EFFECT / INSTANT_EFFECT, RGB из data).
+                let sprite = if ty == 2007 {
+                    "instant_effect"
+                } else {
+                    "effect"
+                };
+                let r = ((data >> 16) & 0xFF) as f32 / 255.0;
+                let g = ((data >> 8) & 0xFF) as f32 / 255.0;
+                let b = (data & 0xFF) as f32 / 255.0;
+                let (cx, cy, cz) = (fx + 0.5, fy + 0.1, fz + 0.5);
+                for _ in 0..100 {
+                    let dist = self.rng.next_double() * 4.0;
+                    let ang = self.rng.next_double() * std::f64::consts::TAU;
+                    let xa = ang.cos() * dist;
+                    let ya = 0.01 + self.rng.next_double() * 0.5;
+                    let za = ang.sin() * dist;
+                    let k = 0.75 + self.rng.next_float() * 0.25;
+                    self.add_tinted(
+                        sprite,
+                        cx + xa * 0.1,
+                        cy + 0.3,
+                        cz + za * 0.1,
+                        xa * 0.1,
+                        ya * 0.1,
+                        za * 0.1,
+                        [r * k, g * k, b * k],
+                        -0.02,
+                        16,
+                    );
+                }
+            }
+            2003 => {
+                // VANILLA: LevelEventHandler case 2003 — кольцо portal при разрушении Ока Эндера.
+                let (cx, cy, cz) = (fx + 0.5, fy - 0.4, fz + 0.5);
+                let step = std::f64::consts::TAU / 40.0;
+                for i in 0..40 {
+                    let ang = i as f64 * step;
+                    let (ca, sa) = (ang.cos(), ang.sin());
+                    self.add_portal(cx + ca * 5.0, cy, cz + sa * 5.0, ca * -5.0, 0.0, sa * -5.0);
+                    self.add_portal(cx + ca * 5.0, cy, cz + sa * 5.0, ca * -7.0, 0.0, sa * -7.0);
+                }
+            }
+            2004 => {
+                // VANILLA: LevelEventHandler case 2004 — спавнер (20× SMOKE + FLAME).
+                for _ in 0..20 {
+                    let px = fx + 0.5 + (self.rng.next_double() - 0.5) * 2.0;
+                    let py = fy + 0.5 + (self.rng.next_double() - 0.5) * 2.0;
+                    let pz = fz + 0.5 + (self.rng.next_double() - 0.5) * 2.0;
+                    self.add_smoke(px, py, pz, 0.0, 0.0, 0.0);
+                    self.add_flame("flame", px, py, pz);
+                }
+            }
+            2006 => {
+                // VANILLA: LevelEventHandler case 2006 — взрыв шара дракона (200× DRAGON_BREATH).
+                for _ in 0..200 {
+                    let dist = f64::from(self.rng.next_float()) * 4.0;
+                    let ang = f64::from(self.rng.next_float()) * std::f64::consts::TAU;
+                    let xa = ang.cos() * dist;
+                    let ya = 0.01 + self.rng.next_double() * 0.5;
+                    let za = ang.sin() * dist;
+                    self.add_dragon_breath(fx + xa * 0.1, fy + 0.3, fz + za * 0.1, xa, ya, za);
+                }
+            }
+            2008 => self.add_huge(fx + 0.5, fy + 0.5, fz + 0.5, 1.0),
+            2009 => {
+                // VANILLA: LevelEventHandler case 2009 — испарение мокрой губки в Незере (8× CLOUD).
+                for _ in 0..8 {
+                    let px = fx + self.rng.next_double();
+                    let pz = fz + self.rng.next_double();
+                    self.add_tinted(
+                        "cloud",
+                        px,
+                        fy + 1.2,
+                        pz,
+                        0.0,
+                        0.0,
+                        0.0,
+                        [1.0, 1.0, 1.0],
+                        0.0,
+                        20,
+                    );
+                }
+            }
+            2018 => {
+                // VANILLA: LevelEventHandler case 2018 — телепорт эндермена (BlockUtil#unpackDifferenceInPosition).
+                let dx = ((data >> 16) & 0xFF) - 127;
+                let dy = ((data >> 8) & 0xFF) - 127;
+                let dz = (data & 0xFF) - 127;
+                let (tx, ty2, tz) = (fx + f64::from(dx), fy + f64::from(dy), fz + f64::from(dz));
+                for _ in 0..128 {
+                    let d = self.rng.next_double();
+                    let xa = f64::from((self.rng.next_float() - 0.5) * 0.2);
+                    let ya = f64::from((self.rng.next_float() - 0.5) * 0.2);
+                    let za = f64::from((self.rng.next_float() - 0.5) * 0.2);
+                    let px = tx + (fx - tx) * d + (self.rng.next_double() - 0.5) * 1.2;
+                    let py = ty2 + (fy - ty2) * d + self.rng.next_double() * 2.9;
+                    let pz = tz + (fz - tz) * d + (self.rng.next_double() - 0.5) * 1.2;
+                    self.add_portal(px, py, pz, xa, ya, za);
+                }
+            }
+            3000 => self.add_explosion_emitter(fx + 0.5, fy + 0.5, fz + 0.5),
+            3002 => {
+                // VANILLA: LevelEventHandler case 3002 (молния по оси / по граням).
+                if (0..3).contains(&data) {
+                    self.along_axis("electric_spark", pos, data as usize);
+                } else {
+                    self.on_block_faces("electric_spark", pos, 3, 5);
+                }
+            }
+            2015 => self.block_teleport(pos, data, [16, 8, 16]),
+            2016 => self.block_teleport(pos, data, [8, 8, 8]),
+            2017 => self.block_teleport(pos, data, [127, 127, 127]),
+            3009 => self.on_block_faces("egg_crack", pos, 3, 6),
+            3011 => self.trial_spawn(
+                pos,
+                if data == 1 {
+                    "soul_fire_flame"
+                } else {
+                    "flame"
+                },
+            ),
+            3012 => self.trial_spawn(
+                pos,
+                if data == 1 {
+                    "soul_fire_flame"
+                } else {
+                    "flame"
+                },
+            ),
+            3013 => {
+                // VANILLA: TrialSpawner#addDetectPlayerParticles.
+                let n = 30 + data.clamp(0, 10) * 5;
+                for _ in 0..n {
+                    let sx = f64::from(2.0 * self.rng.next_float() - 1.0) * 0.65;
+                    let sz = f64::from(2.0 * self.rng.next_float() - 1.0) * 0.65;
+                    let y = fy + 0.1 + f64::from(self.rng.next_float()) * 0.8;
+                    self.add_trial_detect(fx + 0.5 + sx, y, fz + 0.5 + sz);
+                }
+            }
+            3014 | 3017 => self.trial_eject(pos),
+            3015 => {
+                // VANILLA: VaultBlockEntity.Client#emitActivationParticles (без connection-частиц).
+                let flame = if data == 0 {
+                    "small_flame"
+                } else {
+                    "soul_fire_flame"
+                };
+                for _ in 0..20 {
+                    let x = fx + 0.1 + self.rng.next_double() * 0.8;
+                    let y = fy + 0.25 + self.rng.next_double() * 0.5;
+                    let z = fz + 0.1 + self.rng.next_double() * 0.8;
+                    self.add_smoke(x, y, z, 0.0, 0.0, 0.0);
+                    self.add_flame(flame, x, y, z);
+                }
+            }
+            3016 => {
+                // VANILLA: VaultBlockEntity.Client#emitDeactivationParticles.
+                let flame = if data == 0 {
+                    "small_flame"
+                } else {
+                    "soul_fire_flame"
+                };
+                for _ in 0..20 {
+                    let x = fx + 0.4 + self.rng.next_double() * 0.2;
+                    let y = fy + 0.4 + self.rng.next_double() * 0.2;
+                    let z = fz + 0.4 + self.rng.next_double() * 0.2;
+                    let v = [
+                        self.rng.next_gaussian() * 0.02,
+                        self.rng.next_gaussian() * 0.02,
+                        self.rng.next_gaussian() * 0.02,
+                    ];
+                    self.add_flame_v(flame, x, y, z, v);
+                }
+            }
+            3003 => self.on_block_faces("wax_on", pos, 3, 5),
+            3004 => self.on_block_faces("wax_off", pos, 3, 5),
+            3005 => self.on_block_faces("scrape", pos, 3, 5),
+            3018 => {
+                // VANILLA: LevelEventHandler case 3018 — 10× POOF (паутина/weaving).
+                for _ in 0..10 {
+                    let px = fx + self.rng.next_double();
+                    let py = fy + self.rng.next_double();
+                    let pz = fz + self.rng.next_double();
+                    let (xa, ya, za) = (
+                        self.rng.next_gaussian() * 0.02,
+                        self.rng.next_gaussian() * 0.02,
+                        self.rng.next_gaussian() * 0.02,
+                    );
+                    self.add_poof(px, py, pz, xa, ya, za);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// VANILLA: ClientPacketListener#handleParticleEvent. Поддержаны `block`, `rain`, `smoke`.
     pub fn handle_packet(
         &mut self,
@@ -2043,6 +3371,44 @@ impl ParticleEngine {
                 "end_rod" => e.add_end_rod(x, y, z, xa, ya, za),
                 // VANILLA: NoteParticle — xa = цвет (JukeboxSongPlayer#spawnMusicParticles).
                 "note" => e.add_note(x, y, z, xa),
+                "flame" | "soul_fire_flame" | "copper_fire_flame" => e.add_flame(p.name, x, y, z),
+                "large_smoke" => e.add_ash("large_smoke", 2.5, None, x, y, z, xa, ya, za),
+                "white_smoke" => e.add_ash(
+                    "white_smoke",
+                    1.0,
+                    Some([0.9, 0.9, 0.9]),
+                    x,
+                    y,
+                    z,
+                    xa,
+                    ya,
+                    za,
+                ),
+                "cloud" => e.add_tinted("cloud", x, y, z, xa, ya, za, [1.0, 1.0, 1.0], 0.0, 16),
+                "happy_villager" => e.add_tinted(
+                    "happy_villager",
+                    x,
+                    y,
+                    z,
+                    xa,
+                    ya,
+                    za,
+                    [1.0, 1.0, 1.0],
+                    0.0,
+                    20,
+                ),
+                "poof" => e.add_poof(x, y, z, xa, ya, za),
+                "crit" => e.add_crit(x, y, z, xa, ya, za),
+                "explosion" => e.add_huge(x, y, z, 1.0),
+                "explosion_emitter" => e.add_explosion_emitter(x, y, z),
+                "lava" => e.add_lava(x, y, z),
+                "bubble" => e.add_bubble(x, y, z, xa, ya, za),
+                "bubble_column_up" => e.add_named_bubble("bubble_column_up", x, y, z, xa, ya, za),
+                "splash" => e.add_splash(x, y, z, xa, ya, za),
+                "glow" => e.add_glow_squid(x, y, z),
+                "electric_spark" | "wax_on" | "wax_off" | "scrape" => {
+                    e.add_glow_variant(p.name, x, y, z, [xa, ya, za]);
+                }
                 "block" => {
                     if let Some(st) = p.block.and_then(BlockState::from_id) {
                         if spawns_terrain_particles(st) {
@@ -2188,8 +3554,54 @@ impl ParticleEngine {
         let mut out = Vec::with_capacity(self.list.len());
         let col = |f: f32| (f.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
         for p in &self.list {
+            // VANILLA: FireworkParticles.SparkParticle#extract — мерцание.
+            if p.twinkle && p.age >= p.lifetime / 3 && (p.age + p.lifetime) / 3 % 2 != 0 {
+                continue;
+            }
             let lerp = |a: f64, b: f64| a + f64::from(partial) * (b - a);
             let (u0, u1, v0, v1) = p.uv();
+            if p.kind == Kind::Shriek {
+                // VANILLA: ShriekParticle#extract — два повёрнутых квада, альфа убывает.
+                if p.delay > 0 {
+                    continue;
+                }
+                let alpha = 1.0 - ((p.age as f32 + partial) / p.lifetime as f32).clamp(0.0, 1.0);
+                // rotationX(-MAGICAL_X_ROT) и rotationYXZ(-π, MAGICAL_X_ROT, 0)
+                let (s, c) = (-SHRIEK_X_ROT).sin_cos();
+                let up1 = [0.0, c, s];
+                let (s2, c2) = SHRIEK_X_ROT.sin_cos();
+                let (sy, cy) = (-std::f32::consts::PI).sin_cos();
+                let rot_y = |v: [f32; 3]| [v[0] * cy + v[2] * sy, v[1], -v[0] * sy + v[2] * cy];
+                let right2 = rot_y([1.0, 0.0, 0.0]);
+                let up2 = rot_y([0.0, c2, s2]);
+                let pos = [
+                    (lerp(p.xo, p.x) - cam[0]) as f32,
+                    (lerp(p.yo, p.y) - cam[1]) as f32,
+                    (lerp(p.zo, p.z) - cam[2]) as f32,
+                ];
+                for axes in [([1.0, 0.0, 0.0], up1), (right2, up2)] {
+                    out.push(ParticleQuad {
+                        atlas: p.atlas,
+                        pos,
+                        size: p.quad_size(partial),
+                        u0,
+                        u1,
+                        v0,
+                        v1,
+                        color: [col(p.rgb[0]), col(p.rgb[1]), col(p.rgb[2]), col(alpha)],
+                        light: p.light(level, partial),
+                        axes: Some(axes),
+                        roll: 0.0,
+                    });
+                }
+                continue;
+            }
+            // VANILLA: OverlayParticle#extract — setAlpha(0.6 - (age + a - 1) * 0.25 * 0.5).
+            let alpha = if p.kind == Kind::Flash {
+                0.6 - (p.age as f32 + partial - 1.0) * 0.25 * 0.5
+            } else {
+                p.alpha
+            };
             out.push(ParticleQuad {
                 atlas: p.atlas,
                 pos: [
@@ -2202,12 +3614,406 @@ impl ParticleEngine {
                 u1,
                 v0,
                 v1,
-                color: [col(p.rgb[0]), col(p.rgb[1]), col(p.rgb[2]), col(p.alpha)],
+                color: [col(p.rgb[0]), col(p.rgb[1]), col(p.rgb[2]), col(alpha)],
                 light: p.light(level, partial),
+                axes: None,
+                roll: p.roll,
             });
         }
         self.last_extracted = out.len();
         out
+    }
+}
+
+/// VANILLA: ShriekParticle#MAGICAL_X_ROT (литерал 1.0472F, не π/3).
+#[allow(clippy::approx_constant)]
+const SHRIEK_X_ROT: f32 = 1.0472;
+
+/// VANILLA: FireworkExplosion.Shape (26.3), id по STREAM_CODEC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FireworkShape {
+    SmallBall,
+    LargeBall,
+    Star,
+    Creeper,
+    Burst,
+}
+
+impl FireworkShape {
+    /// VANILLA: FireworkExplosion.Shape#byId (ByIdMap.continuous, ZERO → SMALL_BALL).
+    pub fn by_id(id: i32) -> Self {
+        match id {
+            1 => FireworkShape::LargeBall,
+            2 => FireworkShape::Star,
+            3 => FireworkShape::Creeper,
+            4 => FireworkShape::Burst,
+            _ => FireworkShape::SmallBall,
+        }
+    }
+}
+
+/// VANILLA: FireworkExplosion — форма, цвета, цвета затухания, шлейф, мерцание.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FireworkSpec {
+    pub shape: FireworkShape,
+    pub colors: Vec<i32>,
+    pub fade_colors: Vec<i32>,
+    pub trail: bool,
+    pub twinkle: bool,
+}
+
+/// Список взрывов из компонента `fireworks` (Fireworks.STREAM_CODEC: VarInt flight_duration,
+/// List<FireworkExplosion> ≤ 256). Битые данные → пустой список (как отсутствие компонента).
+pub fn parse_fireworks(bytes: &[u8]) -> Vec<FireworkSpec> {
+    use ezzmc_protocol::wire::Reader;
+    fn color_list(r: &mut Reader) -> ezzmc_protocol::ProtocolResult<Vec<i32>> {
+        let n = r.length("firework colors", 1 << 16)?;
+        (0..n).map(|_| r.i32()).collect()
+    }
+    fn read(b: &[u8]) -> ezzmc_protocol::ProtocolResult<Vec<FireworkSpec>> {
+        let mut r = Reader::new(b);
+        r.var_int()?;
+        let n = r.length("firework explosions", 256)?;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let shape = FireworkShape::by_id(r.var_int()?);
+            let colors = color_list(&mut r)?;
+            let fade_colors = color_list(&mut r)?;
+            let trail = r.bool()?;
+            let twinkle = r.bool()?;
+            out.push(FireworkSpec {
+                shape,
+                colors,
+                fade_colors,
+                trail,
+                twinkle,
+            });
+        }
+        Ok(out)
+    }
+    read(bytes).unwrap_or_default()
+}
+
+/// VANILLA: FireworkParticles.Starter#STAR_PARTICLE_COORDS.
+const STAR_COORDS: &[[f64; 2]] = &[
+    [0.0, 1.0],
+    [0.3455, 0.309],
+    [0.9511, 0.309],
+    [0.379_591_836_734_693_9, -0.126_530_612_244_897_95],
+    [0.612_244_897_959_183_7, -0.804_081_632_653_061_2],
+    [0.0, -0.359_183_673_469_387_73],
+];
+
+/// VANILLA: FireworkParticles.Starter#CREEPER_PARTICLE_COORDS.
+const CREEPER_COORDS: &[[f64; 2]] = &[
+    [0.0, 0.2],
+    [0.2, 0.2],
+    [0.2, 0.6],
+    [0.6, 0.6],
+    [0.6, 0.2],
+    [0.2, 0.2],
+    [0.2, 0.0],
+    [0.4, 0.0],
+    [0.4, -0.6],
+    [0.2, -0.6],
+    [0.2, -0.4],
+    [0.0, -0.4],
+];
+
+/// VANILLA: DyeColor.BLACK.getFireworkColor().
+const BLACK_FIREWORK: i32 = 0x1E1B1B;
+
+fn rgb_i32(c: i32) -> [f32; 3] {
+    [
+        ((c >> 16) & 0xFF) as f32 / 255.0,
+        ((c >> 8) & 0xFF) as f32 / 255.0,
+        (c & 0xFF) as f32 / 255.0,
+    ]
+}
+
+/// VANILLA: FireworkParticles.Starter (NoRenderParticle): по одному взрыву каждые 2 тика.
+struct Starter {
+    pos: [f64; 3],
+    vel: [f64; 3],
+    life: i32,
+    lifetime: i32,
+    explosions: Vec<FireworkSpec>,
+    play_sound: bool,
+    twinkle_delay: bool,
+}
+
+/// Параметры одной искры от Starter#createParticle.
+#[derive(Clone, Copy)]
+struct SparkStyle<'a> {
+    colors: &'a [i32],
+    fade: &'a [i32],
+    trail: bool,
+    twinkle: bool,
+}
+
+impl ParticleEngine {
+    /// Новая SparkParticle: (lifetime, quadSize) из её собственного random.
+    /// VANILLA: SparkParticle(...) — SimpleAnimatedParticle(gravity 0.1, friction 0.91),
+    /// quadSize *= 0.75, lifetime 48 + nextInt(12), hasPhysics по умолчанию (true).
+    fn spark(&mut self, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) -> Option<Particle> {
+        let set = self.sets.get("firework").cloned()?;
+        let seed = self.seed();
+        let mut p = Particle::base(Kind::Firework, x, y, z, seed);
+        p.quad_size = 0.1 * (p.rng.next_float() * 0.5 + 0.5) * 2.0 * 0.75;
+        p.friction = 0.91;
+        p.gravity = 0.1;
+        p.xd = xa;
+        p.yd = ya;
+        p.zd = za;
+        p.lifetime = 48 + p.rng.next_int_bound(12);
+        p.alpha = 0.99;
+        p.set = Some(set);
+        p.sprite_from_age();
+        Some(p)
+    }
+
+    /// VANILLA: SparkProvider — level.addParticle(FIREWORK) (шлейф летящей ракеты), белая искра.
+    pub fn add_firework(&mut self, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+        if !self.allow() {
+            return;
+        }
+        if let Some(p) = self.spark(x, y, z, xa, ya, za) {
+            self.add(p);
+        }
+    }
+
+    /// VANILLA: SparkParticle#tick — неподвижная искра шлейфа с возрастом lifetime/2.
+    fn add_trail_spark(
+        &mut self,
+        x: f64,
+        y: f64,
+        z: f64,
+        rgb: [f32; 3],
+        fade: Option<[f32; 3]>,
+        twinkle: bool,
+    ) {
+        if let Some(mut p) = self.spark(x, y, z, 0.0, 0.0, 0.0) {
+            p.rgb = rgb;
+            p.age = p.lifetime / 2;
+            p.fade = fade;
+            p.twinkle = twinkle;
+            p.sprite_from_age();
+            self.add(p);
+        }
+    }
+
+    /// VANILLA: Starter#createParticle — engine.createParticle(FIREWORK) без фильтра настроек.
+    fn starter_spark(&mut self, pos: [f64; 3], xa: f64, ya: f64, za: f64, st: SparkStyle<'_>) {
+        if let Some(mut p) = self.spark(pos[0], pos[1], pos[2], xa, ya, za) {
+            p.trail = st.trail;
+            p.twinkle = st.twinkle;
+            // VANILLA: Util.getRandom(rgbColors, random) — random самого Starter.
+            let c = st.colors[self.rng.next_int_bound(st.colors.len() as i32) as usize];
+            p.rgb = rgb_i32(c);
+            if !st.fade.is_empty() {
+                let f = st.fade[self.rng.next_int_bound(st.fade.len() as i32) as usize];
+                p.fade = Some(rgb_i32(f));
+            }
+            self.add(p);
+        }
+    }
+
+    /// VANILLA: FlashProvider — OverlayParticle, sprite.get(random), lifetime 4.
+    fn add_flash(&mut self, pos: [f64; 3], color: i32) {
+        let Some(set) = self.sets.get("flash").cloned() else {
+            return;
+        };
+        let seed = self.seed();
+        let mut p = Particle::base(Kind::Flash, pos[0], pos[1], pos[2], seed);
+        p.sprite = set[self.rng.next_int_bound(set.len() as i32) as usize];
+        p.lifetime = 4;
+        p.rgb = rgb_i32(color);
+        self.add(p);
+    }
+
+    /// VANILLA: ClientLevel#createFireworks (26.3): без взрывов — 2..4 POOF, иначе Starter.
+    pub fn create_fireworks(
+        &mut self,
+        pos: [f64; 3],
+        vel: [f64; 3],
+        explosions: Vec<FireworkSpec>,
+        play_sound: bool,
+    ) {
+        if explosions.is_empty() {
+            let mut i = 0;
+            while i < self.rng.next_int_bound(3) + 2 {
+                let xa = self.rng.next_gaussian() * 0.05;
+                let za = self.rng.next_gaussian() * 0.05;
+                self.add_poof(pos[0], pos[1], pos[2], xa, 0.005, za);
+                i += 1;
+            }
+            return;
+        }
+        let twinkle_delay = explosions.iter().any(|e| e.twinkle);
+        let lifetime = explosions.len() as i32 * 2 - 1 + if twinkle_delay { 15 } else { 0 };
+        self.starters.push(Starter {
+            pos,
+            vel,
+            life: 0,
+            lifetime,
+            explosions,
+            play_sound,
+            twinkle_delay,
+        });
+    }
+
+    /// VANILLA: Starter#tick.
+    fn tick_starters(&mut self, cam: [f64; 3]) {
+        let mut list = std::mem::take(&mut self.starters);
+        for s in &mut list {
+            let far = || {
+                (s.pos[0] - cam[0]).powi(2)
+                    + (s.pos[1] - cam[1]).powi(2)
+                    + (s.pos[2] - cam[2]).powi(2)
+                    >= 256.0
+            };
+            if s.life == 0 && s.play_sound {
+                let large = s.explosions.len() >= 3
+                    || s.explosions
+                        .iter()
+                        .any(|e| e.shape == FireworkShape::LargeBall);
+                let sound = match (large, far()) {
+                    (true, true) => "entity.firework_rocket.large_blast_far",
+                    (true, false) => "entity.firework_rocket.large_blast",
+                    (false, true) => "entity.firework_rocket.blast_far",
+                    (false, false) => "entity.firework_rocket.blast",
+                };
+                let pitch = 0.95 + self.rng.next_float() * 0.1;
+                crate::audio::play_at(
+                    sound,
+                    crate::audio::Cat::Ambient,
+                    s.pos[0],
+                    s.pos[1],
+                    s.pos[2],
+                    20.0,
+                    pitch,
+                );
+            }
+            if s.life % 2 == 0 && ((s.life / 2) as usize) < s.explosions.len() {
+                let e = &s.explosions[(s.life / 2) as usize];
+                let colors: &[i32] = if e.colors.is_empty() {
+                    &[BLACK_FIREWORK]
+                } else {
+                    &e.colors
+                };
+                let st = SparkStyle {
+                    colors,
+                    fade: &e.fade_colors,
+                    trail: e.trail,
+                    twinkle: e.twinkle,
+                };
+                match e.shape {
+                    FireworkShape::SmallBall => self.particle_ball(s.pos, 0.25, 2, st),
+                    FireworkShape::LargeBall => self.particle_ball(s.pos, 0.5, 4, st),
+                    FireworkShape::Star => self.particle_shape(s.pos, 0.5, STAR_COORDS, st, false),
+                    FireworkShape::Creeper => {
+                        self.particle_shape(s.pos, 0.5, CREEPER_COORDS, st, true)
+                    }
+                    FireworkShape::Burst => self.particle_burst(s.pos, s.vel, st),
+                }
+                self.add_flash(s.pos, colors[0]);
+            }
+            s.life += 1;
+            if s.life > s.lifetime {
+                if s.twinkle_delay && s.play_sound {
+                    let sound = if far() {
+                        "entity.firework_rocket.twinkle_far"
+                    } else {
+                        "entity.firework_rocket.twinkle"
+                    };
+                    let pitch = 0.9 + self.rng.next_float() * 0.15;
+                    crate::audio::play_at(
+                        sound,
+                        crate::audio::Cat::Ambient,
+                        s.pos[0],
+                        s.pos[1],
+                        s.pos[2],
+                        20.0,
+                        pitch,
+                    );
+                }
+                s.life = -1;
+            }
+        }
+        list.retain(|s| s.life >= 0);
+        list.append(&mut self.starters);
+        self.starters = list;
+    }
+
+    /// VANILLA: Starter#createParticleBall.
+    fn particle_ball(&mut self, pos: [f64; 3], base_speed: f64, steps: i32, st: SparkStyle<'_>) {
+        for y_step in -steps..=steps {
+            for x_step in -steps..=steps {
+                let mut z_step = -steps;
+                while z_step <= steps {
+                    let r = &mut self.rng;
+                    let xa = f64::from(x_step) + (r.next_double() - r.next_double()) * 0.5;
+                    let ya = f64::from(y_step) + (r.next_double() - r.next_double()) * 0.5;
+                    let za = f64::from(z_step) + (r.next_double() - r.next_double()) * 0.5;
+                    let len = (xa * xa + ya * ya + za * za).sqrt() / base_speed
+                        + r.next_gaussian() * 0.05;
+                    self.starter_spark(pos, xa / len, ya / len, za / len, st);
+                    if y_step != -steps && y_step != steps && x_step != -steps && x_step != steps {
+                        z_step += steps * 2 - 1;
+                    }
+                    z_step += 1;
+                }
+            }
+        }
+    }
+
+    /// VANILLA: Starter#createParticleShape.
+    fn particle_shape(
+        &mut self,
+        pos: [f64; 3],
+        base_speed: f64,
+        coords: &[[f64; 2]],
+        st: SparkStyle<'_>,
+        flat: bool,
+    ) {
+        let [sx, sy] = coords[0];
+        self.starter_spark(pos, sx * base_speed, sy * base_speed, 0.0, st);
+        let base_angle = self.rng.next_float() * std::f32::consts::PI;
+        let angle_mod = if flat { 0.034 } else { 0.34 };
+        let pi_f = f64::from(std::f32::consts::PI);
+        for angle_step in 0..3 {
+            let angle = f64::from(base_angle) + f64::from(angle_step) * pi_f * angle_mod;
+            let (mut ox, mut oy) = (sx, sy);
+            for &[tx, ty] in &coords[1..] {
+                let mut sub_step = 0.25;
+                while sub_step <= 1.0 {
+                    let mut xa = (ox + sub_step * (tx - ox)) * base_speed;
+                    let ya = (oy + sub_step * (ty - oy)) * base_speed;
+                    let za = xa * angle.sin();
+                    xa *= angle.cos();
+                    let mut flip = -1.0;
+                    while flip <= 1.0 {
+                        self.starter_spark(pos, xa * flip, ya, za * flip, st);
+                        flip += 2.0;
+                    }
+                    sub_step += 0.25;
+                }
+                ox = tx;
+                oy = ty;
+            }
+        }
+    }
+
+    /// VANILLA: Starter#createParticleBurst.
+    fn particle_burst(&mut self, pos: [f64; 3], vel: [f64; 3], st: SparkStyle<'_>) {
+        let base_off_x = self.rng.next_gaussian() * 0.05;
+        let base_off_z = self.rng.next_gaussian() * 0.05;
+        for _ in 0..70 {
+            let xa = vel[0] * 0.5 + self.rng.next_gaussian() * 0.15 + base_off_x;
+            let za = vel[2] * 0.5 + self.rng.next_gaussian() * 0.15 + base_off_z;
+            let ya = vel[1] * 0.5 + self.rng.next_double() * 0.5;
+            self.starter_spark(pos, xa, ya, za, st);
+        }
     }
 }
 
@@ -2231,7 +4037,61 @@ mod tests {
         let mut s = SpriteSets::default();
         s.insert("rain", vec![uv; 4]);
         s.insert("smoke", vec![uv; 8]);
+        s.insert("firework", vec![uv; 8]);
+        s.insert("flash", vec![uv; 1]);
         s
+    }
+
+    #[test]
+    fn fireworks_component_parses() {
+        // flight 1; 1 взрыв: star(2), цвета [0xFF0000, 0x00FF00], fade [0x0000FF], trail, !twinkle.
+        let mut b = vec![1u8, 1, 2, 2];
+        b.extend_from_slice(&0xFF0000_i32.to_be_bytes());
+        b.extend_from_slice(&0x00FF00_i32.to_be_bytes());
+        b.push(1);
+        b.extend_from_slice(&0x0000FF_i32.to_be_bytes());
+        b.extend_from_slice(&[1, 0]);
+        let v = parse_fireworks(&b);
+        assert_eq!(
+            v,
+            vec![FireworkSpec {
+                shape: FireworkShape::Star,
+                colors: vec![0xFF0000, 0x00FF00],
+                fade_colors: vec![0x0000FF],
+                trail: true,
+                twinkle: false,
+            }]
+        );
+        assert!(parse_fireworks(&b[..5]).is_empty());
+    }
+
+    #[test]
+    fn firework_starter_spaces_explosions() {
+        let mut e = ParticleEngine::new(sets());
+        let level = empty_level();
+        let ball = FireworkSpec {
+            shape: FireworkShape::SmallBall,
+            colors: Vec::new(),
+            fade_colors: Vec::new(),
+            trail: false,
+            twinkle: false,
+        };
+        e.create_fireworks([0.5, 100.0, 0.5], [0.0; 3], vec![ball.clone(), ball], false);
+        e.tick(&level, [0.0; 3]);
+        // VANILLA: createParticleBall(0.25, 2): 16 краевых столбцов по 5 + 9 внутренних по 2 = 98, + FLASH.
+        assert_eq!(e.count(), 99);
+        e.tick(&level, [0.0; 3]);
+        assert_eq!(e.count(), 99);
+        e.tick(&level, [0.0; 3]);
+        assert_eq!(e.count(), 198);
+        // lifetime = 2 * 2 - 1 = 3: удаляется, когда life > 3 (4-й тик).
+        assert_eq!(e.starters.len(), 1);
+        e.tick(&level, [0.0; 3]);
+        assert!(e.starters.is_empty());
+        // Без взрывов — только POOF (2..4), Starter не создаётся.
+        let mut e = ParticleEngine::new(sets());
+        e.create_fireworks([0.0; 3], [0.0; 3], Vec::new(), false);
+        assert!(e.starters.is_empty());
     }
 
     fn empty_level() -> Level {
@@ -2253,7 +4113,7 @@ mod tests {
         assert_eq!(e.count(), 1);
         let level = empty_level();
         for _ in 0..200 {
-            e.tick(&level);
+            e.tick(&level, [0.0; 3]);
         }
         assert_eq!(e.count(), 0);
     }
@@ -2275,7 +4135,7 @@ mod tests {
         let yd0 = e.list[0].yd;
         // lifetime осколка ≥ 4 тиков — 3 тика гарантированно живы
         for _ in 0..3 {
-            e.tick(&level);
+            e.tick(&level, [0.0; 3]);
         }
         // гравитация 1.0 → vy падает на 0.04/тик (с трением 0.98)
         assert!(e.list[0].yd < yd0 - 0.05);

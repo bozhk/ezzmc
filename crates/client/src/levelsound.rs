@@ -88,6 +88,14 @@ fn entry(ty: i32) -> Option<(&'static str, Cat, f32, P)> {
         1503 => ("block.end_portal_frame.fill", B, 1.0, P::Fixed(1.0)),
         1505 => ("item.bone_meal.use", B, 1.0, P::Fixed(1.0)),
         2006 => ("entity.dragon_fireball.explode", H, 1.0, P::Anvil),
+        3000 => ("entity.generic.explode", B, 10.0, P::Fixed(1.0)),
+        3012 => ("block.trial_spawner.spawn_mob", B, 1.0, P::Mob),
+        3013 | 3019 => ("block.trial_spawner.detect_player", B, 1.0, P::Mob),
+        3014 => ("block.trial_spawner.eject_item", B, 1.0, P::Mob),
+        3015 => ("block.vault.activate", B, 1.0, P::Mob),
+        3016 => ("block.vault.deactivate", B, 1.0, P::Mob),
+        3018 => ("block.cobweb.place", B, 1.0, P::Mob),
+        3021 => ("block.trial_spawner.spawn_item", B, 1.0, P::Mob),
         _ => return None,
     })
 }
@@ -111,6 +119,23 @@ pub fn play(ty: i32, pos: [i32; 3], data: i32) {
         1032 => audio::play_ui("block.portal.travel", Cat::Ambient, 0.25, rf() * 0.4 + 0.8),
         1051 => at("entity.wind_charge.throw", B, 0.5, 0.4 / (rf() * 0.4 + 0.8)),
         1053 | 1054 => at("entity.splash_potion.break", N, 1.0, pitch(P::Anvil)),
+        1500 => at(
+            if data > 0 {
+                "block.composter.fill_success"
+            } else {
+                "block.composter.fill"
+            },
+            B,
+            1.0,
+            1.0,
+        ),
+        3001 => at("entity.ender_dragon.growl", H, 64.0, 0.8 + rf() * 0.3),
+        3020 => at(
+            "block.trial_spawner.ominous_activate",
+            B,
+            if data == 0 { 0.3 } else { 1.0 },
+            pitch(P::Mob),
+        ),
         _ => {
             if let Some((ev, cat, vol, p)) = entry(ty) {
                 at(ev, cat, vol, pitch(p));

@@ -311,6 +311,7 @@ pub(crate) enum Kind {
     Warden,
     Wither,
     EnderDragon,
+    EndCrystal,
     Shulker,
     /// Только ключ модели: детёныш броненосца (BabyArmadilloModel); в spec() не встречается.
     ArmadilloBaby,
@@ -476,6 +477,8 @@ fn spec(name: &str) -> Option<Spec> {
         "wither" => ("wither/wither", Kind::Wither, 2.0, 0.5),
         // EnderDragonRenderer: shadow 0.5, модель без LivingEntity-масштаба/разворота (свой root).
         "ender_dragon" => ("enderdragon/dragon", Kind::EnderDragon, 1.0, 0.5),
+        // EndCrystalRenderer: shadow 0.5, scale 2.0.
+        "end_crystal" => ("end_crystal/end_crystal", Kind::EndCrystal, 2.0, 0.5),
         // ShulkerRenderer: shadow 0; текстура по цвету (#18, 16 = по умолчанию).
         "shulker" => ("shulker/shulker", Kind::Shulker, 1.0, 0.0),
         "breeze" => ("breeze/breeze", Kind::Breeze, 1.0, 0.5),
@@ -1627,6 +1630,7 @@ fn build(kind: Kind) -> Rig {
         Kind::Shulker => Rig::Plain(animals::shulker_mesh()),
         Kind::Warden => Rig::Warden(animals::warden_mesh()),
         Kind::EnderDragon => Rig::Dragon(animals::ender_dragon_mesh()),
+        Kind::EndCrystal => Rig::Plain(animals::end_crystal_mesh()),
         Kind::Wither => Rig::Wither(animals::wither_mesh(0.0), animals::wither_mesh(0.5)),
         Kind::Slime => Rig::Slime(animals::slime_inner_mesh(), animals::slime_outer_mesh()),
         Kind::MagmaCube => Rig::Plain(animals::magma_cube_mesh()),
@@ -2213,6 +2217,18 @@ impl Mobs {
                 * shulker_attach(sp.kind, e.int_meta(16))
                 * sq_post
                 * death_flip(sp.kind, e.death_at)
+                * if e
+                    .custom_name
+                    .as_deref()
+                    .is_some_and(|n| n == "Dinnerbone" || n == "Grumm")
+                {
+                    // VANILLA: LivingEntityRenderer#isEntityUpsideDown — переворот вверх ногами.
+                    let bb_h = ezzmc_world::entity_size::size(name).map_or(1.8, |s| s.1);
+                    Mat4::from_translation(Vec3::new(0.0, bb_h + 0.1, 0.0))
+                        * Mat4::from_rotation_z(std::f32::consts::PI)
+                } else {
+                    Mat4::IDENTITY
+                }
                 * fish_wiggle(sp.kind, state.age_in_ticks, in_water)
                 * phantom_pitch(sp.kind, e.pitch)
                 * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0))
@@ -2226,6 +2242,17 @@ impl Mobs {
                     sp.mscale
                 }));
             // VANILLA: EnderDragonRenderer#submit — свой root: R_y(−yRot[7])·R_x(Δy[5,10]·10)·T(0,0,1)·S(−1,−1,1)·T(0,−1.501,0).
+            // VANILLA: EndCrystalRenderer#submit — без разворота и флипа: S(2)·T(0,−0.5,0).
+            let root = if sp.kind == Kind::EndCrystal {
+                Mat4::from_translation(Vec3::new(
+                    (pos[0] - cam[0]) as f32,
+                    (pos[1] - cam[1]) as f32,
+                    (pos[2] - cam[2]) as f32,
+                )) * Mat4::from_scale(Vec3::splat(2.0))
+                    * Mat4::from_translation(Vec3::new(0.0, -0.5, 0.0))
+            } else {
+                root
+            };
             let root = if sp.kind == Kind::EnderDragon {
                 let h = |d: i32| anim.dragon_sample(d, pt);
                 let rot2 = (h(5).0 - h(10).0) as f32;
@@ -2583,9 +2610,26 @@ impl Mobs {
                     animals::quadruped_anim(fur, yr, xr, wp, ws);
                     model.bake(root, [255; 4], light, out);
                     let dye = e.byte18 & 15;
-                    let col = animals::sheep_color(dye);
-                    // VANILLA: SheepWoolUndercoatLayer — не белая и не детёныш; SheepWoolLayer — не острижена.
-                    if dye != 0 && !e.baby {
+                    let jeb = e.custom_name.as_deref() == Some("jeb_");
+                    let col = if jeb {
+                        // VANILLA: SheepRenderState#getWoolColor (jeb_) — перебор 16 цветов каждые 25 тиков.
+                        let t = state.age_in_ticks / 25.0 + (e.id as f32);
+                        let i0 = (t.floor() as i32).rem_euclid(16) as u8;
+                        let i1 = (i0 + 1) % 16;
+                        let f = t.fract();
+                        let c0 = animals::sheep_color(i0);
+                        let c1 = animals::sheep_color(i1);
+                        [
+                            (f32::from(c0[0]) * (1.0 - f) + f32::from(c1[0]) * f) as u8,
+                            (f32::from(c0[1]) * (1.0 - f) + f32::from(c1[1]) * f) as u8,
+                            (f32::from(c0[2]) * (1.0 - f) + f32::from(c1[2]) * f) as u8,
+                            255,
+                        ]
+                    } else {
+                        animals::sheep_color(dye)
+                    };
+                    // VANILLA: SheepWoolUndercoatLayer — не белая (или jeb_) и не детёныш; SheepWoolLayer — не острижена.
+                    if (dye != 0 || jeb) && !e.baby {
                         fur.bake(
                             root,
                             col,
@@ -2653,6 +2697,9 @@ impl Mobs {
                         }
                         Kind::Silverfish => animals::silverfish_anim(model, state.age_in_ticks),
                         Kind::Endermite => animals::endermite_anim(model, state.age_in_ticks),
+                        Kind::EndCrystal => {
+                            animals::end_crystal_anim(model, state.age_in_ticks, true)
+                        }
                         Kind::Rabbit => animals::rabbit_anim(model, yr, xr),
                         Kind::Turtle => animals::turtle_anim(model, yr, xr, wp, ws, e.on_ground),
                         Kind::Horse | Kind::Donkey => animals::equine_anim(model, yr, xr, wp, ws),
