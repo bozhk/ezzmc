@@ -5,6 +5,7 @@
 //! компоненты (F3+H), OverrideText-стили.
 //! VANILLA: GuiGraphics#renderTooltip / TooltipRenderUtil (фон 0xF0100010, рамка 0x505000FF→0x5028007F).
 use crate::chat;
+use crate::particles::{parse_firework_explosion, parse_fireworks_full, FireworkSpec};
 use crate::ui::lang::Lang;
 use ezzmc_protocol::generated::r26_3::{DATA_COMPONENT_TYPE, ITEM, MOB_EFFECT, POTION};
 use ezzmc_protocol::item::{ComponentPatch, ItemStack};
@@ -1136,6 +1137,95 @@ pub fn has_custom_name(s: &ItemStack) -> bool {
 }
 
 /// Строки тултипа в порядке `ItemStack#addDetailsToTooltip`.
+/// VANILLA: DyeColor fireworkColor → имя; иначе CUSTOM_COLOR_NAME (FireworkExplosion#getColorName).
+fn firework_color_name(lang: &Lang, c: i32) -> String {
+    const DYES: [(i32, &str); 16] = [
+        (15790320, "white"),
+        (15435844, "orange"),
+        (12801229, "magenta"),
+        (6719955, "light_blue"),
+        (14602026, "yellow"),
+        (4312372, "lime"),
+        (14188952, "pink"),
+        (4408131, "gray"),
+        (11250603, "light_gray"),
+        (2651799, "cyan"),
+        (8073150, "purple"),
+        (2437522, "blue"),
+        (5320730, "brown"),
+        (3887386, "green"),
+        (11743532, "red"),
+        (1973019, "black"),
+    ];
+    match DYES.iter().find(|d| d.0 == c) {
+        Some((_, n)) => lang.tr(&format!("item.minecraft.firework_star.{n}")),
+        None => lang.tr("item.minecraft.firework_star.custom_color"),
+    }
+}
+
+fn firework_shape_name(lang: &Lang, e: &FireworkSpec) -> String {
+    lang.tr(&format!(
+        "item.minecraft.firework_star.shape.{}",
+        e.shape.name()
+    ))
+}
+
+/// VANILLA: FireworkExplosion#addAdditionalTooltip — цвета, «Fade to», Trail, Twinkle.
+fn firework_extra_lines(lang: &Lang, e: &FireworkSpec, indent: &str, out: &mut Vec<(String, u32)>) {
+    let join = |cs: &[i32]| {
+        cs.iter()
+            .map(|c| firework_color_name(lang, *c))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if !e.colors.is_empty() {
+        out.push((format!("{indent}{}", join(&e.colors)), GRAY));
+    }
+    if !e.fade_colors.is_empty() {
+        let fade = lang.tr("item.minecraft.firework_star.fade_to");
+        out.push((format!("{indent}{fade} {}", join(&e.fade_colors)), GRAY));
+    }
+    if e.trail {
+        out.push((
+            format!("{indent}{}", lang.tr("item.minecraft.firework_star.trail")),
+            GRAY,
+        ));
+    }
+    if e.twinkle {
+        let f = lang.tr("item.minecraft.firework_star.flicker");
+        out.push((format!("{indent}{f}"), GRAY));
+    }
+}
+
+/// VANILLA: Fireworks#addToTooltip — длительность полёта, затем подряд идущие одинаковые
+/// взрывы схлопываются в «N x Форма» (addExplosionTooltip) с деталями через два пробела.
+fn fireworks_lines(lang: &Lang, flight: i32, exps: &[FireworkSpec], out: &mut Vec<(String, u32)>) {
+    if flight > 0 {
+        let tpl = lang.tr("item.minecraft.firework_rocket.flight_duration");
+        out.push((fill(&tpl, &[&flight.to_string()]), GRAY));
+    }
+    let mut i = 0;
+    while i < exps.len() {
+        let e = &exps[i];
+        let count = exps[i..].iter().take_while(|x| *x == e).count();
+        let shape = firework_shape_name(lang, e);
+        let line = if count == 1 {
+            fill(
+                &lang.tr("item.minecraft.firework_rocket.single_star"),
+                &[&shape],
+            )
+        } else {
+            fill(
+                &lang.tr("item.minecraft.firework_rocket.multiple_stars"),
+                &[&count.to_string(), &shape],
+            )
+        };
+        out.push((line, GRAY));
+        firework_extra_lines(lang, e, "  ", out);
+        i += count;
+    }
+}
+
 pub fn stack_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack) -> Vec<(String, u32)> {
     let name_k = item_key(s.item);
     let name: &str = &name_k;
@@ -1176,6 +1266,25 @@ pub fn stack_lines(lang: &Lang, t: &TextRenderer, s: &ItemStack) -> Vec<(String,
     let mut out = vec![(title, rc)];
     if name.ends_with("bundle") {
         bundle_lines(lang, t, s, &mut out);
+    }
+    // VANILLA: ItemStack#addDetailsToTooltip — FIREWORKS, затем FIREWORK_EXPLOSION (до POTION_CONTENTS).
+    // Прототип ракеты: Fireworks(1, []) (Items#FIREWORK_ROCKET).
+    if shows("fireworks") {
+        let fw = match comp(&s.patch, "fireworks") {
+            Some(b) => parse_fireworks_full(b),
+            None if name == "firework_rocket" => Some((1, Vec::new())),
+            None => None,
+        };
+        if let Some((flight, exps)) = fw {
+            fireworks_lines(lang, flight, &exps, &mut out);
+        }
+    }
+    if shows("firework_explosion") {
+        // VANILLA: FireworkExplosion#addToTooltip — форма, затем детали без отступа.
+        if let Some(e) = comp(&s.patch, "firework_explosion").and_then(parse_firework_explosion) {
+            out.push((firework_shape_name(lang, &e), GRAY));
+            firework_extra_lines(lang, &e, "", &mut out);
+        }
     }
     if let (Some(pd), true) = (&potion, shows("potion_contents")) {
         let mut effs: Vec<Eff> = pd
@@ -1437,5 +1546,52 @@ mod durability_tests {
         // почти сломан: красный
         let (w, rgb) = durability_bar("iron_pickaxe", &patch(100, 100)).unwrap();
         assert_eq!((w, rgb), (0, 0xFF0000));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::particles::FireworkShape;
+
+    #[test]
+    fn fireworks_tooltip_groups_repeated_stars() {
+        let lang = Lang::load(
+            br#"{"item.minecraft.firework_rocket.flight_duration":"Flight Duration: %s",
+            "item.minecraft.firework_rocket.single_star":"%s",
+            "item.minecraft.firework_rocket.multiple_stars":"%s x %s",
+            "item.minecraft.firework_star.shape.large_ball":"Large Ball",
+            "item.minecraft.firework_star.shape.star":"Star-shaped",
+            "item.minecraft.firework_star.red":"Red",
+            "item.minecraft.firework_star.custom_color":"Custom",
+            "item.minecraft.firework_star.trail":"Trail"}"#,
+        );
+        let ball = FireworkSpec {
+            shape: FireworkShape::LargeBall,
+            colors: vec![11743532, 123],
+            fade_colors: vec![],
+            trail: true,
+            twinkle: false,
+        };
+        let star = FireworkSpec {
+            shape: FireworkShape::Star,
+            colors: vec![],
+            fade_colors: vec![],
+            trail: false,
+            twinkle: false,
+        };
+        let mut out = Vec::new();
+        fireworks_lines(&lang, 2, &[ball.clone(), ball, star], &mut out);
+        let text: Vec<&str> = out.iter().map(|l| l.0.as_str()).collect();
+        assert_eq!(
+            text,
+            [
+                "Flight Duration: 2",
+                "2 x Large Ball",
+                "  Red, Custom",
+                "  Trail",
+                "Star-shaped"
+            ]
+        );
     }
 }

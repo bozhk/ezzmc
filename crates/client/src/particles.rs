@@ -3650,6 +3650,17 @@ impl FireworkShape {
             _ => FireworkShape::SmallBall,
         }
     }
+
+    /// VANILLA: FireworkExplosion.Shape#getSerializedName.
+    pub fn name(self) -> &'static str {
+        match self {
+            FireworkShape::SmallBall => "small_ball",
+            FireworkShape::LargeBall => "large_ball",
+            FireworkShape::Star => "star",
+            FireworkShape::Creeper => "creeper",
+            FireworkShape::Burst => "burst",
+        }
+    }
 }
 
 /// VANILLA: FireworkExplosion — форма, цвета, цвета затухания, шлейф, мерцание.
@@ -3665,33 +3676,49 @@ pub struct FireworkSpec {
 /// Список взрывов из компонента `fireworks` (Fireworks.STREAM_CODEC: VarInt flight_duration,
 /// List<FireworkExplosion> ≤ 256). Битые данные → пустой список (как отсутствие компонента).
 pub fn parse_fireworks(bytes: &[u8]) -> Vec<FireworkSpec> {
-    use ezzmc_protocol::wire::Reader;
-    fn color_list(r: &mut Reader) -> ezzmc_protocol::ProtocolResult<Vec<i32>> {
+    parse_fireworks_full(bytes).map(|f| f.1).unwrap_or_default()
+}
+
+/// Компонент `fireworks` целиком: (flight_duration, взрывы). Битые данные → `None`.
+pub fn parse_fireworks_full(bytes: &[u8]) -> Option<(i32, Vec<FireworkSpec>)> {
+    let mut r = ezzmc_protocol::wire::Reader::new(bytes);
+    let flight = r.var_int().ok()?;
+    let n = r.length("firework explosions", 256).ok()?;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(read_explosion(&mut r).ok()?);
+    }
+    Some((flight, out))
+}
+
+/// Компонент `firework_explosion` (звезда фейерверка). Битые данные → `None`.
+pub fn parse_firework_explosion(bytes: &[u8]) -> Option<FireworkSpec> {
+    read_explosion(&mut ezzmc_protocol::wire::Reader::new(bytes)).ok()
+}
+
+/// VANILLA: FireworkExplosion#STREAM_CODEC — VarInt shape, List<Int> colors, List<Int> fade,
+/// Bool trail, Bool twinkle.
+fn read_explosion(
+    r: &mut ezzmc_protocol::wire::Reader,
+) -> ezzmc_protocol::ProtocolResult<FireworkSpec> {
+    fn color_list(
+        r: &mut ezzmc_protocol::wire::Reader,
+    ) -> ezzmc_protocol::ProtocolResult<Vec<i32>> {
         let n = r.length("firework colors", 1 << 16)?;
         (0..n).map(|_| r.i32()).collect()
     }
-    fn read(b: &[u8]) -> ezzmc_protocol::ProtocolResult<Vec<FireworkSpec>> {
-        let mut r = Reader::new(b);
-        r.var_int()?;
-        let n = r.length("firework explosions", 256)?;
-        let mut out = Vec::with_capacity(n);
-        for _ in 0..n {
-            let shape = FireworkShape::by_id(r.var_int()?);
-            let colors = color_list(&mut r)?;
-            let fade_colors = color_list(&mut r)?;
-            let trail = r.bool()?;
-            let twinkle = r.bool()?;
-            out.push(FireworkSpec {
-                shape,
-                colors,
-                fade_colors,
-                trail,
-                twinkle,
-            });
-        }
-        Ok(out)
-    }
-    read(bytes).unwrap_or_default()
+    let shape = FireworkShape::by_id(r.var_int()?);
+    let colors = color_list(r)?;
+    let fade_colors = color_list(r)?;
+    let trail = r.bool()?;
+    let twinkle = r.bool()?;
+    Ok(FireworkSpec {
+        shape,
+        colors,
+        fade_colors,
+        trail,
+        twinkle,
+    })
 }
 
 /// VANILLA: FireworkParticles.Starter#STAR_PARTICLE_COORDS.
