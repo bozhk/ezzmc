@@ -255,9 +255,9 @@ impl Entity {
             let v = self.vel;
             let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
             let k = if len < 1.0e-5 { 0.0 } else { 0.1 / len };
-            for i in 0..3 {
-                self.vel[i] = (v[i] + v[i] * k) * f64::from(0.95_f32);
-                self.pos[i] += self.vel[i];
+            for ((p, nv), vi) in self.pos.iter_mut().zip(self.vel.iter_mut()).zip(v) {
+                *nv = (vi + vi * k) * f64::from(0.95_f32);
+                *p += *nv;
             }
             return;
         }
