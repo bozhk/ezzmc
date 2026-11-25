@@ -214,6 +214,8 @@ pub enum NetEvt {
     ArrowHitPlayer,
     /// Пакет Respawn (VANILLA: handleRespawn закрывает DeathScreen).
     Respawned,
+    /// VANILLA: ClientboundGameEventPacket WIN_GAME (4, param==1) — открыть WinScreen.
+    WinGame,
     /// VANILLA: handlePlayerCombatKill для локального игрока: причина смерти.
     CombatKill(Option<ezzmc_protocol::text::Component>),
     /// VANILLA: Player#getScore (метаданные #18 локального игрока).
@@ -1096,6 +1098,12 @@ fn run(
                     }
                     if event == 6 {
                         let _ = tx.send(NetEvt::ArrowHitPlayer);
+                    }
+                    // VANILLA: ClientPacketListener#handleGameEvent WIN_GAME (4, 26.3) — WinScreen без
+                    // проверки param (ServerPlayer#showEndCredits шлёт 0.0 один раз за wonGame).
+                    // VANILLA-UNSURE: старые версии (param 0 → PerformRespawn, 1 → WinScreen) — глава 18.
+                    if event == 4 {
+                        let _ = tx.send(NetEvt::WinGame);
                     }
                     // VANILLA: handleGameEvent IMMEDIATE_RESPAWN (11) → setShowDeathScreen(param == 0).
                     if event == 11 {

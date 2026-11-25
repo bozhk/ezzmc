@@ -95,6 +95,7 @@ mod tooltip;
 mod ui;
 mod weather;
 mod window;
+mod winscreen;
 mod worldview;
 
 use std::sync::Arc;
@@ -112,6 +113,8 @@ struct App {
     wstate: window::WindowState,
     /// Последние применённые настройки (vsync, fullscreen, ClientInformation).
     applied_vsync: Option<bool>,
+    /// Окно закрыто другим окном (Wayland/XWayland не шлёт кадры, Fifo-present блокирует весь игровой цикл).
+    occluded: bool,
     applied_fs: Option<bool>,
     applied_compute: Option<bool>,
     /// VANILLA: Window#quitShortcuts (Options#quitShortcuts) + состояние Alt/F4 для onQuitRequested.
@@ -183,6 +186,8 @@ struct App {
     screen_from_pause: bool,
     /// Экран смерти (здоровье 0): кнопка «Respawn».
     dead_screen: bool,
+    /// Экран концовки (End Poem + титры, TODO-357/358).
+    win_screen: Option<winscreen::WinScreen>,
     /// VANILLA: InBedChatScreen открыт (локальный игрок спит).
     in_bed: bool,
     /// Курсор уже захвачен после входа в мир.
@@ -869,22 +874,26 @@ impl App {
             self.connect_phase = 0;
             return;
         };
-        let (joined, dead) = (v.joined, v.health <= 0.0);
+        let (joined, dead) = (v.joined, v.health <= 0.0 || self.win_screen.is_some());
         // VANILLA: ConnectScreen → LevelLoadingScreen (LevelLoadTracker#isLevelReady: чанк игрока
         // принят; VANILLA-UNSURE: таймаут 30 с как у LevelLoadStatusManager).
+        // VANILLA: WIN_GAME заменяет LevelLoadingScreen на WinScreen (сервер чанков Энда уже не шлёт).
         let ready = joined
-            && (v.net.level.lock().ok().is_some_and(|g| {
-                g.as_ref().is_some_and(|l| {
-                    l.chunks
-                        .get(
-                            (v.cam[0] / 16.0).floor() as i32,
-                            (v.cam[2] / 16.0).floor() as i32,
-                        )
-                        .is_some()
+            && (self.win_screen.is_some()
+                || v.win_game
+                || v.net.level.lock().ok().is_some_and(|g| {
+                    g.as_ref().is_some_and(|l| {
+                        l.chunks
+                            .get(
+                                (v.cam[0] / 16.0).floor() as i32,
+                                (v.cam[2] / 16.0).floor() as i32,
+                            )
+                            .is_some()
+                    })
                 })
-            }) || self
-                .loading_since
-                .is_some_and(|t| t.elapsed() >= std::time::Duration::from_secs(30)));
+                || self
+                    .loading_since
+                    .is_some_and(|t| t.elapsed() >= std::time::Duration::from_secs(30)));
         // Экран подключения открыт кнопкой «Join» ещё до создания мира — продолжаем фазы с него.
         if self.connect_phase == 0 && self.gui.as_ref().is_some_and(|g| g.is_connecting()) {
             self.connect_phase = 1;
@@ -937,7 +946,9 @@ impl App {
             && !self.mouse.grabbed
         {
             if let Some(w) = &self.window {
-                if !self.was_joined || w.has_focus() {
+                // Захват только с фокусом: без него XGrabPointer (XWayland) блокирует поток навсегда;
+                // при получении фокуса захват делает обработчик Focused(true).
+                if w.has_focus() && self.focus.active {
                     self.mouse.grab(w);
                 }
             }
@@ -952,6 +963,28 @@ impl App {
         let (hardcore, score) = (v.hardcore, v.score);
         self.sync_in_bed();
         let opened = self.view.as_mut().and_then(|v| v.death_in.take());
+        if self
+            .view
+            .as_mut()
+            .is_some_and(|v| std::mem::take(&mut v.win_game))
+            && self.win_screen.is_none()
+        {
+            if let Some(rm) = &self.hud_rm {
+                let pname = self.player_name.clone();
+                tracing::info!("WinScreen: открыт (WIN_GAME)");
+                self.win_screen = Some(winscreen::WinScreen::load(rm, &pname, true));
+                // VANILLA: Gui#setScreen закрывает прежний экран (инвентарь/чат), ввод отпускается.
+                if self.inv_open {
+                    self.close_inv(true);
+                }
+                self.chat.open = false;
+                self.input.release_all();
+                self.keys.release_all();
+                if let Some(w) = &self.window {
+                    self.mouse.release(w);
+                }
+            }
+        }
         let respawned = self
             .view
             .as_mut()
@@ -983,6 +1016,30 @@ impl App {
 
     /// VANILLA: Gui#tick — спящий игрок получает InBedChatScreen; после пробуждения экран закрывается
     /// (с текстом в поле — остаётся обычный чат).
+    /// VANILLA: WinScreen#keyPressed/keyReleased + Screen#keyPressed (Esc → onClose → respawn).
+    fn win_key(&mut self, k: KeyCode, pressed: bool) {
+        let Some(ws) = &mut self.win_screen else {
+            return;
+        };
+        match k {
+            KeyCode::Escape if pressed => {
+                tracing::info!("WinScreen: Esc → respawn");
+                self.win_screen = None;
+                if let Some(v) = &self.view {
+                    v.send_respawn();
+                }
+                if let Some(w) = &self.window {
+                    self.mouse.grab(w);
+                }
+            }
+            KeyCode::Space => ws.speedup = pressed,
+            KeyCode::ControlLeft => ws.ctrl[0] = pressed,
+            KeyCode::ControlRight => ws.ctrl[1] = pressed,
+            KeyCode::ArrowUp => ws.reverse = pressed,
+            _ => {}
+        }
+    }
+
     fn sync_in_bed(&mut self) {
         let sleeping = self.view.as_ref().is_some_and(|v| v.sleeping);
         if sleeping && !self.in_bed && !self.menu_active && !self.inv_open && !self.dead_screen {
@@ -2176,6 +2233,11 @@ impl ApplicationHandler for App {
                     }
                 }
             }
+            WindowEvent::KeyboardInput { event, .. } if self.win_screen.is_some() => {
+                if let PhysicalKey::Code(k) = event.physical_key {
+                    self.win_key(k, event.state == ElementState::Pressed);
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if self.chat.open => {
                 if let PhysicalKey::Code(k) = event.physical_key {
                     self.input.on_key(k, event.state);
@@ -2428,7 +2490,8 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorEntered { .. } => {
-                if let Some(w) = &self.window {
+                // XGrabPointer без фокуса (XWayland) не получает ответа: xcb_wait_for_reply висит вечно.
+                if let (Some(w), true) = (&self.window, self.focus.active) {
                     self.mouse.regrab(w);
                 }
             }
@@ -2590,6 +2653,8 @@ impl ApplicationHandler for App {
                     }
                 }
             }
+            // VANILLA: WinScreen — экран без виджетов, клики в мир не идут.
+            WindowEvent::MouseInput { .. } if self.win_screen.is_some() => {}
             WindowEvent::MouseInput { state, button, .. } => {
                 self.input.on_button(button, state);
                 self.keys
@@ -2624,6 +2689,7 @@ impl ApplicationHandler for App {
                     }
                 }
             }
+            WindowEvent::Occluded(o) => self.occluded = o,
             WindowEvent::Focused(true) => {
                 self.focus.set_active(true);
                 // Захват, сделанный до получения фокуса (запуск сразу на сервер), не действует —
@@ -2632,6 +2698,7 @@ impl ApplicationHandler for App {
                     && !self.inv_open
                     && !self.chat.open
                     && !self.dead_screen
+                    && self.win_screen.is_none()
                     && self.view.as_ref().is_some_and(|v| v.joined);
                 if let (true, Some(w)) = (playing, &self.window) {
                     self.mouse.release(w);
@@ -2652,6 +2719,7 @@ impl ApplicationHandler for App {
                     && !self.inv_open
                     && !self.chat.open
                     && !self.dead_screen
+                    && self.win_screen.is_none()
                     && self.view.as_ref().is_some_and(|v| v.joined);
                 if playing && self.focus.pause_on_lost_focus {
                     self.open_pause_menu();
@@ -3031,7 +3099,21 @@ impl ApplicationHandler for App {
                     .and_then(|w| w.is_minimized())
                     .unwrap_or(false);
                 let t = self.fps_limit.throttle(now, iconified, false, false);
-                self.limiter.wait(self.fps_limit.effective(t));
+                let mut cap = self.fps_limit.effective(t);
+                if self.applied_vsync == Some(true) {
+                    // vsync эмулируется Mailbox + лимитером по частоте монитора.
+                    let hz = self
+                        .window
+                        .as_ref()
+                        .and_then(|w| w.current_monitor())
+                        .and_then(|m| m.refresh_rate_millihertz())
+                        .map_or(60, |m| (m + 500) / 1000);
+                    cap = if cap == 0 { hz } else { cap.min(hz) };
+                }
+                if !self.focus.active || self.occluded {
+                    cap = if cap == 0 { 60 } else { cap.min(60) };
+                }
+                self.limiter.wait(cap);
                 let now_ms = self.clock.now_ms();
                 let dt = (now_ms.saturating_sub(self.last_ms)) as f64 / 1000.0;
                 self.last_ms = now_ms;
@@ -3212,6 +3294,7 @@ impl ApplicationHandler for App {
                                 && self.stats_screen.is_none()
                                 && self.gms.is_none();
                             let adv_screen = &mut self.adv;
+                            let win_screen = &mut self.win_screen;
                             let stats_screen = &mut self.stats_screen;
                             let gms = &mut self.gms;
                             let stats_down = self.stats_down;
@@ -4070,6 +4153,18 @@ impl ApplicationHandler for App {
                                             }
                                         }
                                     }
+                                    // VANILLA: WinScreen (End Poem / титры, TODO-357/358).
+                                    if let Some(ws) = win_screen.as_mut() {
+                                        if ws.update(gh as i32) {
+                                            tracing::info!(
+                                                "WinScreen: титры закончились → respawn"
+                                            );
+                                            *win_screen = None;
+                                            v.send_respawn();
+                                        } else if let Some((p, _)) = hud.as_mut() {
+                                            ws.draw(t, p, g, view, (w, h));
+                                        }
+                                    }
                                     // VANILLA: AdvancementsScreen — поверх мира, под тултипами/тостами.
                                     if let (Some(a), Some((p, rm))) =
                                         (adv_screen.as_mut(), hud.as_mut())
@@ -4662,6 +4757,7 @@ fn main() {
         cfg: window::WindowState::default().config("ezzmc"),
         wstate: window::WindowState::default(),
         applied_vsync: None,
+        occluded: false,
         applied_fs: None,
         applied_compute: None,
         quit_shortcuts: true,
@@ -4738,6 +4834,7 @@ fn main() {
         inv_container: false,
         inv_creative: false,
         dead_screen: false,
+        win_screen: None,
         in_bed: false,
         was_joined: false,
         world_job: None,

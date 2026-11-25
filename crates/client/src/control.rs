@@ -116,6 +116,12 @@ impl App {
         if down && self.menu_active && self.capture_bind(input) {
             return;
         }
+        if self.win_screen.is_some() {
+            if let Input::Key(k) = input {
+                self.win_key(k, down);
+            }
+            return;
+        }
         // Та же логика F3 / F3+H, что в `WindowEvent::KeyboardInput` (main.rs): агентский ввод её обходит.
         if let Input::Key(KeyCode::F3) = input {
             self.f3_held = down;
@@ -233,6 +239,8 @@ impl App {
             "loading"
         } else if self.menu_active && self.gui.as_ref().is_some_and(|g| g.dialog_info().is_some()) {
             "dialog"
+        } else if self.win_screen.is_some() {
+            "credits"
         } else if self.dead_screen {
             "death"
         } else if self.menu_active && self.gui.as_ref().is_some_and(|g| g.is_book()) {
@@ -302,6 +310,7 @@ impl App {
                 "modded": crate::inventory::is_modded_menu(o.menu),
                 "title": o.title,
                 "slots": o.slots.len(),
+                "data": o.data,
             })));
             s["attack_delay"] = json!(v.attack_delay());
             s["attack_strength"] = json!(v.attack_strength(0.0));
