@@ -1,9 +1,11 @@
 //! Экран концовки (End Poem и титры).
 //! VANILLA: WinScreen (26.3): `assets/minecraft/texts/{end.txt,credits.json,postcredits.txt}`,
 //! логотип (LogoRenderer) на `height + 50`, текст с `height + 150`, шаг 12 px, ширина 256 px.
-//! TODO-358: фон END_PORTAL-шейдером, виньетка `credits_vignette`, музыка `credits`.
+//! Фон поэмы — END_PORTAL + `credits_vignette` (ezzmc_render::creditsbg), музыка — Musics.CREDITS (main.rs).
 
 use ezzmc_assets::pack::ResourceManager;
+use ezzmc_render::creditsbg::CreditsBackground;
+use ezzmc_render::endportaldraw::Rgba;
 use ezzmc_render::gui::GuiPainter;
 use ezzmc_render::text::TextRenderer;
 use ezzmc_world::noise::LegacyRandom;
@@ -28,6 +30,9 @@ enum Src {
 
 /// Состояние экрана титров/поэмы Энда.
 pub struct WinScreen {
+    /// VANILLA: WinScreen#poem — фон END_PORTAL (иначе фон экрана по умолчанию).
+    poem: bool,
+    bg: Option<CreditsBackground>,
     src: Vec<Src>,
     /// VANILLA: WinScreen#lines + centeredLines (строятся в init, когда есть шрифт).
     lines: Option<Vec<(String, bool)>>,
@@ -91,6 +96,8 @@ impl WinScreen {
             }
         }
         Self {
+            poem,
+            bg: None,
             src,
             lines: None,
             scroll: 0.0,
@@ -100,6 +107,50 @@ impl WinScreen {
             reverse: false,
             last_step: std::time::Instant::now(),
         }
+    }
+
+    /// Создаёт GPU-фон поэмы (end_sky, end_portal, credits_vignette). Без текстур — чёрный фон.
+    pub fn init_background(
+        &mut self,
+        rm: &ResourceManager,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+    ) {
+        if !self.poem {
+            return;
+        }
+        let img = |p: &str| {
+            let i = rm
+                .read(p)
+                .and_then(|d| ezzmc_assets::texture::Image::decode_png(&d).ok());
+            if i.is_none() {
+                tracing::error!("WinScreen: нет текстуры {p}");
+            }
+            i.map(|i| (i.to_rgba8(), i.width, i.height))
+        };
+        let (Some(sky), Some(portal), Some(vig)) = (
+            img("assets/minecraft/textures/environment/end_sky.png"),
+            img("assets/minecraft/textures/entity/end_portal/end_portal.png"),
+            img("assets/minecraft/textures/misc/credits_vignette.png"),
+        ) else {
+            return;
+        };
+        fn rgba((d, w, h): &(Vec<u8>, u32, u32)) -> Rgba<'_> {
+            Rgba {
+                data: d.as_slice(),
+                width: *w,
+                height: *h,
+            }
+        }
+        self.bg = Some(CreditsBackground::new(
+            device,
+            queue,
+            format,
+            &rgba(&sky),
+            &rgba(&portal),
+            &rgba(&vig),
+        ));
     }
 
     /// VANILLA: WinScreen#calculateScrollSpeed — 5 + 15 за каждый зажатый Ctrl.
@@ -134,6 +185,7 @@ impl WinScreen {
         g: &ezzmc_render::Gpu,
         view: &wgpu::TextureView,
         (w, h): (u32, u32),
+        (game_time, partial): (i64, f32),
     ) {
         let (dev, q) = (&g.device, &g.queue);
         if self.lines.is_none() {
@@ -144,9 +196,13 @@ impl WinScreen {
         // Накопленный под экраном текст — до фона.
         t.flush(dev, q, view, w, h);
         t.begin(w, h);
-        // TODO-358: VANILLA фон поэмы — END_PORTAL (end_sky + end_portal), сверху виньетка.
-        t.fill(0.0, 0.0, gw as f32, gh as f32, 0xFF00_0000);
-        t.flush(dev, q, view, w, h);
+        // VANILLA: extractBackground (END_PORTAL на весь экран) + extractVignette.
+        if let Some(bg) = self.bg.as_mut() {
+            bg.draw(dev, q, view, game_time, partial);
+        } else {
+            t.fill(0.0, 0.0, gw as f32, gh as f32, 0xFF00_0000);
+            t.flush(dev, q, view, w, h);
+        }
         let logo_x = gw / 2 - 128;
         let logo_y = gh + 50;
         let y_offs = -self.scroll;

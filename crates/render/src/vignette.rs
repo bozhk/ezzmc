@@ -34,7 +34,7 @@ impl VignetteDraw {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         color_fmt: wgpu::TextureFormat,
-        depth_fmt: wgpu::TextureFormat,
+        depth_fmt: Option<wgpu::TextureFormat>,
         rgba: &[u8],
         w: u32,
         h: u32,
@@ -158,8 +158,8 @@ impl VignetteDraw {
                 })],
             }),
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth_fmt,
+            depth_stencil: depth_fmt.map(|format| wgpu::DepthStencilState {
+                format,
                 depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::Always,
                 stencil: Default::default(),

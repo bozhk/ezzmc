@@ -972,7 +972,11 @@ impl App {
             if let Some(rm) = &self.hud_rm {
                 let pname = self.player_name.clone();
                 tracing::info!("WinScreen: открыт (WIN_GAME)");
-                self.win_screen = Some(winscreen::WinScreen::load(rm, &pname, true));
+                let mut ws = winscreen::WinScreen::load(rm, &pname, true);
+                if let (Some(g), Some(sc)) = (&self.gpu, &self.swapchain) {
+                    ws.init_background(rm, &g.device, &g.queue, sc.config.format);
+                }
+                self.win_screen = Some(ws);
                 // VANILLA: Gui#setScreen закрывает прежний экран (инвентарь/чат), ввод отпускается.
                 if self.inv_open {
                     self.close_inv(true);
@@ -2777,10 +2781,16 @@ impl ApplicationHandler for App {
                     w.set_cursor(cursor::take(self.allow_cursor));
                 }
                 {
+                    // VANILLA: Minecraft#getSituationalMusic — сначала screen.getBackgroundMusic().
                     let m = match &self.view {
+                        _ if self.win_screen.is_some() => Some(music::credits()),
                         Some(v) if v.joined => v.situational_music(),
                         _ => Some(music::menu()),
                     };
+                    // VANILLA: WinScreen#removed → stopPlaying(Musics.CREDITS).
+                    if self.win_screen.is_none() {
+                        self.music.stop_playing("music.credits", m.as_ref());
+                    }
                     if let Some(gui) = &self.gui {
                         let f =
                             music::Frequency::parse(gui.opts.raw("musicFrequency").unwrap_or(""));
@@ -4162,7 +4172,7 @@ impl ApplicationHandler for App {
                                             *win_screen = None;
                                             v.send_respawn();
                                         } else if let Some((p, _)) = hud.as_mut() {
-                                            ws.draw(t, p, g, view, (w, h));
+                                            ws.draw(t, p, g, view, (w, h), v.level_time());
                                         }
                                     }
                                     // VANILLA: AdvancementsScreen — поверх мира, под тултипами/тостами.

@@ -3,6 +3,7 @@ pub mod animals;
 pub mod beacondraw;
 pub mod borderdraw;
 pub mod clouddraw;
+pub mod creditsbg;
 pub mod endportaldraw;
 pub mod entitymodel;
 pub mod fog;

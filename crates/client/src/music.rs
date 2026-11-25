@@ -15,6 +15,16 @@ pub fn menu() -> Music {
     }
 }
 
+/// VANILLA: Musics.CREDITS (WinScreen#getBackgroundMusic).
+pub fn credits() -> Music {
+    Music {
+        sound: "music.credits".into(),
+        min_delay: 0,
+        max_delay: 0,
+        replace: true,
+    }
+}
+
 /// VANILLA: MusicManager.MusicFrequency (опция musicFrequency): макс. пауза в тиках.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Frequency {
@@ -144,6 +154,18 @@ impl MusicManager {
                 self.next_delay = i32::MAX;
             }
         }
+    }
+
+    /// VANILLA: MusicManager#stopPlaying(Music) — только если играет именно `sound`;
+    /// следующая пауза = getNextSongDelay(situational) + 100.
+    pub fn stop_playing(&mut self, sound: &str, situational: Option<&Music>) {
+        if self.current.as_deref() != Some(sound) {
+            return;
+        }
+        audio::stop(Some(sound), Some(Cat::Music));
+        self.current = None;
+        self.hide_toast = true;
+        self.next_delay = self.freq_delay(situational).saturating_add(100);
     }
 
     /// VANILLA: MusicManager#getCurrentMusicTranslationKey.

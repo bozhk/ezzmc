@@ -264,6 +264,8 @@ impl App {
             "audio": {
                 "active": crate::audio::ACTIVE.load(std::sync::atomic::Ordering::Relaxed),
                 "started": crate::audio::STARTED.load(std::sync::atomic::Ordering::Relaxed),
+                // Ключ перевода текущего трека музыки (MusicManager#getCurrentMusicTranslationKey).
+                "music": self.music.track_key(),
             },
             "screen": screen,
             "hud_hidden": self.hud_hidden,

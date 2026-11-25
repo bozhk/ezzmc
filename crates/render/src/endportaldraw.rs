@@ -71,7 +71,7 @@ impl EndPortalDraw {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         color: wgpu::TextureFormat,
-        depth: wgpu::TextureFormat,
+        depth: Option<wgpu::TextureFormat>,
         projection: &wgpu::Buffer,
         fog: &wgpu::Buffer,
         sky: &Rgba<'_>,
@@ -217,8 +217,9 @@ impl EndPortalDraw {
                 })],
             }),
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth,
+            // Без глубины — экранный проход (фон WinScreen, GUI fill END_PORTAL).
+            depth_stencil: depth.map(|format| wgpu::DepthStencilState {
+                format,
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: Default::default(),

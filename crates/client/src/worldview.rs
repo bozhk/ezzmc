@@ -111,6 +111,8 @@ pub struct WorldView {
     pub death_in: Option<Option<ezzmc_protocol::text::Component>>,
     /// Пришёл Respawn: экран смерти закрыть.
     pub respawn_in: bool,
+    /// VANILLA: game_event WIN_GAME (4; в 26.3 param не проверяется) — показать End Poem / титры.
+    pub win_game: bool,
     /// Экран смерти уже запрошен (до Respawn): повторные combat_kill/set_health(0) не открывают его снова.
     pub death_pending: bool,
     /// LocalPlayer#flashOnSetHealth: первый set_health только запоминает здоровье.
@@ -774,7 +776,7 @@ impl WorldView {
             &gpu.device,
             &gpu.queue,
             color,
-            DEPTH_FORMAT,
+            Some(DEPTH_FORMAT),
             &vpx,
             vw,
             vh,
@@ -801,7 +803,7 @@ impl WorldView {
                 &gpu.device,
                 &gpu.queue,
                 color,
-                DEPTH_FORMAT,
+                Some(DEPTH_FORMAT),
                 &projection_buf,
                 &fog_buf,
                 &ezzmc_render::endportaldraw::Rgba {
@@ -1303,6 +1305,7 @@ impl WorldView {
             score: 0,
             death_in: None,
             respawn_in: false,
+            win_game: false,
             death_pending: false,
             health_seen: false,
             invulnerable: false,
@@ -1682,6 +1685,9 @@ impl WorldView {
                     0.45,
                 ),
                 NetEvt::Score(s) => self.score = s,
+                NetEvt::WinGame => {
+                    self.win_game = true;
+                }
                 NetEvt::Respawned => {
                     self.respawn_in = true;
                     self.death_pending = false;
@@ -2025,6 +2031,14 @@ impl WorldView {
             sprite,
             tint: [ch(16), ch(8), ch(0)],
         })
+    }
+
+    /// Время мира для шейдеров (GameTime): `(game_time, partial_tick)`.
+    pub fn level_time(&self) -> (i64, f32) {
+        match self.net.level.lock().as_deref() {
+            Ok(Some(l)) => (l.game_time, l.partial_tick()),
+            _ => (0, 0.0),
+        }
     }
 
     /// Клиентские тики частиц по росту `game_time` (VANILLA: ParticleEngine#tick + tickWeatherEffects).
@@ -6494,6 +6508,11 @@ impl WorldView {
             s.open,
             s.filtering,
         ));
+    }
+
+    /// VANILLA: ServerboundClientCommandPacket(PERFORM_RESPAWN).
+    pub fn send_respawn(&self) {
+        self.send(crate::netthread::NetCmd::Respawn);
     }
 
     pub fn send_rename_item(&self, name: String) {
