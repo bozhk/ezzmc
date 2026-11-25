@@ -560,10 +560,17 @@ pub struct SwimPose {
     pub in_water: bool,
     pub visually: bool,
     pub x_rot: f32,
+    /// Полёт на элитрах: перекрывает плавание (AvatarRenderer#setupRotations).
+    pub fly: Option<crate::avatar::FlyPose>,
 }
 
 impl SwimPose {
     pub fn matrix(self) -> Mat4 {
+        if let Some(f) = self.fly {
+            // VANILLA: AvatarRenderer#setupRotations — XP(scale·(−90 − xRot)), затем YP(flyingYRot).
+            return Mat4::from_rotation_x((f.scale * (-90.0 - self.x_rot)).to_radians())
+                * Mat4::from_rotation_y(f.y_rot);
+        }
         if self.amount <= 0.0 {
             return Mat4::IDENTITY;
         }
@@ -3767,6 +3774,7 @@ impl WorldView {
                 in_water: p.in_water,
                 visually: p.swimming || p.crawling,
                 x_rot: state.x_rot,
+                fly: p.anim.fly_pose(pt),
             };
             let root = self.avatar_root(pos, body, p.crouching, swim);
             let (model, parts) = &mut self.player_model;
@@ -4593,6 +4601,7 @@ impl WorldView {
             in_water: p.in_water,
             visually: p.swimming || p.crawling,
             x_rot: 0.0,
+            fly: None,
         };
         let held = self.inv.held().cloned().and_then(|st| {
             let (name, cx) = crate::handitem::stack_ctx(&st)?;
@@ -5323,6 +5332,8 @@ impl WorldView {
         for e in level.entities.iter().filter(|e| e.ty == player_ty) {
             let anim = self.remote_anims.entry(e.id).or_default();
             anim.swimming = e.swimming();
+            anim.fall_flying = e.fall_flying();
+            anim.motion = e.vel;
             // VANILLA: handleAnimate → swing(); один взмах на пакет.
             if anim.swing_seen != e.swing_seq {
                 anim.swing_seen = e.swing_seq;
@@ -5432,6 +5443,7 @@ impl WorldView {
                 in_water: wet,
                 visually: swimming,
                 x_rot: state.x_rot,
+                fly: anim.fly_pose(pt),
             };
             let bed_facing = (e.pose == POSE_SLEEPING)
                 .then_some(e.sleep_pos)

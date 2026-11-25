@@ -554,6 +554,8 @@ impl Player {
         self.eye_h += (self.eye_height() - self.eye_h) * 0.5;
         self.anim.swimming = self.swimming || self.crawling; // VANILLA: Entity#isVisuallySwimming (Pose.SWIMMING)
         self.anim.in_water = self.in_water;
+        self.anim.fall_flying = self.fall_flying;
+        self.anim.motion = self.vel;
         self.anim.tick(self.pos, self.prev_pos, yaw, pitch);
         // VANILLA: LivingEntity#aiStep (hurtTime--) и tickDeath (deathTime++ до 20, пока здоровье ≤ 0).
         if self.hurt_time > 0 && !self.hurt_hold {

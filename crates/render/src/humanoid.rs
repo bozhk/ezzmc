@@ -34,6 +34,10 @@ pub struct HumanoidState {
     pub item_left: bool,
     /// Сидит в транспорте (HumanoidRenderState#isPassenger).
     pub passenger: bool,
+    /// HumanoidRenderState#isFallFlying.
+    pub fall_flying: bool,
+    /// HumanoidRenderState#speedValue (полёт на элитрах: (|v|²/0.2)³, не меньше 1; 0 трактуется как 1).
+    pub speed_value: f32,
 }
 
 /// Индексы основных частей гуманоида.
@@ -510,16 +514,20 @@ fn out_quart(x: f32) -> f32 {
     1.0 - (1.0 - x).powi(4)
 }
 
-/// VANILLA: HumanoidModel#setupAnim для пустых рук (поза EMPTY), без плавания/полёта/верховой езды.
+/// VANILLA: HumanoidModel#setupAnim для пустых рук (поза EMPTY), с плаванием, полётом на элитрах и ездой.
 pub fn setup_anim(m: &mut Model, p: &HumanoidParts, s: &HumanoidState) {
     m.reset_pose();
     let deg = PI / 180.0;
     m.parts[p.head].pose.x_rot = s.x_rot * deg;
     m.parts[p.head].pose.y_rot = s.y_rot * deg;
+    if s.fall_flying {
+        m.parts[p.head].pose.x_rot = -PI / 4.0;
+    }
     let (pos, spd) = (s.walk_pos, s.walk_speed);
-    // speedValue = 1 для игрока.
-    m.parts[p.right_arm].pose.x_rot = (pos * 0.6662 + PI).cos() * 2.0 * spd * 0.5;
-    m.parts[p.left_arm].pose.x_rot = (pos * 0.6662).cos() * 2.0 * spd * 0.5;
+    // VANILLA: HumanoidMobRenderer#extractHumanoidRenderState — speedValue ≥ 1 (≠1 только в полёте на элитрах).
+    let sv = s.speed_value.max(1.0);
+    m.parts[p.right_arm].pose.x_rot = (pos * 0.6662 + PI).cos() * 2.0 * spd * 0.5 / sv;
+    m.parts[p.left_arm].pose.x_rot = (pos * 0.6662).cos() * 2.0 * spd * 0.5 / sv;
     if s.passenger {
         m.parts[p.right_arm].pose.x_rot += -PI / 5.0;
         m.parts[p.left_arm].pose.x_rot += -PI / 5.0;
@@ -531,8 +539,8 @@ pub fn setup_anim(m: &mut Model, p: &HumanoidParts, s: &HumanoidState) {
     if s.item_right {
         m.parts[p.right_arm].pose.x_rot = m.parts[p.right_arm].pose.x_rot * 0.5 - PI / 10.0;
     }
-    m.parts[p.right_leg].pose.x_rot = (pos * 0.6662).cos() * 1.4 * spd;
-    m.parts[p.left_leg].pose.x_rot = (pos * 0.6662 + PI).cos() * 1.4 * spd;
+    m.parts[p.right_leg].pose.x_rot = (pos * 0.6662).cos() * 1.4 * spd / sv;
+    m.parts[p.left_leg].pose.x_rot = (pos * 0.6662 + PI).cos() * 1.4 * spd / sv;
     m.parts[p.right_leg].pose.y_rot = 0.005;
     m.parts[p.left_leg].pose.y_rot = -0.005;
     m.parts[p.right_leg].pose.z_rot = 0.005;
@@ -618,8 +626,10 @@ fn lerp(t: f32, a: f32, b: f32) -> f32 {
 /// VANILLA: HumanoidModel#setupSwimAnimation (без предметов в руках).
 fn setup_swim_animation(m: &mut Model, p: &HumanoidParts, s: &HumanoidState) {
     let sa = s.swim_amount;
-    let hx = m.parts[p.head].pose.x_rot;
-    m.parts[p.head].pose.x_rot = rot_lerp_rad(sa, hx, -PI / 4.0);
+    if !s.fall_flying {
+        let hx = m.parts[p.head].pose.x_rot;
+        m.parts[p.head].pose.x_rot = rot_lerp_rad(sa, hx, -PI / 4.0);
+    }
     let swim_pos = s.walk_pos % 26.0;
     // Рука, которой идёт взмах, в плавании не участвует.
     let swinging = s.swing > 0.0;

@@ -51,6 +51,23 @@ pub struct AvatarAnim {
     pub riding_body: Option<f32>,
     swim_amount: f32,
     swim_amount_o: f32,
+    /// LivingEntity#isFallFlying и getDeltaMovement — выставляются владельцем перед `tick`.
+    pub fall_flying: bool,
+    pub motion: [f64; 3],
+    /// ClientAvatarState#deltaMovementOnPreviousTick.
+    motion_o: [f64; 3],
+    motion_now: [f64; 3],
+    /// LivingEntity#fallFlyTicks.
+    fall_fly_ticks: i32,
+}
+
+/// Поворот корпуса в полёте на элитрах. VANILLA: AvatarRenderer#setupRotations (ветка isFallFlying).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FlyPose {
+    /// AvatarRenderState#fallFlyingScale.
+    pub scale: f32,
+    /// AvatarRenderState#flyingYRot (радианы; 0, если shouldApplyFlyingYRot = false).
+    pub y_rot: f32,
 }
 
 impl AvatarAnim {
@@ -98,6 +115,15 @@ impl AvatarAnim {
         self.yaw = yaw;
         self.pitch = pitch;
         self.body_rot_o = self.body_rot;
+        // VANILLA: AbstractClientPlayer#tick → ClientAvatarState#tick(deltaMovement).
+        self.motion_o = self.motion_now;
+        self.motion_now = self.motion;
+        // VANILLA: LivingEntity#aiStep — fallFlyTicks++ в полёте, иначе 0.
+        self.fall_fly_ticks = if self.fall_flying {
+            self.fall_fly_ticks + 1
+        } else {
+            0
+        };
         self.tick_swing();
         // VANILLA: LivingEntity#updateSwimAmount.
         self.swim_amount_o = self.swim_amount;
@@ -170,6 +196,36 @@ impl AvatarAnim {
         rot_lerp(pt, self.body_rot_o, self.body_rot)
     }
 
+    /// VANILLA: AvatarRenderer#extractFlightData; None — не в полёте на элитрах.
+    pub fn fly_pose(&self, pt: f32) -> Option<FlyPose> {
+        if !self.fall_flying {
+            return None;
+        }
+        let t = self.fall_fly_ticks as f32 + pt;
+        let scale = (t * t / 100.0).clamp(0.0, 1.0);
+        // Entity#getViewVector(partialTicks): лерп xRot/yRot.
+        let x = (self.pitch_o + (self.pitch - self.pitch_o) * pt).to_radians();
+        let y = -(self.yaw_o + (self.yaw - self.yaw_o) * pt).to_radians();
+        let look = [f64::from(y.sin() * x.cos()), f64::from(y.cos() * x.cos())];
+        let p = f64::from(pt);
+        let mv = [
+            self.motion_o[0] + (self.motion_now[0] - self.motion_o[0]) * p,
+            self.motion_o[2] + (self.motion_now[2] - self.motion_o[2]) * p,
+        ];
+        let (m2, l2) = (
+            mv[0] * mv[0] + mv[1] * mv[1],
+            look[0] * look[0] + look[1] * look[1],
+        );
+        let mut y_rot = 0.0;
+        if m2 > 1.0e-5 && l2 > 1.0e-5 {
+            let (ml, ll) = (m2.sqrt(), l2.sqrt());
+            let dot = (mv[0] / ml) * (look[0] / ll) + (mv[1] / ml) * (look[1] / ll);
+            let sign = mv[0] * look[1] - mv[1] * look[0];
+            y_rot = (sign.signum() * dot.abs().min(1.0).acos()) as f32;
+        }
+        Some(FlyPose { scale, y_rot })
+    }
+
     /// Состояние позы модели на кадр. Голова/прицел интерполируются по partial tick.
     pub fn humanoid_state(&self, pt: f32, crouching: bool) -> HumanoidState {
         let head_rot = rot_lerp(pt, self.yaw_o, self.yaw);
@@ -196,6 +252,15 @@ impl AvatarAnim {
             item_right: false,
             item_left: false,
             passenger: false,
+            fall_flying: self.fall_flying,
+            // VANILLA: HumanoidMobRenderer — speedValue = (|deltaMovement|² / 0.2)³ в полёте.
+            speed_value: if self.fall_flying {
+                let m = self.motion_now;
+                let v = ((m[0] * m[0] + m[1] * m[1] + m[2] * m[2]) as f32) / 0.2;
+                (v * v * v).max(1.0)
+            } else {
+                1.0
+            },
         }
     }
 }
@@ -251,5 +316,33 @@ mod tests {
         a.tick([0.0; 3], [0.0; 3], 120.0, 0.0);
         let s = a.humanoid_state(1.0, false);
         assert!(s.y_rot.abs() <= 50.01, "{}", s.y_rot);
+    }
+
+    #[test]
+    fn fly_pose_scale_and_side_slip() {
+        let mut a = AvatarAnim::default();
+        assert!(a.fly_pose(0.0).is_none());
+        a.fall_flying = true;
+        // Смотрим на юг (+Z), летим на юго-восток: угол 45°.
+        a.motion = [-0.5, 0.0, 0.5];
+        for _ in 0..3 {
+            a.tick([0.0; 3], [0.0; 3], 0.0, 0.0);
+        }
+        let f = a.fly_pose(0.0).unwrap();
+        assert!((f.scale - 0.09).abs() < 1e-6, "{}", f.scale);
+        assert!(
+            (f.y_rot.abs() - std::f32::consts::FRAC_PI_4).abs() < 1e-4,
+            "{}",
+            f.y_rot
+        );
+        for _ in 0..10 {
+            a.tick([0.0; 3], [0.0; 3], 0.0, 0.0);
+        }
+        assert_eq!(a.fly_pose(0.0).unwrap().scale, 1.0);
+        let s = a.humanoid_state(0.0, false);
+        assert!(s.fall_flying && s.speed_value > 1.0);
+        a.fall_flying = false;
+        a.tick([0.0; 3], [0.0; 3], 0.0, 0.0);
+        assert!(a.fly_pose(0.0).is_none());
     }
 }
