@@ -316,6 +316,8 @@ pub struct WorldView {
     tick_acc: f64,
     /// Игрок сидит на транспорте (set_passengers): ходьба не тикает, шлём только поворот.
     riding: bool,
+    /// Последний учтённый Level::own_flags_seq (синхронизация флага FALL_FLYING).
+    own_flags_seen: u32,
     /// Нос лодки, на которой едет игрок (для клэмпа взгляда по мыши: Entity#turn → onPassengerTurned).
     pub ride_boat_yaw: Option<f32>,
     /// Поворот вида за последний тик в лодке (VANILLA: lerp(yRotO, yRot, partialTick) для камеры).
@@ -1346,6 +1348,7 @@ impl WorldView {
             walking: std::env::var("EZZMC_FREECAM").map_or(true, |v| v != "1"),
             tick_acc: 0.0,
             riding: false,
+            own_flags_seen: 0,
             ride_boat_yaw: None,
             ride_dr: 0.0,
             render_yaw_off: 0.0,
@@ -1729,6 +1732,10 @@ impl WorldView {
                     self.player.hurt_time = 0;
                     self.player.dead = false;
                     self.player.death_time = 0;
+                    // VANILLA: handleRespawn — новый LocalPlayer с новым Inventory (selected = 0);
+                    // PlayerList#respawn set_held_slot не шлёт, ensureHasSentCarriedItem отправит 0.
+                    self.inv.selected = 0;
+                    self.player.fall_flying = false;
                 }
                 NetEvt::CombatKill(msg) => {
                     // VANILLA: handlePlayerCombatKill — DeathScreen либо сразу player.respawn().
@@ -2754,6 +2761,18 @@ impl WorldView {
         while self.tick_acc >= 0.05 && n < 10 {
             self.tick_acc -= 0.05;
             n += 1;
+            // VANILLA: LivingEntity#canGlide → canGlideUsing(CHEST): глайдер в нагрудном слоте.
+            let glider = self
+                .inv
+                .slots
+                .get(crate::inventory::ARMOR_START + 1)
+                .and_then(|s| s.as_ref())
+                .is_some_and(|s| {
+                    crate::inventory::item_name(s.item)
+                        .is_some_and(|n| crate::tooltip::can_glide_chest(&n, &s.patch))
+                });
+            let flags_seen = &mut self.own_flags_seen;
+            let mut fall_fly_req = false;
             let p = &mut self.player;
             let mut self_fov = None;
             let mut riding_now = false;
@@ -2911,8 +2930,30 @@ impl WorldView {
                         };
                         let was_ground = p.on_ground;
                         p.anim.riding_body = None;
+                        // VANILLA: SynchedEntityData — флаг 7 (FALL_FLYING) приходит от сервера.
+                        if *flags_seen != l.own_flags_seq {
+                            *flags_seen = l.own_flags_seq;
+                            p.fall_flying = l.own_flags & 0x80 != 0;
+                        }
+                        p.glider = glider;
                         self.psound.before_tick(p);
                         p.tick(l, input, yaw);
+                        fall_fly_req = p.fall_fly_request;
+                        // VANILLA: FireworkRocketEntity#tick — ракеты, привязанные к нам (DATA_ATTACHED_TO_TARGET #9,
+                        // OptionalInt: id+1), тикают после игрока и разгоняют его в полёте на элитрах.
+                        let own = l.own_id;
+                        let rockets = l
+                            .entities
+                            .iter()
+                            .filter(|e| {
+                                ezzmc_protocol::generated::r26_3::ENTITY_TYPE.get(e.ty)
+                                    == Some(&"firework_rocket")
+                                    && e.int_meta(9) == Some(own + 1)
+                            })
+                            .count();
+                        for _ in 0..rockets {
+                            p.firework_boost(yaw);
+                        }
                         p.post_tick(yaw, pitch);
                         self.psound.after_tick(p, l, was_ground);
                         if let Some((pos, vel)) = self.psound.splash.take() {
@@ -2938,6 +2979,10 @@ impl WorldView {
                 })
             });
             let _ = ran;
+            if fall_fly_req {
+                // VANILLA: LocalPlayer#aiStep — connection.send(START_FALL_FLYING).
+                self.send(crate::netthread::NetCmd::StartFallFlying);
+            }
             self.riding = riding_now;
             if let Some((dr, byaw)) = yaw_fix {
                 // VANILLA: AbstractBoat#positionRider — yaw += deltaRotation, затем clampRotation.
@@ -3740,7 +3785,7 @@ impl WorldView {
                     .push((n, crate::skull::worn_root(head), light));
             }
             let looks = crate::armor::looks_of_menu(&self.inv.slots);
-            self.armor_kit.fall_flying = false;
+            self.armor_kit.fall_flying = self.player.fall_flying;
             self.armor_kit.bake(
                 &looks,
                 &state,

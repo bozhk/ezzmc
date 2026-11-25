@@ -1096,6 +1096,13 @@ impl PlayHandler {
         conn.send(self.sid("player_command")?, &w.buf)
     }
 
+    /// VANILLA: ServerboundPlayerCommandPacket(START_FALL_FLYING): entity id, action 6, data 0.
+    pub fn send_start_fall_flying(&self, conn: &mut Connection) -> NetResult<()> {
+        let mut w = Writer::new();
+        w.var_int(self.player_id).var_int(6).var_int(0);
+        conn.send(self.sid("player_command")?, &w.buf)
+    }
+
     /// VANILLA: ServerboundPlayerCommandPacket(START/STOP_SPRINTING): entity id, action (1/2), data 0.
     pub fn send_sprint(&self, conn: &mut Connection, sprinting: bool) -> NetResult<()> {
         let mut w = Writer::new();

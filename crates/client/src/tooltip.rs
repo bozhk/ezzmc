@@ -416,6 +416,31 @@ pub fn durability_bar(name: &str, patch: &ComponentPatch) -> Option<(u32, u32)> 
     Some((width, (c(r) << 16) | (c(g) << 8) | c(b)))
 }
 
+/// VANILLA: LivingEntity#canGlideUsing для нагрудного слота: есть GLIDER, EQUIPPABLE.slot == CHEST,
+/// !ItemStack#nextDamageWillBreak (isDamageableItem && damage >= maxDamage - 1).
+/// VANILLA-UNSURE: слот из переопределённого компонента `equippable` не разбирается — считаем нагрудным.
+pub fn can_glide_chest(name: &str, patch: &ComponentPatch) -> bool {
+    let removed = |c: &str| {
+        DATA_COMPONENT_TYPE
+            .iter()
+            .position(|x| *x == c)
+            .is_some_and(|id| patch.removed.contains(&(id as u32)))
+    };
+    let glider = comp(patch, "glider").is_some() || (name == "elytra" && !removed("glider"));
+    if !glider {
+        return false;
+    }
+    let max = comp(patch, "max_damage")
+        .and_then(|b| Reader::new(b).var_int().ok())
+        .or_else(|| defaults().max_damage.get(name).copied())
+        .unwrap_or(0);
+    let damageable = max > 0 && comp(patch, "unbreakable").is_none();
+    let damage = comp(patch, "damage")
+        .and_then(|b| Reader::new(b).var_int().ok())
+        .unwrap_or(0);
+    !(damageable && damage >= max - 1)
+}
+
 fn comp<'a>(patch: &'a ComponentPatch, name: &str) -> Option<&'a [u8]> {
     let id = DATA_COMPONENT_TYPE.iter().position(|x| *x == name)? as u32;
     patch

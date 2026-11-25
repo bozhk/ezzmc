@@ -29,6 +29,7 @@ const EYE_CROUCHING: f64 = 1.27;
 /// VANILLA: Pose.SWIMMING — хитбокс 0.6×0.6, глаза 0.4.
 const HEIGHT_SWIMMING: f32 = 0.6;
 const EYE_SWIMMING: f64 = 0.4;
+const EYE_FALL_FLYING: f64 = 0.4;
 
 /// Доступ к миру для физики (позволяет тестировать без чанков).
 pub trait Collider {
@@ -294,6 +295,13 @@ pub struct Player {
     pose_swimming: bool,
     pub sprinting: bool,
     pub flying: bool,
+    /// VANILLA: LivingEntity#isFallFlying (общий флаг 7): ставится локально в tryToStartFallFlying,
+    /// снимается/подтверждается метаданными сервера.
+    pub fall_flying: bool,
+    /// Есть ли годный планер: canGlideUsing по слотам экипировки (ставит клиент перед тиком).
+    pub glider: bool,
+    /// Тик запустил полёт на элитрах → клиент шлёт player_command START_FALL_FLYING.
+    pub fall_fly_request: bool,
     /// Уровни эффектов (amplifier+1, 0 = нет); выставляются клиентом перед тиком.
     pub fx: EffectLevels,
     /// VANILLA: Entity#isInWater / isUnderWater (глаза в воде) / isSwimming (поза плавания).
@@ -375,6 +383,9 @@ impl Player {
             pose_swimming: false,
             sprinting: false,
             flying: false,
+            fall_flying: false,
+            glider: false,
+            fall_fly_request: false,
             fx: EffectLevels::default(),
             in_water: false,
             in_lava: false,
@@ -437,6 +448,9 @@ impl Player {
             EYE_SLEEPING
         } else if self.swimming || self.crawling {
             EYE_SWIMMING
+        } else if self.fall_flying {
+            // VANILLA: Avatar POSES — FALL_FLYING 0.6×0.6, eyeHeight 0.4.
+            EYE_FALL_FLYING
         } else if self.crouching {
             EYE_CROUCHING
         } else {
@@ -447,7 +461,8 @@ impl Player {
     fn height(&self) -> f64 {
         if self.sleeping {
             f64::from(SLEEP_SIZE)
-        } else if self.swimming || self.crawling {
+        } else if self.swimming || self.crawling || self.fall_flying {
+            // VANILLA: Avatar POSES — SWIMMING и FALL_FLYING оба 0.6 высотой.
             f64::from(HEIGHT_SWIMMING)
         } else if self.crouching {
             f64::from(HEIGHT_CROUCHING)
@@ -628,7 +643,8 @@ impl Player {
                 && !self.fits(w, f64::from(HEIGHT_CROUCHING));
             self.crouching = want && !self.crawling;
         }
-        if self.sleeping {
+        // VANILLA: Player#getDesiredPose — FALL_FLYING важнее приседа; влезает всегда, когда влезает SWIMMING.
+        if self.sleeping || (self.fall_flying && !self.swimming) {
             self.crouching = false;
             self.crawling = false;
         }
@@ -678,6 +694,7 @@ impl Player {
         }
 
         // творческий полёт: двойное нажатие прыжка
+        let mut just_toggled_flight = false;
         if self.mayfly && !was_jump && input.jump && !was_auto_jump {
             if self.jump_trigger_time == 0 {
                 self.jump_trigger_time = 7;
@@ -686,8 +703,20 @@ impl Player {
                 if self.flying && self.on_ground {
                     self.jump_from_ground(w, input.sprint && self.sprinting, yaw);
                 }
+                just_toggled_flight = true;
                 self.jump_trigger_time = 0;
             }
+        }
+        // VANILLA: LocalPlayer#aiStep — jump && !justToggledCreativeFlight && !wasJumping && !onClimbable
+        // && Player#tryToStartFallFlying → START_FALL_FLYING.
+        self.fall_fly_request = false;
+        if input.jump
+            && !just_toggled_flight
+            && !was_jump
+            && !self.on_climbable(w)
+            && self.try_start_fall_flying()
+        {
+            self.fall_fly_request = true;
         }
 
         if self.flying {
@@ -756,11 +785,17 @@ impl Player {
         }
         let oy = self.vel[1];
         self.move_input = (xxa, zza, yaw);
+        // VANILLA: LivingEntity#aiStep — updateFallFlying (на клиенте только checkFallDistanceAccumulation).
+        if self.fall_flying && self.vel[1] > -0.5 && self.fall_distance > 1.0 {
+            self.fall_distance = 1.0;
+        }
         // VANILLA: LivingEntity#shouldTravelInFluid = isInLiquid && isAffectedByFluids && !canStandOnFluid.
         if self.in_water && !self.flying {
             self.travel_in_water(w, (xxa, zza), yaw);
         } else if self.in_lava && !self.flying {
             self.travel_in_lava(w, (xxa, zza), yaw);
+        } else if self.fall_flying {
+            self.travel_fall_flying(w, (xxa, zza), yaw);
         } else {
             self.travel(w, (xxa, zza), yaw);
         }
@@ -773,6 +808,93 @@ impl Player {
         // VANILLA: Player#tick → updatePlayerPose после aiStep: поза SWIMMING, если влезаем хотя бы в неё.
         if self.fits(w, f64::from(HEIGHT_SWIMMING)) {
             self.pose_swimming = self.swimming || self.crawling;
+        }
+    }
+
+    /// VANILLA: Player#canGlide (!abilities.flying) + LivingEntity#canGlide (!onGround, !passenger, без левитации,
+    /// годный планер). Пассажир сюда не попадает: физика в седле не тикает.
+    fn can_glide(&self) -> bool {
+        !self.flying && !self.on_ground && self.fx.levitation == 0 && self.glider
+    }
+
+    /// VANILLA: Player#tryToStartFallFlying → startFallFlying (setSharedFlag(7, true)).
+    fn try_start_fall_flying(&mut self) -> bool {
+        if !self.fall_flying && self.can_glide() && !self.in_water && !self.in_lava {
+            self.fall_flying = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// VANILLA: Entity#getLookAngle = calculateViewVector(xRot, yRot).
+    fn look_angle(&self, yaw: f32) -> [f64; 3] {
+        let x_rad = self.pitch * (std::f32::consts::PI / 180.0);
+        let y_rad = -yaw * (std::f32::consts::PI / 180.0);
+        let (x_sin, x_cos) = y_rad.sin_cos();
+        let (y_sin, y_cos) = x_rad.sin_cos();
+        [
+            f64::from(x_sin * y_cos),
+            f64::from(-y_sin),
+            f64::from(x_cos * y_cos),
+        ]
+    }
+
+    /// VANILLA: LivingEntity#travelFallFlying (клиент: handleFallFlyingCollisions только на сервере).
+    fn travel_fall_flying(&mut self, w: &dyn Collider, input: (f32, f32), yaw: f32) {
+        if self.on_climbable(w) {
+            self.travel(w, input, yaw);
+            // VANILLA: stopFallFlying — setSharedFlag(7, true), затем false.
+            self.fall_flying = false;
+            return;
+        }
+        self.vel = self.fall_flying_movement(self.vel, yaw);
+        let v = self.vel;
+        self.do_move(w, v);
+    }
+
+    /// VANILLA: LivingEntity#updateFallFlyingMovement.
+    fn fall_flying_movement(&self, m: [f64; 3], yaw: f32) -> [f64; 3] {
+        let look = self.look_angle(yaw);
+        let lean = self.pitch * (std::f32::consts::PI / 180.0);
+        let look_hor = (look[0] * look[0] + look[2] * look[2]).sqrt();
+        let move_hor = (m[0] * m[0] + m[2] * m[2]).sqrt();
+        let gravity = self.effective_gravity();
+        let lift = f64::from(lean).cos().powi(2);
+        let mut m = m;
+        m[1] += gravity * (-1.0 + lift * 0.75);
+        if m[1] < 0.0 && look_hor > 0.0 {
+            let convert = m[1] * -0.1 * lift;
+            m[0] += look[0] * convert / look_hor;
+            m[1] += convert;
+            m[2] += look[2] * convert / look_hor;
+        }
+        if lean < 0.0 && look_hor > 0.0 {
+            let convert = move_hor * f64::from(-lean.sin()) * 0.04;
+            m[0] += -look[0] * convert / look_hor;
+            m[1] += convert * 3.2;
+            m[2] += -look[2] * convert / look_hor;
+        }
+        if look_hor > 0.0 {
+            m[0] += (look[0] / look_hor * move_hor - m[0]) * 0.1;
+            m[2] += (look[2] / look_hor * move_hor - m[2]) * 0.1;
+        }
+        [
+            m[0] * f64::from(0.99f32),
+            m[1] * f64::from(0.98f32),
+            m[2] * f64::from(0.99f32),
+        ]
+    }
+
+    /// VANILLA: FireworkRocketEntity#tick — ракета, привязанная к планирующему владельцу, разгоняет его.
+    pub fn firework_boost(&mut self, yaw: f32) {
+        if !self.fall_flying {
+            return;
+        }
+        let l = self.look_angle(yaw);
+        let m = self.vel;
+        for i in 0..3 {
+            self.vel[i] = m[i] + l[i] * 0.1 + (l[i] * 1.5 - m[i]) * 0.5;
         }
     }
 
@@ -1895,6 +2017,79 @@ mod tests {
             forward: true,
             ..Input::default()
         }
+    }
+
+    /// VANILLA: LocalPlayer#aiStep/tryToStartFallFlying — старт только в воздухе, с планером, по фронту прыжка.
+    #[test]
+    fn elytra_start_requires_air_and_glider() {
+        let w = Flat { extra: Vec::new() };
+        let jump = Input {
+            jump: true,
+            ..Input::default()
+        };
+        // На земле — обычный прыжок, без полёта.
+        let mut p = Player::new([0.5, 0.0, 0.5]);
+        p.glider = true;
+        for _ in 0..3 {
+            p.tick(&w, Input::default(), 0.0);
+        }
+        assert!(p.on_ground);
+        p.tick(&w, jump, 0.0);
+        assert!(!p.fall_flying && !p.fall_fly_request);
+        // В воздухе без планера — нет.
+        let mut p = Player::new([0.5, 40.0, 0.5]);
+        p.tick(&w, Input::default(), 0.0);
+        p.tick(&w, jump, 0.0);
+        assert!(!p.fall_flying);
+        // В воздухе с планером — старт, запрос один раз; удержание прыжка не повторяет.
+        p.glider = true;
+        p.tick(&w, Input::default(), 0.0);
+        p.tick(&w, jump, 0.0);
+        assert!(p.fall_flying && p.fall_fly_request);
+        p.tick(&w, jump, 0.0);
+        assert!(!p.fall_fly_request);
+        assert!((p.height() - 0.6).abs() < 1e-6 && (p.eye_height() - 0.4).abs() < 1e-9);
+    }
+
+    /// VANILLA: LivingEntity#updateFallFlyingMovement — горизонтальное планирование при pitch 0:
+    /// подъёмная сила гасит падение и переводит его в скорость вдоль взгляда (+Z при yaw 0).
+    #[test]
+    fn elytra_glide_converts_fall_to_forward() {
+        let w = Flat { extra: Vec::new() };
+        let mut p = Player::new([0.5, 200.0, 0.5]);
+        p.glider = true;
+        p.fall_flying = true;
+        p.pitch = 0.0;
+        for _ in 0..100 {
+            p.tick(&w, Input::default(), 0.0);
+        }
+        let dz = p.pos[2] - 0.5;
+        let dy = 200.0 - p.pos[1];
+        assert!(dz > 40.0, "forward {dz}");
+        assert!(dy < dz, "drop {dy} vs forward {dz}");
+        assert!(p.vel[0].abs() < 1e-9);
+        // Первый шаг из покоя: vy = -0.08*0.25 = -0.02; convert 0.002; z −= 10% (moveHor=0) → 0.0018.
+        let mut q = Player::new([0.5, 200.0, 0.5]);
+        q.fall_flying = true;
+        let v = q.fall_flying_movement([0.0; 3], 0.0);
+        assert!(
+            (v[1] - (-0.02 + 0.002) * f64::from(0.98f32)).abs() < 1e-12,
+            "{v:?}"
+        );
+        assert!((v[2] - 0.0018 * f64::from(0.99f32)).abs() < 1e-12, "{v:?}");
+    }
+
+    /// VANILLA: FireworkRocketEntity#tick — v += 0.1 + (1.5 − v)·0.5 → предел 1.7 вдоль взгляда.
+    #[test]
+    fn firework_boost_only_when_flying() {
+        let mut p = Player::new([0.5, 100.0, 0.5]);
+        p.firework_boost(0.0);
+        assert_eq!(p.vel, [0.0; 3]);
+        p.fall_flying = true;
+        for _ in 0..20 {
+            p.firework_boost(0.0);
+        }
+        assert!((p.vel[2] - 1.7).abs() < 1e-5, "{:?}", p.vel);
     }
 
     /// Упор лбом в стену (стенд владельца): стена на x∈[-12,-11], игрок на x=-10.698, идёт на -x.

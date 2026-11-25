@@ -252,6 +252,8 @@ pub struct Level {
     pub own_uuid: u128,
     /// Флаги (#0 shared flags) локального игрока: бит 0 — горит (Entity#isOnFire).
     pub own_flags: u8,
+    /// Счётчик обновлений own_flags (клиент синхронизирует локальные флаги только при изменении).
+    pub own_flags_seq: u32,
     /// Entity#DATA_POSE локального игрока (ordinal Pose; 0 = STANDING).
     pub own_pose: i32,
     /// VANILLA: LivingEntity#SLEEPING_POS (#14, OPTIONAL_BLOCK_POS) локального игрока.
@@ -328,6 +330,7 @@ impl Level {
             own_id: -1,
             own_uuid: 0,
             own_flags: 0,
+            own_flags_seq: 0,
             own_pose: 0,
             own_sleep_pos: None,
             own_frozen: 0,
@@ -849,6 +852,7 @@ impl Level {
                             if idx == 0 {
                                 if id == self.own_id {
                                     self.own_flags = v;
+                                    self.own_flags_seq = self.own_flags_seq.wrapping_add(1);
                                 }
                                 if let Some(e) = self.entities.map.get_mut(&id) {
                                     e.flags = v;

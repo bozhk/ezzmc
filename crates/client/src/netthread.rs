@@ -114,6 +114,8 @@ pub enum NetCmd {
     SetCarried(i16),
     /// VANILLA: ServerboundPlayerCommandPacket(STOP_SLEEPING).
     StopSleeping,
+    /// VANILLA: ServerboundPlayerCommandPacket(START_FALL_FLYING) из LocalPlayer#aiStep (до sendPosition).
+    StartFallFlying,
     /// TEMP-RAW-MOVE: один пакет движения с заданной позицией (A/B точного f64), физику не трогает.
     RawMove {
         pos: [f64; 3],
@@ -347,6 +349,7 @@ fn send_tick_action(h: &mut PlayHandler, c: &mut Connection, cmd: NetCmd) -> Res
             .map_err(|x| e(&x)),
         NetCmd::SetCarried(s) => h.send_set_carried_item(c, s).map_err(|x| e(&x)),
         NetCmd::StopSleeping => h.send_stop_sleeping(c).map_err(|x| e(&x)),
+        NetCmd::StartFallFlying => h.send_start_fall_flying(c).map_err(|x| e(&x)),
         NetCmd::Swing => h.send_swing(c).map_err(|x| e(&x)),
         NetCmd::UseItem { seq, yaw, pitch } => {
             h.send_use_item(c, seq, yaw, pitch).map_err(|x| e(&x))
@@ -841,7 +844,7 @@ fn run(
                     h.send_client_information(&mut c, &i).map_err(|x| e(&x))?
                 }
                 NetCmd::StopSleeping => h.send_stop_sleeping(&mut c).map_err(|x| e(&x))?,
-                NetCmd::SetCarried(_) => deferred.push(cmd),
+                NetCmd::SetCarried(_) | NetCmd::StartFallFlying => deferred.push(cmd),
                 // TEMP-RAW-MOVE: пишем позицию в h.player на время отправки и возвращаем обратно.
                 NetCmd::RawMove {
                     pos: p3,
