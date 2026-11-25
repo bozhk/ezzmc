@@ -54,6 +54,19 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     return apply_fog(color, i.spherical, i.cylindrical, fog.environmental_start, fog.environmental_end, fog.render_distance_start, fog.render_distance_end, fog.color);
 }
 
+// VANILLA: entity.fsh с DISSOLVE (entityCutoutDissolve): маска в glint_tex по тем же UV; alpha вершины —
+// порог растворения, после него прозрачность не применяется.
+@fragment
+fn fs_dissolve(i: VsOut) -> @location(0) vec4<f32> {
+    var color = textureSample(tex, tex_sampler, i.uv);
+    let m = textureSample(glint_tex, glint_sampler, i.uv).a;
+    if (color.a < 0.1 || i.color.a < m) {
+        discard;
+    }
+    color = color * vec4<f32>(i.color.rgb, 1.0) * dyn_tf.color_modulator * i.light;
+    return apply_fog(color, i.spherical, i.cylindrical, fog.environmental_start, fog.environmental_end, fog.render_distance_start, fog.render_distance_end, fog.color);
+}
+
 // VANILLA: rendertype_armor_entity_glint — текстура блеска с матрицей текстуры; blend SRC_COLOR, ONE:
 // итог = dst + (glint.rgb * GlintAlpha)^2. Сила GlintAlpha (0.75) — в color_modulator.a.
 @fragment

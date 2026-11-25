@@ -92,6 +92,54 @@ pub fn build_bolt(seed: i64) -> Vec<[f32; 3]> {
     out
 }
 
+/// Треугольник с цветом вершин (позиции относительно камеры).
+pub type RayTri = [([f32; 3], [u8; 4]); 3];
+
+/// VANILLA: EnderDragonRenderer#submitRays — лучи смерти дракона (RenderTypes.dragonRays: тот же
+/// шейдер и blend LIGHTNING, TRIANGLES). `pose` — матрица дракона с T(0, −1, −2), `death` = deathTime/200.
+pub fn dragon_rays(pose: Mat4, death: f32, out: &mut Vec<RayTri>) {
+    use glam::{Quat, Vec3};
+    use std::f32::consts::{PI, TAU};
+    const HALF_SQRT_3: f32 = 0.866_025_4;
+    let over = if death > 0.8 {
+        (death - 0.8) / 0.2
+    } else {
+        0.0
+    }
+    .min(1.0);
+    let inner = [255, 255, 255, ((1.0 - over) * 255.0).round() as u8];
+    // 16711935 = 0x00FF00FF: ARGB, alpha 0.
+    let outer = [255, 0, 255, 0];
+    let mut r = LegacyRandom::new(432);
+    let count = ((death + death * death) / 2.0 * 60.0).floor() as i32;
+    let mut pose = pose;
+    for _ in 0..count {
+        let mut a = [0.0f32; 6];
+        for v in &mut a {
+            *v = r.next_float() * TAU;
+        }
+        a[5] += death * (PI / 2.0);
+        // JOML rotationXYZ(x, y, z).rotateXYZ(x', y', z') = Rx·Ry·Rz·Rx'·Ry'·Rz'.
+        let q = Quat::from_rotation_x(a[0])
+            * Quat::from_rotation_y(a[1])
+            * Quat::from_rotation_z(a[2])
+            * Quat::from_rotation_x(a[3])
+            * Quat::from_rotation_y(a[4])
+            * Quat::from_rotation_z(a[5]);
+        pose *= Mat4::from_quat(q);
+        let len = r.next_float() * 20.0 + 5.0 + over * 10.0;
+        let w = r.next_float() * 2.0 + 1.0 + over * 2.0;
+        let p = |v: Vec3| pose.transform_point3(v).to_array();
+        let o = (p(Vec3::ZERO), inner);
+        let left = (p(Vec3::new(-HALF_SQRT_3 * w, len, -0.5 * w)), outer);
+        let right = (p(Vec3::new(HALF_SQRT_3 * w, len, -0.5 * w)), outer);
+        let bottom = (p(Vec3::new(0.0, len, w)), outer);
+        out.push([o, left, right]);
+        out.push([o, right, bottom]);
+        out.push([o, bottom, left]);
+    }
+}
+
 pub struct LightningDraw {
     pipeline: wgpu::RenderPipeline,
     group0: wgpu::BindGroup,
@@ -231,9 +279,10 @@ impl LightningDraw {
         model_view: Mat4,
         cam: [f64; 3],
         bolts: &[BoltInstance],
+        tris: &[RayTri],
     ) {
         self.quads = 0;
-        if bolts.is_empty() {
+        if bolts.is_empty() && tris.is_empty() {
             return;
         }
         let mut data = Vec::new();
@@ -248,6 +297,15 @@ impl LightningDraw {
                     data.extend_from_slice(&c.to_le_bytes());
                 }
                 data.extend_from_slice(&COLOR);
+            }
+        }
+        // Треугольник как вырожденный квад (a, b, c, c): индексы 0-1-2 и 2-3-0 (пустой).
+        for t in tris {
+            for (p, c) in [t[0], t[1], t[2], t[2]] {
+                for v in p {
+                    data.extend_from_slice(&v.to_le_bytes());
+                }
+                data.extend_from_slice(&c);
             }
         }
         let quads = (data.len() / (VERTEX_SIZE * 4)) as u32;
@@ -313,6 +371,21 @@ impl LightningDraw {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dragon_rays_count() {
+        // rayCount = floor((t + t²) / 2 · 60): t = 1 → 60 лучей по 3 треугольника; t = 0.5 → 22.
+        let mut out = Vec::new();
+        dragon_rays(Mat4::IDENTITY, 1.0, &mut out);
+        assert_eq!(out.len(), 180);
+        // При overDrive = 1 внутренний цвет полностью прозрачен, внешний — 0x00FF00FF.
+        assert_eq!(out[0][0].1, [255, 255, 255, 0]);
+        assert_eq!(out[0][1].1, [255, 0, 255, 0]);
+        out.clear();
+        dragon_rays(Mat4::IDENTITY, 0.5, &mut out);
+        assert_eq!(out.len(), 66);
+        assert_eq!(out[0][0].0, [0.0; 3]);
+    }
 
     #[test]
     fn bolt_has_56_segments_of_four_quads() {

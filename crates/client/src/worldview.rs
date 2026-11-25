@@ -3808,6 +3808,20 @@ impl WorldView {
                     self.particles
                         .add_dragon_breath_burst(fx.head, fx.look, fx.motion);
                 }
+                // VANILLA: EnderDragon#tickDeath / aiStep — смещение (±4, 2±2, ±4) от позиции дракона.
+                for (p, emitter) in std::mem::take(&mut self.mobs.dragon_booms) {
+                    let ps = &mut self.particles;
+                    let xo = f64::from((ps.rand_f32() - 0.5) * 8.0);
+                    let yo = f64::from((ps.rand_f32() - 0.5) * 4.0);
+                    let zo = f64::from((ps.rand_f32() - 0.5) * 8.0);
+                    let (x, y, z) = (p[0] + xo, p[1] + 2.0 + yo, p[2] + zo);
+                    if emitter {
+                        ps.add_explosion_emitter(x, y, z);
+                    } else {
+                        // HugeExplosionParticle.Provider: xAux = 0 → quadSize 2.
+                        ps.add_huge(x, y, z, 0.0);
+                    }
+                }
                 let t_chest = std::time::Instant::now();
                 self.chests.bake(
                     l,
@@ -3909,6 +3923,7 @@ impl WorldView {
                     (vec![255u8; 4 * 16 * 16], 16, 16)
                 } else {
                     // `@путь` — от textures/ (картины), иначе от textures/entity/.
+                    let tex = tex.strip_suffix("#dissolve").unwrap_or(tex);
                     let path = match tex.strip_prefix('@') {
                         Some(p) => format!("assets/minecraft/textures/{p}.png"),
                         None => format!("assets/minecraft/textures/entity/{tex}.png"),
@@ -3916,6 +3931,26 @@ impl WorldView {
                     let img = rm.read(&path).and_then(|d| Image::decode_png(&d).ok())?;
                     (img.to_rgba8(), img.width, img.height)
                 };
+                if tex == crate::mobs::DRAGON_DISSOLVE_TEX {
+                    let path = format!(
+                        "assets/minecraft/textures/entity/{}.png",
+                        crate::mobs::DRAGON_EXPLODING_TEX
+                    );
+                    let m = rm.read(&path).and_then(|d| Image::decode_png(&d).ok())?;
+                    let mrgba = m.to_rgba8();
+                    return Some(ezzmc_render::particledraw::ParticleDraw::new_dissolve(
+                        &gpu.device,
+                        &gpu.queue,
+                        color,
+                        DEPTH_FORMAT,
+                        projection,
+                        fog,
+                        lightmap,
+                        atlas,
+                        Some((rgba.as_slice(), tw, th)),
+                        (mrgba.as_slice(), m.width, m.height),
+                    ));
+                }
                 let ctor = if mask {
                     ezzmc_render::particledraw::ParticleDraw::new_mask
                 } else if tex == crate::mobs::SWIRL_TEX {
@@ -5658,23 +5693,6 @@ impl WorldView {
             self.particle_draw
                 .prepare(&gpu.device, &gpu.queue, mv, right, up, &quads);
         }
-        // VANILLA: LightningBoltRenderer — сущности молний (позиции относительно камеры).
-        {
-            let bolts: Vec<_> = match self.net.level.lock().as_deref() {
-                Ok(Some(l)) if !l.bolts.list.is_empty() => l
-                    .bolts
-                    .list
-                    .iter()
-                    .map(|b| ezzmc_render::lightningdraw::BoltInstance {
-                        pos: b.pos,
-                        seed: b.seed,
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            };
-            self.lightning
-                .prepare(&gpu.device, &gpu.queue, mv, self.cam, &bolts);
-        }
         // VANILLA: TheEndPortalRenderer / TheEndGatewayRenderer.
         {
             let versions = (self.queue.version, self.queue.block_version);
@@ -5727,6 +5745,25 @@ impl WorldView {
         fr.prepare(self.cam[0], self.cam[1], self.cam[2]);
         self.entity_frustum = Some(fr);
         self.prepare_player_model(gpu, mv);
+        // После мобов: лучи смерти дракона собираются в Mobs::bake.
+        // VANILLA: LightningBoltRenderer — сущности молний (позиции относительно камеры).
+        {
+            let bolts: Vec<_> = match self.net.level.lock().as_deref() {
+                Ok(Some(l)) if !l.bolts.list.is_empty() => l
+                    .bolts
+                    .list
+                    .iter()
+                    .map(|b| ezzmc_render::lightningdraw::BoltInstance {
+                        pos: b.pos,
+                        seed: b.seed,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let rays = std::mem::take(&mut self.mobs.dragon_rays);
+            self.lightning
+                .prepare(&gpu.device, &gpu.queue, mv, self.cam, &bolts, &rays);
+        }
         let q = &gpu.queue;
         q.write_buffer(
             &self.projection_buf,

@@ -568,6 +568,11 @@ pub struct Mobs {
     last_tick: Option<i64>,
     /// Частицы дракона, накопленные в bake (забирает worldview).
     pub dragon_fx: Vec<DragonFx>,
+    /// Взрывы умирающего дракона за тик: позиция дракона и `true` = EXPLOSION_EMITTER
+    /// (EnderDragon#tickDeath), `false` = EXPLOSION (EnderDragon#aiStep); смещение — в worldview.
+    pub dragon_booms: Vec<([f64; 3], bool)>,
+    /// Лучи смерти дракона за кадр (EnderDragonRenderer#submitRays), рисуются проходом молний.
+    pub dragon_rays: Vec<ezzmc_render::lightningdraw::RayTri>,
     /// Грибы на спине mooshroom, собранные за последний `bake` (матрицы относительно камеры).
     mushrooms: Vec<Mushrooms>,
     /// ItemInHandLayer: (стек, матрица руки до сдвига слоя, свет, левая рука) — рисует worldview.
@@ -870,6 +875,8 @@ struct MobAnim {
     /// EnderDragon#nearestCrystal (id сущности) и ГПСЧ для checkCrystals.
     dr_crystal: Option<i32>,
     dr_rng: u32,
+    /// EnderDragon#dragonDeathTime (тиков с health = 0).
+    dr_death: i32,
 }
 
 /// VANILLA: EnderDragon#aiStep — tickPart для head/neck/body/tail1..3/wing1/wing2 (yRotA клиента = 0).
@@ -1004,9 +1011,20 @@ impl MobAnim {
         phase: i32,
         egg_dist: f64,
         fx: &mut Vec<DragonFx>,
+        booms: &mut Vec<([f64; 3], bool)>,
     ) {
         let sitting = (5..=7).contains(&phase);
         self.dr_flap[0] = self.dr_flap[1];
+        // VANILLA: LivingEntity#baseTick → EnderDragon#tickDeath, затем aiStep: у умирающего дракона
+        // flapTime и история полёта стоят, каждый тик EXPLOSION, на 180..200 — EXPLOSION_EMITTER.
+        if e.health == 0.0 {
+            self.dr_death += 1;
+            if (180..=200).contains(&self.dr_death) {
+                booms.push((e.pos, true));
+            }
+            booms.push((e.pos, false));
+            return;
+        }
         // VANILLA: deltaMovement приходит set_entity_motion (e.vel) и держится до следующего пакета.
         let horiz = (e.vel[0] * e.vel[0] + e.vel[2] * e.vel[2]).sqrt() as f32;
         let mut speed = 0.2 / (horiz * 10.0 + 1.0);
@@ -2041,7 +2059,13 @@ impl Mobs {
                     } else {
                         0.0
                     };
-                    anim.tick_dragon(e, phase, egg_dist, &mut self.dragon_fx);
+                    anim.tick_dragon(
+                        e,
+                        phase,
+                        egg_dist,
+                        &mut self.dragon_fx,
+                        &mut self.dragon_booms,
+                    );
                     // VANILLA: EnderDragon#aiStep — checkCrystals только у живого дракона.
                     if e.health != 0.0 {
                         anim.check_crystals(e, level);
@@ -2381,9 +2405,11 @@ impl Mobs {
                 }
             }
             // VANILLA: LivingEntityRenderer#getOverlayCoords — красный оверлей, пока hurtTime>0.
+            // VANILLA: EnderDragonRenderer — у умирающего дракона OverlayTexture.NO_OVERLAY.
             let hurt = e
                 .hurt_at
-                .is_some_and(|t| t.elapsed().as_secs_f32() < e.hurt_dur);
+                .is_some_and(|t| t.elapsed().as_secs_f32() < e.hurt_dur)
+                && !(sp.kind == Kind::EnderDragon && anim.dr_death > 0);
             let snap: Vec<(&'static str, usize)> = if hurt {
                 self.data.iter().map(|(k, v)| (*k, v.len())).collect()
             } else {
@@ -2571,7 +2597,25 @@ impl Mobs {
                     let hist = |d: i32| anim.dragon_sample(d, pt);
                     let pose = animals::ender_dragon_anim(model, flap, &hist, ph);
                     let r = root * pose;
-                    model.bake(r, [255; 4], light, out);
+                    if anim.dr_death > 0 {
+                        // VANILLA: EnderDragonRenderer#submit — deathTime = dragonDeathTime + pt;
+                        // модель entityCutoutDissolve(dragon, dragon_exploding), alpha = 1 − t/200.
+                        let t = anim.dr_death as f32 + pt;
+                        let a = ((1.0 - t / 200.0).clamp(0.0, 1.0) * 255.0).round() as u8;
+                        model.bake(
+                            r,
+                            [255, 255, 255, a],
+                            light,
+                            self.data.entry(DRAGON_DISSOLVE_TEX).or_default(),
+                        );
+                        ezzmc_render::lightningdraw::dragon_rays(
+                            root * Mat4::from_translation(Vec3::new(0.0, -1.0, -2.0)),
+                            t / 200.0,
+                            &mut self.dragon_rays,
+                        );
+                    } else {
+                        model.bake(r, [255; 4], light, out);
+                    }
                     // VANILLA: RenderTypes.eyes(dragon_eyes) — та же модель, полная яркость.
                     model.bake_emissive(r, self.data.entry("enderdragon/dragon_eyes").or_default());
                 }
@@ -3281,6 +3325,9 @@ impl Mobs {
 /// VANILLA: DragonFireballRenderer#TEXTURE_LOCATION.
 pub const DRAGON_FIREBALL_TEX: &str = "enderdragon/dragon_fireball";
 pub const BEAM_TEX: &str = "end_crystal/end_crystal_beam";
+/// Растворяющийся дракон: текстура dragon.png + маска dragon_exploding.png (ParticleDraw::new_dissolve).
+pub const DRAGON_DISSOLVE_TEX: &str = "enderdragon/dragon#dissolve";
+pub const DRAGON_EXPLODING_TEX: &str = "enderdragon/dragon_exploding";
 
 /// VANILLA: EndCrystal#time — random.nextInt(100000) при создании + тики. Случайное смещение
 /// выводим из id (у ванили оно тоже случайное и у каждого клиента своё).

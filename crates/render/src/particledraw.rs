@@ -148,7 +148,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, particles, false,
-            false, false, None, false, false, false,
+            false, false, None, false, false, false, false,
         )
     }
 
@@ -168,7 +168,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, true, false,
-            false, None, false, false, false,
+            false, None, false, false, false, false,
         )
     }
 
@@ -187,7 +187,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, true,
-            false, None, false, false, false,
+            false, None, false, false, false, false,
         )
     }
 
@@ -206,7 +206,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, false,
-            false, None, true, false, false,
+            false, None, true, false, false, false,
         )
     }
 
@@ -226,7 +226,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, false,
-            true, None, false, false, false,
+            true, None, false, false, false, false,
         )
     }
 
@@ -265,6 +265,7 @@ impl ParticleDraw {
             false,
             false,
             false,
+            false,
         )
     }
 
@@ -283,7 +284,7 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, false,
-            false, None, false, true, false,
+            false, None, false, true, false, false,
         )
     }
 
@@ -303,7 +304,43 @@ impl ParticleDraw {
     ) -> Self {
         Self::new_ex(
             device, queue, color, depth, projection, fog, lightmap, blocks, texture, false, false,
-            false, None, false, false, true,
+            false, None, false, false, true, false,
+        )
+    }
+
+    /// Растворение модели по маске. VANILLA: RenderPipelines#ENTITY_CUTOUT_DISSOLVE — ALPHA_CUTOUT 0.1,
+    /// без отсечения; фрагмент отбрасывается, если alpha вершины < alpha маски (DissolveMaskSampler).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_dissolve(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color: wgpu::TextureFormat,
+        depth: wgpu::TextureFormat,
+        projection: &wgpu::Buffer,
+        fog: &wgpu::Buffer,
+        lightmap: &wgpu::TextureView,
+        blocks: &wgpu::TextureView,
+        texture: Option<(&[u8], u32, u32)>,
+        mask: (&[u8], u32, u32),
+    ) -> Self {
+        Self::new_ex(
+            device,
+            queue,
+            color,
+            depth,
+            projection,
+            fog,
+            lightmap,
+            blocks,
+            texture,
+            false,
+            false,
+            false,
+            Some(mask),
+            false,
+            false,
+            false,
+            true,
         )
     }
 
@@ -329,6 +366,7 @@ impl ParticleDraw {
         mask: bool,
         additive: bool,
         repeat: bool,
+        dissolve: bool,
     ) -> Self {
         let vf = wgpu::ShaderStages::VERTEX_FRAGMENT;
         let uni = |binding| wgpu::BindGroupLayoutEntry {
@@ -414,15 +452,20 @@ impl ParticleDraw {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
-        let item_mode = item_glint.is_some();
+        let item_mode = item_glint.is_some() && !dissolve;
         let (gd, gw, gh) = item_glint.unwrap_or((&[255u8; 4], 1, 1));
         let gview = make_texture(device, queue, "particle.glint", gd, gw, gh);
-        let gsampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
+        let gsampler = device.create_sampler(&if dissolve {
+            // Маска растворения: та же раскладка UV, что у основной текстуры.
+            wgpu::SamplerDescriptor::default()
+        } else {
+            wgpu::SamplerDescriptor {
+                address_mode_u: wgpu::AddressMode::Repeat,
+                address_mode_v: wgpu::AddressMode::Repeat,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }
         });
         let mk_group = |label: &str, view: &wgpu::TextureView| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -533,7 +576,9 @@ impl ParticleDraw {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &module,
-                entry_point: Some(if item_mode {
+                entry_point: Some(if dissolve {
+                    "fs_dissolve"
+                } else if item_mode {
                     "fs_glint_item"
                 } else if glint {
                     "fs_glint"
