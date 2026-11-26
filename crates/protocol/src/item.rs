@@ -21,6 +21,7 @@ pub enum ClientRegistry {
     ConsumeEffectType,
     EntityType,
     Attribute,
+    Block,
 }
 
 impl ClientRegistry {
@@ -35,6 +36,7 @@ impl ClientRegistry {
             Self::ConsumeEffectType => reg::CONSUME_EFFECT_TYPE,
             Self::EntityType => reg::ENTITY_TYPE,
             Self::Attribute => reg::ATTRIBUTE,
+            Self::Block => reg::BLOCK,
         };
         t.get(id as usize).copied()
     }
@@ -86,6 +88,8 @@ pub enum Shape {
     RegistryId(ClientRegistry),
     /// `ByteBufCodecs.holderSet`: varint 0 then a tag id, else n + 1 ids.
     HolderSet,
+    /// [`Shape::HolderSet`] over a static registry, whose ids shift between versions.
+    RegistrySet(ClientRegistry),
     /// An `idMapper` enum dispatch with `OutOfBoundsStrategy.ZERO`.
     ById(&'static [Shape]),
     /// `ByteBufCodecs.registry(..).dispatch`, by entry name.
@@ -204,7 +208,7 @@ static COMPONENT_MATCHERS: Shape = Struct(&[
 
 /// `advancements.predicates.BlockPredicate.STREAM_CODEC`.
 static BLOCK_PREDICATE: Shape = Struct(&[
-    Optional(&HolderSet),
+    Optional(&RegistrySet(ClientRegistry::Block)),
     Optional(&List(UNBOUNDED, &PROPERTY_MATCHER)),
     Optional(&Compound),
     Ref(&COMPONENT_MATCHERS),
@@ -403,7 +407,7 @@ static COMPONENTS_26_2: &[(&str, Shape)] = &[
     // UseCooldown.java:28
     ("use_cooldown", Struct(&[Float, Optional(&IDENTIFIER)])),
     ("damage_resistant", HolderSet),
-    ("repairable", HolderSet),
+    ("repairable", RegistrySet(ClientRegistry::Item)),
     ("provides_banner_patterns", HolderSet),
     // Tool.java:30,50
     (
@@ -411,7 +415,11 @@ static COMPONENTS_26_2: &[(&str, Shape)] = &[
         Struct(&[
             List(
                 UNBOUNDED,
-                &Struct(&[HolderSet, Optional(&Float), Optional(&Bool)]),
+                &Struct(&[
+                    RegistrySet(ClientRegistry::Block),
+                    Optional(&Float),
+                    Optional(&Bool),
+                ]),
             ),
             Float,
             VarInt,
@@ -433,7 +441,7 @@ static COMPONENTS_26_2: &[(&str, Shape)] = &[
             Ref(&SOUND),
             Optional(&IDENTIFIER),
             Optional(&IDENTIFIER),
-            Optional(&HolderSet),
+            Optional(&RegistrySet(ClientRegistry::EntityType)),
             Bool,
             Bool,
             Bool,
@@ -656,7 +664,10 @@ static COMPONENTS_26_3: &[(&str, Shape)] = &[
         Struct(&[Either(&Int, &IDENTIFIER), Either(&Float, &IDENTIFIER)]),
     ),
     // MobVisibility.java:29
-    ("mob_visibility", Struct(&[HolderSet, Float])),
+    (
+        "mob_visibility",
+        Struct(&[RegistrySet(ClientRegistry::EntityType), Float]),
+    ),
     // DecoratedPotPatterns.java:46, a registry holder.
     ("provides_pottery_pattern", VarInt),
     ("sign_text_front", Ref(&SIGN_TEXT)),
@@ -986,7 +997,7 @@ pub fn walk(r: &mut Reader, shape: &'static Shape, depth: u32) -> ProtocolResult
             r.string(MAX_STRING_LENGTH)?;
         }
         Append(inner, _) => walk(r, inner, depth)?,
-        HolderSet => match r.var_int()? {
+        HolderSet | RegistrySet(_) => match r.var_int()? {
             0 => {
                 r.string(MAX_STRING_LENGTH)?;
             }

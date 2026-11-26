@@ -16,7 +16,7 @@ fn bad(what: &'static str) -> ProtocolError {
     ProtocolError::InvalidValue { what, value: -1 }
 }
 
-const REGISTRIES: [ClientRegistry; 9] = [
+const REGISTRIES: [ClientRegistry; 10] = [
     ClientRegistry::SoundEvent,
     ClientRegistry::Item,
     ClientRegistry::DataComponentType,
@@ -26,6 +26,7 @@ const REGISTRIES: [ClientRegistry; 9] = [
     ClientRegistry::ConsumeEffectType,
     ClientRegistry::EntityType,
     ClientRegistry::Attribute,
+    ClientRegistry::Block,
 ];
 
 fn src_names(reg: ClientRegistry) -> &'static [&'static str] {
@@ -39,6 +40,7 @@ fn src_names(reg: ClientRegistry) -> &'static [&'static str] {
         ClientRegistry::ConsumeEffectType => src::CONSUME_EFFECT_TYPE,
         ClientRegistry::EntityType => src::ENTITY_TYPE,
         ClientRegistry::Attribute => src::ATTRIBUTE,
+        ClientRegistry::Block => src::BLOCK,
     }
 }
 
@@ -53,6 +55,7 @@ fn canon_names(reg: ClientRegistry) -> &'static [&'static str] {
         ClientRegistry::ConsumeEffectType => canon::CONSUME_EFFECT_TYPE,
         ClientRegistry::EntityType => canon::ENTITY_TYPE,
         ClientRegistry::Attribute => canon::ATTRIBUTE,
+        ClientRegistry::Block => canon::BLOCK,
     }
 }
 
@@ -263,6 +266,33 @@ impl Translator {
                 let same =
                     d.is_some_and(|d| std::mem::discriminant(d) == std::mem::discriminant(s));
                 leaf(r, w, same)
+            }
+            RegistrySet(reg) => {
+                // Список id переводится, непереводимые выбрасываются; тег копируется.
+                let ok = matches!(d, Some(RegistrySet(dr)) if *dr as u8 == *reg as u8);
+                match r.var_int()? {
+                    0 => {
+                        let tag = r.string(MAX_STRING_LENGTH)?;
+                        w.var_int(0).string(&tag);
+                    }
+                    n => {
+                        let n = (n as usize).saturating_sub(1);
+                        if n > r.remaining() {
+                            return Err(bad("holder set longer than the frame"));
+                        }
+                        let mut ids = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            if let Some(i) = self.id(*reg, r.var_int()?) {
+                                ids.push(i);
+                            }
+                        }
+                        w.var_int(ids.len() as i32 + 1);
+                        for i in ids {
+                            w.var_int(i);
+                        }
+                    }
+                }
+                Ok(ok)
             }
             TagKey => {
                 // TagKey (1.21.11) → holderSet: 0, затем id тега.
@@ -565,6 +595,83 @@ mod tests {
             st.patch.removed,
             [src_id(canon::DATA_COMPONENT_TYPE, "damage") as u32]
         );
+    }
+
+    #[test]
+    fn registry_sets_in_components_remapped() {
+        let t = Translator::new(|s| s);
+        let mut w = Writer::new();
+        // diamond_pickaxe: repairable [diamond], tool [{blocks [cherry_log, dirt], speed 8}]
+        w.var_int(1).var_int(src_id(src::ITEM, "diamond_pickaxe"));
+        w.var_int(2).var_int(0);
+        w.var_int(src_id(src::DATA_COMPONENT_TYPE, "repairable"))
+            .var_int(2)
+            .var_int(src_id(src::ITEM, "diamond"));
+        w.var_int(src_id(src::DATA_COMPONENT_TYPE, "tool"))
+            .var_int(1);
+        w.var_int(3)
+            .var_int(src_id(src::BLOCK, "cherry_log"))
+            .var_int(src_id(src::BLOCK, "dirt"));
+        w.bool(true).f32(8.0).bool(false);
+        w.f32(1.0).var_int(1).bool(true);
+        let buf = w.into_vec();
+        let mut r = Reader::new(&buf);
+        let mut out = Writer::new();
+        t.stack(&mut r, &mut out).unwrap();
+        assert_eq!(r.remaining(), 0);
+        let out = out.into_vec();
+        let mut r = Reader::new(&out);
+        let st = crate::item::read_stack(&mut r).unwrap().unwrap();
+        let mut v = Writer::new();
+        v.var_int(2).var_int(src_id(canon::ITEM, "diamond"));
+        assert_eq!(&*st.patch.added[0].1, v.into_vec().as_slice());
+        let mut v = Writer::new();
+        v.var_int(1)
+            .var_int(3)
+            .var_int(src_id(canon::BLOCK, "cherry_log"))
+            .var_int(src_id(canon::BLOCK, "dirt"));
+        v.bool(true).f32(8.0).bool(false);
+        v.f32(1.0).var_int(1).bool(true);
+        assert_eq!(&*st.patch.added[1].1, v.into_vec().as_slice());
+        assert_ne!(
+            src_id(src::BLOCK, "cherry_log"),
+            src_id(canon::BLOCK, "cherry_log")
+        );
+    }
+
+    #[test]
+    fn can_break_block_ids_remapped() {
+        let t = Translator::new(|s| s);
+        let mut w = Writer::new();
+        w.var_int(1).var_int(src_id(src::ITEM, "diamond_pickaxe"));
+        w.var_int(1).var_int(0);
+        w.var_int(src_id(src::DATA_COMPONENT_TYPE, "can_break"))
+            .var_int(1)
+            .bool(true)
+            .var_int(3)
+            .var_int(src_id(src::BLOCK, "cherry_log"))
+            .var_int(src_id(src::BLOCK, "dirt"));
+        w.bool(false).bool(false).var_int(0).var_int(0);
+        let buf = w.into_vec();
+        let mut r = Reader::new(&buf);
+        let mut out = Writer::new();
+        t.stack(&mut r, &mut out).unwrap();
+        assert_eq!(r.remaining(), 0);
+        let out = out.into_vec();
+        let mut r = Reader::new(&out);
+        let st = crate::item::read_stack(&mut r).unwrap().unwrap();
+        assert_eq!(
+            st.patch.added[0].0,
+            src_id(canon::DATA_COMPONENT_TYPE, "can_break") as u32
+        );
+        let mut v = Writer::new();
+        v.var_int(1)
+            .bool(true)
+            .var_int(3)
+            .var_int(src_id(canon::BLOCK, "cherry_log"))
+            .var_int(src_id(canon::BLOCK, "dirt"));
+        v.bool(false).bool(false).var_int(0).var_int(0);
+        assert_eq!(&*st.patch.added[0].1, v.into_vec().as_slice());
     }
 
     #[test]

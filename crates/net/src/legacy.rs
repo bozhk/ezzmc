@@ -485,6 +485,10 @@ fn recipe_entry(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
     Ok(())
 }
 
+fn state_id(id: i32) -> i32 {
+    ezzmc_world::legacy::state_to_canon(id.max(0) as u32) as i32
+}
+
 fn tr() -> &'static Translator {
     ezzmc_protocol::translate::v1_21_11(ezzmc_world::legacy::state_to_canon)
 }
@@ -584,6 +588,58 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
             let name = CANON.entity_type.get(canon as usize).copied().unwrap_or("");
             layouts().insert(id, DataLayout::of(name));
             w.var_int(id).bytes(uuid).var_int(canon as i32);
+            if name != "falling_block" {
+                w.bytes(r.rest());
+                return Ok(Some(w.into_vec()));
+            }
+            // x, y, z; LpVec3 скорости (0 — один байт; иначе 2+4 байта и VarInt при флаге 4);
+            // xRot, yRot, yHeadRot; data — id состояния (FallingBlockEntity).
+            w.bytes(r.bytes(24)?);
+            let m = r.u8()?;
+            w.u8(m);
+            if m != 0 {
+                w.bytes(r.bytes(5)?);
+                if m & 4 != 0 {
+                    w.var_int(r.var_int()?);
+                }
+            }
+            w.bytes(r.bytes(3)?);
+            w.var_int(state_id(r.var_int()?));
+        }
+        // VANILLA: ClientboundBlockUpdatePacket — BlockPos, id состояния.
+        "block_update" => {
+            w.bytes(r.bytes(8)?).var_int(state_id(r.var_int()?));
+        }
+        // VANILLA: ClientboundSectionBlocksUpdatePacket — SectionPos, VarLong (state << 12 | pos).
+        "section_blocks_update" => {
+            w.bytes(r.bytes(8)?);
+            let n = r.length("section updates", 4096)?;
+            w.var_int(n as i32);
+            for _ in 0..n {
+                let e = r.var_long()?;
+                let st = ezzmc_world::legacy::state_to_canon((e >> 12) as u32);
+                w.var_long((i64::from(st) << 12) | (e & 4095));
+            }
+        }
+        // VANILLA: ClientboundBlockEventPacket — BlockPos, b0, b1, registry block.
+        "block_event" => {
+            w.bytes(r.bytes(10)?);
+            let Some(b) = tr().id(ClientRegistry::Block, r.var_int()?) else {
+                return Ok(Some(Vec::new()));
+            };
+            w.var_int(b);
+        }
+        // VANILLA: ClientboundLevelEventPacket — int type, BlockPos, int data, bool global.
+        // LevelEventHandler: 2001 (разрушение) и 3008 (кисть) — data = id состояния.
+        "level_event" => {
+            let t = r.i32()?;
+            w.i32(t).bytes(r.bytes(8)?);
+            let data = r.i32()?;
+            w.i32(if matches!(t, 2001 | 3008) {
+                state_id(data)
+            } else {
+                data
+            });
             w.bytes(r.rest());
         }
         // VANILLA: ClientboundLevelChunkPacketData (1.21.11 = 26.3): heightmaps, byteArray секций,
@@ -886,6 +942,26 @@ mod tests {
             .unwrap();
         let mut r = Reader::new(&out);
         assert_eq!((r.i64().unwrap(), r.var_int().unwrap()), (7, canon));
+    }
+
+    #[test]
+    fn block_event_uses_canon_block_id() {
+        let src = ezzmc_protocol::generated::r1_21_11::BLOCK
+            .iter()
+            .position(|x| *x == "cherry_log")
+            .unwrap() as i32;
+        let dst = ezzmc_protocol::generated::r26_3::BLOCK
+            .iter()
+            .position(|x| *x == "cherry_log")
+            .unwrap() as i32;
+        let mut w = Writer::new();
+        w.i64(0).u8(1).u8(2).var_int(src);
+        let out = clientbound_1_21_11("block_event", &w.into_vec())
+            .unwrap()
+            .unwrap();
+        let mut e = Writer::new();
+        e.i64(0).u8(1).u8(2).var_int(dst);
+        assert_eq!(out, e.into_vec());
     }
 
     #[test]
