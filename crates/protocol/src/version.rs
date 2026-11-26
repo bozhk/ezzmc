@@ -78,6 +78,19 @@ pub const V1_21_6: Version = Version {
     particle_type: generated::r1_21_6::PARTICLE_TYPE,
 };
 
+/// 1.21.5 (протокол 770): нет диалогов/путевых точек 1.21.6 (сдвиг id пакетов), нет
+/// dried_ghast/happy_ghast и предметов 1.21.6 в реестрах.
+pub const V1_21_5: Version = Version {
+    name: "1.21.5",
+    protocol: 770,
+    packets: generated::v1_21_5::PACKETS,
+    item: generated::r1_21_5::ITEM,
+    block: generated::r1_21_5::BLOCK,
+    entity_type: generated::r1_21_5::ENTITY_TYPE,
+    sound_event: generated::r1_21_5::SOUND_EVENT,
+    particle_type: generated::r1_21_5::PARTICLE_TYPE,
+};
+
 /// Forge/ваниль 1.20.1 (протокол 763): нет Configuration-фазы, реестры внутри Play `login`.
 pub const V1_20_1: Version = Version {
     name: "1.20.1",
@@ -93,7 +106,9 @@ pub const V1_20_1: Version = Version {
 /// Каноническая версия (на ней написан весь клиент).
 pub const CANON: Version = V26_3;
 
-pub const SUPPORTED: &[Version] = &[V26_3, V1_21_11, V1_21_10, V1_21_8, V1_21_6, V1_20_1];
+pub const SUPPORTED: &[Version] = &[
+    V26_3, V1_21_11, V1_21_10, V1_21_8, V1_21_6, V1_21_5, V1_20_1,
+];
 
 /// Версия по protocol number из Status-ответа.
 pub fn by_protocol(protocol: i32) -> Option<Version> {
@@ -116,9 +131,9 @@ impl Version {
         self.protocol == CANON.protocol
     }
 
-    /// 1.21.7–1.21.11: переводятся одним путём (`legacy::clientbound_1_21_11`).
+    /// 1.21.5–1.21.11: переводятся одним путём (`legacy::clientbound_1_21_11`).
     pub fn is_1_21_late(&self) -> bool {
-        matches!(self.protocol, 771..=774)
+        matches!(self.protocol, 770..=774)
     }
 }
 
@@ -141,6 +156,7 @@ mod tests {
         assert_eq!(by_protocol(773).map(|v| v.name), Some("1.21.10"));
         assert_eq!(by_protocol(772).map(|v| v.name), Some("1.21.8"));
         assert_eq!(by_protocol(771).map(|v| v.name), Some("1.21.6"));
+        assert_eq!(by_protocol(770).map(|v| v.name), Some("1.21.5"));
         assert!(by_protocol(1).is_none());
     }
 

@@ -496,11 +496,10 @@ fn run(
         *g = r.entries.iter().map(|(n, _)| n.clone()).collect();
     }
     // Атрибуты для attribute_modifiers подсказки: короткие имена, порядок = holder id.
-    if let (Some(r), Ok(mut g)) = (
-        reg("minecraft:attribute"),
-        crate::tooltip::ATTRIBUTES.lock(),
-    ) {
-        *g = r
+    // Сервер 1.21.x не шлёт реестр атрибутов (встроенный); id в attribute_modifiers
+    // уже переведены в канон (`Translator`) — тогда порядок канонической таблицы.
+    let attrs: Vec<String> = match reg("minecraft:attribute") {
+        Some(r) => r
             .entries
             .iter()
             .map(|(n, _)| {
@@ -508,7 +507,14 @@ fn run(
                     .unwrap_or(n.as_str())
                     .to_owned()
             })
-            .collect();
+            .collect(),
+        None => ezzmc_protocol::generated::r26_3::ATTRIBUTE
+            .iter()
+            .map(|n| (*n).to_owned())
+            .collect(),
+    };
+    if let Ok(mut g) = crate::tooltip::ATTRIBUTES.lock() {
+        *g = attrs;
     }
     // Пластинки для подсказки: описание jukebox_song, порядок = holder id.
     if let (Some(r), Ok(mut g)) = (

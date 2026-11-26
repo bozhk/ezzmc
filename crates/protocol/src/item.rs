@@ -114,6 +114,10 @@ pub enum Shape {
     /// The inner value; translation then appends these canonical bytes for
     /// fields newer versions added (defaults). Source-version shapes only.
     Append(&'static Shape, &'static [u8]),
+    /// A struct whose fields are the first fields of the newer struct; the
+    /// newer trailing fields are appended as these canonical bytes (defaults).
+    /// Source-version shapes only.
+    Extend(&'static [Shape], &'static [u8]),
     /// A bare value that newer versions wrap as the left branch of an
     /// [`Shape::Either`]. Source-version shapes only.
     Left(&'static Shape),
@@ -801,6 +805,68 @@ static COMPONENTS_1_21_8: &[(&str, Shape)] = &[
     ("profile", Ref(&RESOLVABLE_PROFILE_1_21_8)),
 ];
 
+/// Codecs changed in 1.21.6 (`Equippable` shearing, attribute modifier `Display`).
+static COMPONENTS_1_21_5: &[(&str, Shape)] = &[
+    // ItemAttributeModifiers.Entry (1.21.5): attribute, modifier, slot group; 1.21.6
+    // appended Display (Default = id 0).
+    (
+        "attribute_modifiers",
+        List(
+            UNBOUNDED,
+            &Extend(
+                &[
+                    RegistryId(ClientRegistry::Attribute),
+                    Struct(&[IDENTIFIER, Double, VarInt]),
+                    VarInt,
+                ],
+                &[0],
+            ),
+        ),
+    ),
+    // Equippable (1.21.5): no canBeSheared (default false) / shearingSound (default
+    // SoundEvents.SHEARS_SNIP, appended as a direct holder by location).
+    (
+        "equippable",
+        Extend(
+            &[
+                VarInt,
+                Ref(&SOUND),
+                Optional(&IDENTIFIER),
+                Optional(&IDENTIFIER),
+                Optional(&RegistrySet(ClientRegistry::EntityType)),
+                Bool,
+                Bool,
+                Bool,
+                Bool,
+            ],
+            b"\x00\x00\x1aminecraft:item.shears.snip\x00",
+        ),
+    ),
+];
+
+/// Component shapes of 1.21.5 by its own component type id.
+pub(crate) fn components_1_21_5() -> &'static [&'static Shape] {
+    static T: std::sync::LazyLock<Vec<&'static Shape>> = std::sync::LazyLock::new(|| {
+        crate::generated::r1_21_5::DATA_COMPONENT_TYPE
+            .iter()
+            .map(|name| {
+                [
+                    COMPONENTS_1_21_5,
+                    COMPONENTS_1_21_8,
+                    COMPONENTS_1_21_10,
+                    COMPONENTS_1_21_11,
+                    COMPONENTS_26_2,
+                ]
+                .iter()
+                .find_map(|layer| layer.iter().find(|(n, _)| n == name))
+                .map(|(_, s)| s)
+                .unwrap_or(&Shape::Nbt)
+            })
+            .collect()
+    });
+    &T
+}
+
 /// Component shapes of 1.21.7/1.21.8 by its own component type id.
 pub(crate) fn components_1_21_8() -> &'static [&'static Shape] {
     static T: std::sync::LazyLock<Vec<&'static Shape>> = std::sync::LazyLock::new(|| {
@@ -1100,6 +1166,11 @@ pub fn walk(r: &mut Reader, shape: &'static Shape, depth: u32) -> ProtocolResult
             r.string(MAX_STRING_LENGTH)?;
         }
         Append(inner, _) | Left(inner) | Right(inner) => walk(r, inner, depth)?,
+        Extend(fields, _) => {
+            for f in *fields {
+                walk(r, f, depth)?;
+            }
+        }
         HolderSet | RegistrySet(_) => match r.var_int()? {
             0 => {
                 r.string(MAX_STRING_LENGTH)?;

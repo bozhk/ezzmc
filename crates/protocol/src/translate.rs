@@ -4,10 +4,10 @@
 //! блоков) переводятся по именам. Несовместимое значение (`Ok(false)`) вызывающий отбрасывает:
 //! компонент выпадает из патча, стек становится пустым.
 use crate::error::{ProtocolError, ProtocolResult};
-use crate::generated::{r1_21_10, r1_21_11, r1_21_6, r1_21_8, r26_3 as canon};
+use crate::generated::{r1_21_10, r1_21_11, r1_21_5, r1_21_6, r1_21_8, r26_3 as canon};
 use crate::item::{
-    components, components_1_21_10, components_1_21_11, components_1_21_8, ClientRegistry, Shape,
-    MAX_DEPTH,
+    components, components_1_21_10, components_1_21_11, components_1_21_5, components_1_21_8,
+    ClientRegistry, Shape, MAX_DEPTH,
 };
 use crate::version::build_remap;
 use crate::wire::{Reader, Writer};
@@ -55,6 +55,7 @@ src_names!(names_1_21_11, r1_21_11);
 src_names!(names_1_21_10, r1_21_10);
 src_names!(names_1_21_8, r1_21_8);
 src_names!(names_1_21_6, r1_21_6);
+src_names!(names_1_21_5, r1_21_5);
 
 type Names = fn(ClientRegistry) -> &'static [&'static str];
 type Comps = fn() -> &'static [&'static Shape];
@@ -85,17 +86,24 @@ const SRC_1_21_6: Source = Source {
     components: components_1_21_8,
 };
 
-/// Источник перевода для версии соединения: 771 — 1.21.6, 772 — 1.21.7/1.21.8,
+/// 1.21.5: Equippable без canBeSheared/shearingSound, атрибуты без Display.
+const SRC_1_21_5: Source = Source {
+    names: names_1_21_5,
+    components: components_1_21_5,
+};
+
+/// Источник перевода для версии соединения: 770 — 1.21.5, 771 — 1.21.6, 772 — 1.21.7/1.21.8,
 /// 773 — 1.21.9/1.21.10, остальное — 1.21.11.
 fn source_index(protocol: i32) -> usize {
     match protocol {
+        770 => 4,
         771 => 3,
         772 => 0,
         773 => 1,
         _ => 2,
     }
 }
-const SOURCES: [Source; 4] = [SRC_1_21_8, SRC_1_21_10, SRC_1_21_11, SRC_1_21_6];
+const SOURCES: [Source; 5] = [SRC_1_21_8, SRC_1_21_10, SRC_1_21_11, SRC_1_21_6, SRC_1_21_5];
 
 fn canon_names(reg: ClientRegistry) -> &'static [&'static str] {
     match reg {
@@ -429,6 +437,20 @@ impl Translator {
                 Ok(false)
             };
         }
+        // Канон → версия без поздних полей структуры (Shape::Extend): общие поля
+        // переводятся, добавленные позже — пропускаются.
+        if let (Struct(xs), Some(Extend(ys, _))) = (s, d) {
+            if xs.len() > ys.len() {
+                let mut ok = true;
+                for (x, y) in xs.iter().zip(ys.iter()) {
+                    ok &= self.tr(r, w, x, Some(y), depth)?;
+                }
+                for x in &xs[ys.len()..] {
+                    crate::item::walk(r, x, depth)?;
+                }
+                return Ok(ok);
+            }
+        }
         // Канон → 1.21.8: TypedEntityData (id реестра, compound) → CustomData с `id` внутри.
         // VANILLA: TypedEntityData (1.21.9) / CustomData (1.21.8).
         if let (Struct([RegistryId(_), Compound]), Some(IdInNbt(reg)), true) = (s, d, self.rev) {
@@ -641,6 +663,20 @@ impl Translator {
                 w.bytes(&buf);
                 Ok(ok)
             }
+            Extend(fields, extra) => {
+                // Структура старой версии = начало структуры канона; хвост — значения по умолчанию.
+                let df = match d {
+                    Some(Struct(x)) if x.len() > fields.len() => Some(*x),
+                    _ => None,
+                };
+                let mut ok = df.is_some();
+                for (i, f) in fields.iter().enumerate() {
+                    let di = if ok { df.map(|x| &x[i]) } else { None };
+                    ok &= self.tr(r, w, f, di, depth)?;
+                }
+                w.bytes(extra);
+                Ok(ok)
+            }
             Append(inner, extra) => {
                 // Поле, добавленное в каноне: исходное значение + значение по умолчанию.
                 let df = match d {
@@ -792,7 +828,7 @@ fn len(r: &mut Reader, max: usize) -> ProtocolResult<usize> {
 
 /// Пропуск патча компонентов версии соединения (для [`Shape::Stack`] в `walk`).
 pub(crate) fn skip_patch_legacy(r: &mut Reader, depth: u32) -> ProtocolResult<()> {
-    static T: [OnceLock<Translator>; 4] = [const { OnceLock::new() }; 4];
+    static T: [OnceLock<Translator>; 5] = [const { OnceLock::new() }; 5];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::new(SOURCES[k], |s| s))
         .patch(r, &mut Writer::new(), depth)?;
@@ -802,14 +838,14 @@ pub(crate) fn skip_patch_legacy(r: &mut Reader, depth: u32) -> ProtocolResult<()
 /// Переводчик версии соединения (1.21.7–1.21.11) → канон; `block_state` — перевод id
 /// состояний (ezzmc-world). Таблицы строятся один раз на версию.
 pub fn from_server(block_state: fn(u32) -> u32) -> &'static Translator {
-    static T: [OnceLock<Translator>; 4] = [const { OnceLock::new() }; 4];
+    static T: [OnceLock<Translator>; 5] = [const { OnceLock::new() }; 5];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::new(SOURCES[k], block_state))
 }
 
 /// Переводчик канон → версия соединения (пакеты клиента); `block_state` — канон → версия.
 pub fn to_server(block_state: fn(u32) -> u32) -> &'static Translator {
-    static T: [OnceLock<Translator>; 4] = [const { OnceLock::new() }; 4];
+    static T: [OnceLock<Translator>; 5] = [const { OnceLock::new() }; 5];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::build(SOURCES[k], block_state, true))
 }
@@ -1022,6 +1058,104 @@ mod tests {
         let dst = components_1_21_8()[src_id(old::DATA_COMPONENT_TYPE, "entity_data") as usize];
         assert!(back.tr(&mut r, &mut o, shape, Some(dst), 0).unwrap());
         assert_eq!(o.into_vec(), data);
+    }
+
+    /// 1.21.5: Equippable без canBeSheared/shearingSound — хвост дописывается значениями
+    /// по умолчанию (false, SHEARS_SNIP); обратно хвост отбрасывается.
+    #[test]
+    fn equippable_1_21_5_extended() {
+        use crate::generated::r1_21_5 as old;
+        let t = Translator::new(SRC_1_21_5, |s| s);
+        let snd = src_id(old::SOUND_EVENT, "item.armor.equip_iron");
+        let mut v = Writer::new();
+        // slot HEAD(5), holder id+1, no asset, no camera overlay, no entities, 4 bools
+        v.var_int(5)
+            .var_int(snd + 1)
+            .bool(false)
+            .bool(false)
+            .bool(false);
+        v.bool(true).bool(true).bool(true).bool(false);
+        let old_val = v.into_vec();
+        let mut w = Writer::new();
+        w.var_int(1).var_int(src_id(old::ITEM, "iron_helmet"));
+        w.var_int(1).var_int(0);
+        w.var_int(src_id(old::DATA_COMPONENT_TYPE, "equippable"))
+            .bytes(&old_val);
+        let buf = w.into_vec();
+        let mut out = Writer::new();
+        t.stack(&mut Reader::new(&buf), &mut out).unwrap();
+        let out = out.into_vec();
+        let st = crate::item::read_stack(&mut Reader::new(&out))
+            .unwrap()
+            .unwrap();
+        let mut e = Writer::new();
+        e.var_int(5)
+            .var_int(src_id(canon::SOUND_EVENT, "item.armor.equip_iron") + 1)
+            .bool(false)
+            .bool(false)
+            .bool(false);
+        e.bool(true).bool(true).bool(true).bool(false);
+        e.bool(false)
+            .var_int(0)
+            .string("minecraft:item.shears.snip")
+            .bool(false);
+        let canon_val = e.into_vec();
+        assert_eq!(
+            st.patch.added[0],
+            (
+                src_id(canon::DATA_COMPONENT_TYPE, "equippable") as u32,
+                canon_val.clone().into()
+            )
+        );
+
+        let back = Translator::build(SRC_1_21_5, |s| s, true);
+        let shape =
+            &crate::item::components()[src_id(canon::DATA_COMPONENT_TYPE, "equippable") as usize];
+        let dst = components_1_21_5()[src_id(old::DATA_COMPONENT_TYPE, "equippable") as usize];
+        let mut r = Reader::new(&canon_val);
+        let mut o = Writer::new();
+        assert!(back.tr(&mut r, &mut o, shape, Some(dst), 0).unwrap());
+        assert_eq!(r.remaining(), 0);
+        assert_eq!(o.into_vec(), old_val);
+    }
+
+    /// 1.21.5: запись атрибута без Display → Display.Default (id 0).
+    #[test]
+    fn attribute_modifiers_1_21_5_display_default() {
+        use crate::generated::r1_21_5 as old;
+        let t = Translator::new(SRC_1_21_5, |s| s);
+        let mut w = Writer::new();
+        w.var_int(1).var_int(src_id(old::ITEM, "diamond_sword"));
+        w.var_int(1).var_int(0);
+        w.var_int(src_id(old::DATA_COMPONENT_TYPE, "attribute_modifiers"))
+            .var_int(1)
+            .var_int(src_id(old::ATTRIBUTE, "attack_damage"))
+            .string("a:b")
+            .f64(7.0)
+            .var_int(0)
+            .var_int(1);
+        let buf = w.into_vec();
+        let mut out = Writer::new();
+        t.stack(&mut Reader::new(&buf), &mut out).unwrap();
+        let out = out.into_vec();
+        let st = crate::item::read_stack(&mut Reader::new(&out))
+            .unwrap()
+            .unwrap();
+        let mut e = Writer::new();
+        e.var_int(1)
+            .var_int(src_id(canon::ATTRIBUTE, "attack_damage"))
+            .string("a:b")
+            .f64(7.0)
+            .var_int(0)
+            .var_int(1)
+            .var_int(0);
+        assert_eq!(
+            st.patch.added[0],
+            (
+                src_id(canon::DATA_COMPONENT_TYPE, "attribute_modifiers") as u32,
+                e.into_vec().into()
+            )
+        );
     }
 
     /// 1.21.10: частичный предикат компонента — голый id типа предиката (`Shape::Left`),

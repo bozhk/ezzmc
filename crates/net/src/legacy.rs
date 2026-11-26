@@ -3,39 +3,48 @@
 //! между версиями. Реестровые id (предметы, сущности, звуки, частицы) — позже в этом же месте.
 use ezzmc_protocol::item::{ClientRegistry, Shape, PARTICLE, PARTICLE_1_21_11, SOUND};
 use ezzmc_protocol::translate::Translator;
-use ezzmc_protocol::version::{build_remap, Version, CANON, V1_21_10, V1_21_11, V1_21_8};
+use ezzmc_protocol::version::{build_remap, Version, CANON, V1_21_10, V1_21_11, V1_21_5, V1_21_8};
 use ezzmc_protocol::wire::{Reader, Writer};
 use ezzmc_protocol::{Direction, ProtocolResult, State};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicBool, AtomicI32};
 use std::sync::{Mutex, OnceLock};
 
-/// Версия соединения среди 1.21.6–1.21.11: 0 — 1.21.6–1.21.8 (771/772: пакеты, сущности и
+/// Версия соединения среди 1.21.5–1.21.11: 0 — 1.21.6–1.21.8 (771/772: пакеты, сущности и
 /// block_entity_type совпадают; предметы/звуки — в `Translator`), 1 — 1.21.9/1.21.10 (773),
-/// 2 — 1.21.11 (774).
+/// 2 — 1.21.11 (774), 3 — 1.21.5 (770: свои id пакетов и сущностей, форматы как у 1.21.8).
 fn ver() -> usize {
     match ezzmc_protocol::version::current().protocol {
+        770 => 3,
         771 | 772 => 0,
         773 => 1,
         _ => 2,
     }
 }
-const VERSIONS: [&Version; 3] = [&V1_21_8, &V1_21_10, &V1_21_11];
+const VERSIONS: [&Version; 4] = [&V1_21_8, &V1_21_10, &V1_21_11, &V1_21_5];
+
+/// Форматы до 1.21.9 (1.21.5–1.21.8): скорости short, BlockPos спавна без измерения и т. п.
+fn pre_1_21_9(k: usize) -> bool {
+    matches!(k, 0 | 3)
+}
 
 fn entity_type_map() -> &'static [Option<u32>] {
-    static T: [OnceLock<Vec<Option<u32>>>; 3] = [const { OnceLock::new() }; 3];
+    static T: [OnceLock<Vec<Option<u32>>>; 4] = [const { OnceLock::new() }; 4];
     let k = ver();
     T[k].get_or_init(|| build_remap(VERSIONS[k].entity_type, CANON.entity_type))
 }
 
 /// Реестр block_entity_type версии соединения → канон (в 26.x убран `bed`, добавлен `potent_sulfur`).
 fn block_entity_type(id: i32) -> Option<i32> {
-    use ezzmc_protocol::generated::{r1_21_10, r1_21_11, r1_21_8, r26_3};
-    const SRC: [&[&str]; 3] = [
+    use ezzmc_protocol::generated::{r1_21_10, r1_21_11, r1_21_5, r1_21_8, r26_3};
+    const SRC: [&[&str]; 4] = [
         r1_21_8::BLOCK_ENTITY_TYPE,
         r1_21_10::BLOCK_ENTITY_TYPE,
         r1_21_11::BLOCK_ENTITY_TYPE,
+        r1_21_5::BLOCK_ENTITY_TYPE,
     ];
-    static T: [OnceLock<Vec<Option<u32>>>; 3] = [const { OnceLock::new() }; 3];
+    static T: [OnceLock<Vec<Option<u32>>>; 4] = [const { OnceLock::new() }; 4];
     let k = ver();
     T[k].get_or_init(|| build_remap(SRC[k], r26_3::BLOCK_ENTITY_TYPE))
         .get(usize::try_from(id).ok()?)
@@ -695,7 +704,15 @@ fn set_entity_data(r: &mut Reader, w: &mut Writer, k: usize) -> ProtocolResult<(
         .get(&id)
         .copied()
         .unwrap_or((DataLayout::Same, ""));
-    let table = [SERIALIZERS_1_21_8, SERIALIZERS_1_21_10, SERIALIZERS_1_21_11][k];
+    let table = [
+        SERIALIZERS_1_21_8,
+        SERIALIZERS_1_21_10,
+        SERIALIZERS_1_21_11,
+        SERIALIZERS_1_21_8,
+    ][k];
+    // VANILLA: HangingEntity#DATA_DIRECTION (#8) появился в 1.21.6 — поля рамок/картин 1.21.5
+    // с #8 сдвигаются на 1 (направление приходит в add_entity, как и в 1.21.6).
+    let hanging = k == 3 && matches!(ty, "item_frame" | "glow_item_frame" | "painting");
     let player = ty == "player";
     let canon_of = |n: &str| SERIALIZERS_26_3.iter().position(|x| *x == n).unwrap_or(0);
     w.var_int(id);
@@ -704,8 +721,11 @@ fn set_entity_data(r: &mut Reader, w: &mut Writer, k: usize) -> ProtocolResult<(
         if idx == 0xFF {
             break;
         }
-        if k == 0 && player {
+        if pre_1_21_9(k) && player {
             idx = player_index_1_21_8(idx);
+        }
+        if hanging && idx >= 8 {
+            idx += 1;
         }
         let src = r.var_int()?;
         let ser = usize::try_from(src).ok().and_then(|i| table.get(i)).ok_or(
@@ -725,7 +745,7 @@ fn set_entity_data(r: &mut Reader, w: &mut Writer, k: usize) -> ProtocolResult<(
             }
             continue;
         }
-        match (k < 2).then(|| retyped_1_21_10(ty, idx)).flatten() {
+        match (k != 2).then(|| retyped_1_21_10(ty, idx)).flatten() {
             Some("HUMANOID_ARM") if *ser == "BYTE" => {
                 // HumanoidArm: 0 = LEFT, 1 = RIGHT.
                 let arm = i32::from(r.u8()? != 0);
@@ -753,15 +773,58 @@ fn set_entity_data(r: &mut Reader, w: &mut Writer, k: usize) -> ProtocolResult<(
     Ok(())
 }
 
-/// Пакет клиента (собран в каноне, id из таблицы версии) → тело для сервера 1.21.10/1.21.11.
-/// `None` — тело без изменений.
-pub fn serverbound_1_21_11(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
-    let table = VERSIONS[ver()].packets;
-    let Some(name) = table
+/// Пакет клиента для отправки: (id, тело).
+pub type Packet = (i32, Vec<u8>);
+
+/// id игрока из `login` и последнее отправленное состояние шифта (1.21.5: PRESS/RELEASE_SHIFT_KEY).
+static PLAYER_ID: AtomicI32 = AtomicI32::new(0);
+static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Пакет клиента (собран в каноне, id из таблицы версии) → пакеты для сервера 1.21.5–1.21.11
+/// (id, тело) в порядке отправки. `None` — пакет без изменений.
+pub fn serverbound_1_21_11(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<Packet>>> {
+    let b = serverbound_body(id, body)?;
+    let mut out = Vec::new();
+    // VANILLA: LocalPlayer#sendShiftKeyState (1.21.5) — до ServerboundPlayerInputPacket, при
+    // смене Input.shift: ServerboundPlayerCommandPacket PRESS_SHIFT_KEY(0)/RELEASE_SHIFT_KEY(1).
+    if ver() == 3 && packet_name(id) == Some("player_input") {
+        let shift = body.first().is_some_and(|f| f & 32 != 0);
+        if SHIFT_DOWN.swap(shift, Relaxed) != shift {
+            if let Some(cmd) = packet_id("player_command") {
+                let mut w = Writer::new();
+                w.var_int(PLAYER_ID.load(Relaxed))
+                    .var_int(i32::from(!shift))
+                    .var_int(0);
+                out.push((cmd, w.into_vec()));
+            }
+        }
+    }
+    if b.is_none() && out.is_empty() {
+        return Ok(None);
+    }
+    out.push((id, b.unwrap_or_else(|| body.to_vec())));
+    Ok(Some(out))
+}
+
+fn packet_name(id: i32) -> Option<&'static str> {
+    VERSIONS[ver()]
+        .packets
         .iter()
         .find(|p| p.state == State::Play && p.dir == Direction::Serverbound && p.id as i32 == id)
         .map(|p| p.name)
-    else {
+}
+
+fn packet_id(name: &str) -> Option<i32> {
+    VERSIONS[ver()]
+        .packets
+        .iter()
+        .find(|p| p.state == State::Play && p.dir == Direction::Serverbound && p.name == name)
+        .map(|p| p.id as i32)
+}
+
+/// Тело одного пакета клиента в формате версии соединения. `None` — без изменений.
+fn serverbound_body(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
+    let Some(name) = packet_name(id) else {
         return Ok(None);
     };
     let mut r = Reader::new(body);
@@ -784,6 +847,12 @@ pub fn serverbound_1_21_11(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<u8
         "set_creative_mode_slot" => {
             w.i16(r.i16()?);
             tr_back().stack_untrusted(&mut r, &mut w)?;
+        }
+        // VANILLA: ServerboundPlayerCommandPacket.Action (1.21.5): перед STOP_SLEEPING ещё
+        // PRESS_SHIFT_KEY, RELEASE_SHIFT_KEY.
+        "player_command" if ver() == 3 => {
+            let (eid, action, data) = (r.var_int()?, r.var_int()?, r.var_int()?);
+            w.var_int(eid).var_int(action + 2).var_int(data);
         }
         _ => return Ok(None),
     }
@@ -885,7 +954,7 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
             let name = CANON.entity_type.get(canon as usize).copied().unwrap_or("");
             layouts().insert(id, (DataLayout::of(name), name));
             w.var_int(id).bytes(uuid).var_int(canon as i32);
-            if ver() == 0 {
+            if pre_1_21_9(ver()) {
                 // VANILLA: ClientboundAddEntityPacket (1.21.8): x, y, z, xRot, yRot, yHeadRot,
                 // data, short×3 скорости → (1.21.9) x, y, z, LpVec3, xRot, yRot, yHeadRot, data.
                 let pos = r.bytes(24)?;
@@ -1060,8 +1129,9 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
         }
         "login" => {
             layouts().clear();
-            // int id, bool hardcore, список измерений, 3×VarInt, 3×bool, CommonPlayerSpawnInfo.
-            r.i32()?;
+            SHIFT_DOWN.store(false, Relaxed);
+            PLAYER_ID.store(r.i32()?, Relaxed);
+            // int id (выше), bool hardcore, список измерений, 3×VarInt, 3×bool, CommonPlayerSpawnInfo.
             r.bool()?;
             for _ in 0..r.length("levels", 1 << 10)? {
                 r.string(32767)?;
@@ -1079,7 +1149,7 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
         }
         // VANILLA: ClientboundSetDefaultSpawnPositionPacket (1.21.8): BlockPos, float angle →
         // (1.21.9) RespawnData: GlobalPos (измерение, BlockPos), yaw, pitch.
-        "set_default_spawn_position" if ver() == 0 => {
+        "set_default_spawn_position" if pre_1_21_9(ver()) => {
             let pos = r.bytes(8)?;
             let yaw = r.f32()?;
             let dim = dimension().clone();
@@ -1087,13 +1157,13 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
         }
         // VANILLA: ClientboundPlayerRotationPacket (1.21.8): yRot, xRot → (1.21.9) с флагами
         // relativeY/relativeX (абсолютный поворот).
-        "player_rotation" if ver() == 0 => {
+        "player_rotation" if pre_1_21_9(ver()) => {
             let (y, x) = (r.f32()?, r.f32()?);
             w.f32(y).bool(false).f32(x).bool(false);
         }
         // VANILLA: ClientboundSetEntityMotionPacket (1.21.8): short×3 (скорость × 8000) →
         // (1.21.9) LpVec3.
-        "set_entity_motion" if ver() == 0 => {
+        "set_entity_motion" if pre_1_21_9(ver()) => {
             w.var_int(r.var_int()?);
             let v = [r.i16()?, r.i16()?, r.i16()?].map(|v| f64::from(v) / 8000.0);
             crate::play::write_lp_vec3(&mut w, v);
@@ -1183,7 +1253,7 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
         // VANILLA: ClientboundExplodePacket (26.3) добавил playSound в конце; в 1.21.11 звук всегда.
         "explode" => {
             w.bytes(r.bytes(8 * 3)?);
-            let old = ver() == 0;
+            let old = pre_1_21_9(ver());
             if old {
                 // VANILLA-UNSURE: radius и blockCount появились в 1.21.9; при blockCount = 0
                 // и пустом blockParticles клиент 1.21.9+ не порождает частиц блоков.
@@ -1308,7 +1378,11 @@ mod tests {
             .var_int(0)
             .var_int(0);
         w.bool(false);
-        let out = serverbound_1_21_11(id, &w.into_vec()).unwrap().unwrap();
+        let out = serverbound_1_21_11(id, &w.into_vec())
+            .unwrap()
+            .unwrap()
+            .remove(0)
+            .1;
         let mut e = Writer::new();
         e.var_int(0)
             .var_int(5)
@@ -1362,6 +1436,25 @@ mod tests {
         e.u8(17).var_int(canon("FLOAT")).f32(4.0);
         e.u8(19).var_int(canon("OPTIONAL_UNSIGNED_INT")).var_int(3);
         e.u8(20).var_int(canon("OPTIONAL_UNSIGNED_INT")).var_int(0);
+        e.u8(0xFF);
+        assert_eq!(out.into_vec(), e.into_vec());
+    }
+
+    /// 1.21.5: у рамки нет HangingEntity#DATA_DIRECTION — предмет (#8) и поворот (#9) → #9/#10.
+    #[test]
+    fn entity_data_1_21_5_item_frame_shift() {
+        let ser = |n: &str| SERIALIZERS_1_21_8.iter().position(|x| *x == n).unwrap() as i32;
+        let canon = |n: &str| SERIALIZERS_26_3.iter().position(|x| *x == n).unwrap() as i32;
+        layouts().insert(-11, (DataLayout::Same, "item_frame"));
+        let mut w = Writer::new();
+        w.var_int(-11).u8(9).var_int(ser("INT")).var_int(3);
+        w.u8(0).var_int(ser("BYTE")).u8(0);
+        w.u8(0xFF);
+        let mut out = Writer::new();
+        set_entity_data(&mut Reader::new(&w.into_vec()), &mut out, 3).unwrap();
+        let mut e = Writer::new();
+        e.var_int(-11).u8(10).var_int(canon("INT")).var_int(3);
+        e.u8(0).var_int(canon("BYTE")).u8(0);
         e.u8(0xFF);
         assert_eq!(out.into_vec(), e.into_vec());
     }

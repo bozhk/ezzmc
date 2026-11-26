@@ -164,8 +164,11 @@ impl Connection {
             return Ok(());
         }
         if self.state == State::Play && ezzmc_protocol::version::current().is_1_21_late() {
-            if let Some(b) = crate::legacy::serverbound_1_21_11(id, body)? {
-                return self.send_raw(id, &b);
+            if let Some(out) = crate::legacy::serverbound_1_21_11(id, body)? {
+                for (i, b) in out {
+                    self.send_raw(i, &b)?;
+                }
+                return Ok(());
             }
         }
         self.send_raw(id, body)
