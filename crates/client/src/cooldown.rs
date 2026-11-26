@@ -33,6 +33,22 @@ pub fn add(group: &str, duration: i32) {
     });
 }
 
+/// VANILLA: ItemCooldowns#isOnCooldown (группа по умолчанию — id предмета).
+pub fn active(item: &str) -> bool {
+    with(|s| s.map.contains_key(item)).unwrap_or(false)
+}
+
+/// VANILLA: Item.Properties#useCooldown (Items, 26.3) — секунды × 20 у мгновенно используемых
+/// предметов; применяется ItemStack#use → applyAfterUseComponentSideEffects и на клиенте.
+/// chorus_fruit (useCooldown 1.0) потребляется через finishUsingItem — его кулдаун приходит пакетом.
+pub fn use_cooldown_ticks(item: &str) -> Option<i32> {
+    match item {
+        "ender_pearl" => Some(20),
+        "wind_charge" => Some(10),
+        _ => None,
+    }
+}
+
 /// VANILLA: ItemCooldowns#tick (раз в клиентский тик).
 pub fn tick() {
     with(|s| {

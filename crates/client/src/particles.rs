@@ -2735,12 +2735,18 @@ impl ParticleEngine {
     }
 
     /// VANILLA: ThrownEnderpearl#onHit — 32 частиц portal над точкой попадания.
-    pub fn pearl_hit(&mut self, pos: [f64; 3]) {
+    /// VANILLA: ClientLevel#doAddParticle — без overrideLimiter частица дальше 32 блоков от
+    /// камеры не создаётся (это же отсекает ложное «попадание», когда жемчуг ушёл из трекинга).
+    pub fn pearl_hit(&mut self, pos: [f64; 3], cam: [f64; 3]) {
         let seed = self.seed();
         let mut r = LegacyRandom::new(seed);
         for _ in 0..32 {
             let y = pos[1] + r.next_double() * 2.0;
             let (gx, gz) = (r.next_gaussian(), r.next_gaussian());
+            let d = [pos[0] - cam[0], y - cam[1], pos[2] - cam[2]];
+            if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 1024.0 {
+                continue;
+            }
             self.add_portal(pos[0], y, pos[2], gx, 0.0, gz);
         }
     }

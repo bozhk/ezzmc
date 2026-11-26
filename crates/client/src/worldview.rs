@@ -2326,7 +2326,7 @@ impl WorldView {
         }
         // VANILLA: ThrownEnderpearl#onHit — 32 частицы portal в точке попадания.
         for p in std::mem::take(&mut level.pearl_hits) {
-            self.particles.pearl_hit(p);
+            self.particles.pearl_hit(p, self.cam);
         }
         // VANILLA: LivingEntity#handleDamageEvent/Player#animateHurt → hurtTime = 10 (тряска камеры).
         for dir in std::mem::take(&mut level.own_hurts) {
@@ -7341,6 +7341,18 @@ impl WorldView {
                 yaw: self.yaw,
                 pitch: self.pitch,
             });
+            // VANILLA: MultiPlayerGameMode#useItem — предмет на кулдауне: пакет уходит, результат PASS
+            // (ни взмаха, ни use()).
+            if held_name.is_some_and(crate::cooldown::active) {
+                return;
+            }
+            // VANILLA: ItemStack#use → applyAfterUseComponentSideEffects → UseCooldown#apply
+            // (клиент ставит кулдаун сам, не дожидаясь ClientboundCooldownPacket).
+            if let Some(n) = held_name {
+                if let Some(t) = crate::cooldown::use_cooldown_ticks(n) {
+                    crate::cooldown::add(n, t);
+                }
+            }
             const THROWN: &[&str] = &[
                 "ender_pearl",
                 "snowball",
