@@ -314,6 +314,177 @@ fn entity_data_value(r: &mut Reader, w: &mut Writer, ser: &str) -> ProtocolResul
     Ok(true)
 }
 
+const MAX_SLOT_DEPTH: u32 = 16;
+
+fn str_id(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    w.string(&r.string(32767)?);
+    Ok(())
+}
+
+/// VANILLA: SlotDisplay.STREAM_CODEC 1.21.11 → 26.3. Типы реестра сдвинуты (в 26.3 добавлены
+/// with_any_potion, only_with_component, dyed); `item_stack` — ItemStack → ItemStackTemplate;
+/// `tag` — TagKey → HolderSet. Непереводимый предмет становится `empty`.
+fn slot_display(r: &mut Reader, w: &mut Writer, depth: u32) -> ProtocolResult<()> {
+    if depth > MAX_SLOT_DEPTH {
+        return Err(ezzmc_protocol::ProtocolError::InvalidValue {
+            what: "slot display depth",
+            value: depth as i64,
+        });
+    }
+    let d = depth + 1;
+    match r.var_int()? {
+        t @ (0 | 1) => {
+            w.var_int(t);
+        }
+        2 => match tr().id(ClientRegistry::Item, r.var_int()?) {
+            Some(i) => {
+                w.var_int(4).var_int(i);
+            }
+            None => {
+                w.var_int(0);
+            }
+        },
+        3 => {
+            let mut t = Writer::new();
+            if tr().value(r, &mut t, &Shape::Stack, &Shape::ItemTemplate)? {
+                w.var_int(5).bytes(&t.into_vec());
+            } else {
+                w.var_int(0);
+            }
+        }
+        // HolderSet: 0 — имя тега.
+        4 => {
+            w.var_int(6).var_int(0);
+            str_id(r, w)?;
+        }
+        5 => {
+            w.var_int(8);
+            slot_display(r, w, d)?;
+            slot_display(r, w, d)?;
+            // Holder<TrimPattern>: id+1; 0 — встроенный объект (сервер так не шлёт).
+            let h = r.var_int()?;
+            if h == 0 {
+                return Err(ezzmc_protocol::ProtocolError::InvalidValue {
+                    what: "inline trim pattern",
+                    value: 0,
+                });
+            }
+            w.var_int(h);
+        }
+        6 => {
+            w.var_int(9);
+            slot_display(r, w, d)?;
+            slot_display(r, w, d)?;
+        }
+        7 => {
+            let n = r.length("composite slot", 4096)?;
+            w.var_int(10).var_int(n as i32);
+            for _ in 0..n {
+                slot_display(r, w, d)?;
+            }
+        }
+        t => {
+            return Err(ezzmc_protocol::ProtocolError::InvalidValue {
+                what: "slot display type",
+                value: t as i64,
+            })
+        }
+    }
+    Ok(())
+}
+
+fn slot_displays(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    let n = r.length("slot list", 4096)?;
+    w.var_int(n as i32);
+    for _ in 0..n {
+        slot_display(r, w, 0)?;
+    }
+    Ok(())
+}
+
+/// VANILLA: RecipeDisplay.STREAM_CODEC — типы и поля совпадают, переводятся SlotDisplay.
+fn recipe_display(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    let t = r.var_int()?;
+    w.var_int(t);
+    let slots = match t {
+        // crafting_shapeless: ingredients, result, station
+        0 => {
+            slot_displays(r, w)?;
+            2
+        }
+        // crafting_shaped: w, h, ingredients, result, station
+        1 => {
+            w.var_int(r.var_int()?).var_int(r.var_int()?);
+            slot_displays(r, w)?;
+            2
+        }
+        // furnace: ingredient, fuel, result, station, duration, experience
+        2 => {
+            for _ in 0..4 {
+                slot_display(r, w, 0)?;
+            }
+            w.var_int(r.var_int()?).f32(r.f32()?);
+            0
+        }
+        // stonecutter: input, result, station
+        3 => 3,
+        // smithing: template, base, addition, result, station
+        4 => 5,
+        t => {
+            return Err(ezzmc_protocol::ProtocolError::InvalidValue {
+                what: "recipe display type",
+                value: t as i64,
+            })
+        }
+    };
+    for _ in 0..slots {
+        slot_display(r, w, 0)?;
+    }
+    Ok(())
+}
+
+/// VANILLA: RecipeDisplayEntry.STREAM_CODEC — id, display, OPTIONAL_VAR_INT group, category,
+/// Optional<List<Ingredient>> (HolderSet предметов).
+fn recipe_entry(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    w.var_int(r.var_int()?);
+    recipe_display(r, w)?;
+    w.var_int(r.var_int()?).var_int(r.var_int()?);
+    let some = r.bool()?;
+    w.bool(some);
+    if some {
+        let n = r.length("ingredients", 4096)?;
+        w.var_int(n as i32);
+        for _ in 0..n {
+            match r.var_int()? {
+                0 => {
+                    w.var_int(0);
+                    str_id(r, w)?;
+                }
+                k => {
+                    let m = (k - 1).max(0) as usize;
+                    if m > r.remaining() {
+                        return Err(ezzmc_protocol::ProtocolError::InvalidValue {
+                            what: "holder set length",
+                            value: m as i64,
+                        });
+                    }
+                    let mut v = Vec::with_capacity(m.min(r.remaining()));
+                    for _ in 0..m {
+                        if let Some(i) = tr().id(ClientRegistry::Item, r.var_int()?) {
+                            v.push(i);
+                        }
+                    }
+                    w.var_int(v.len() as i32 + 1);
+                    for i in v {
+                        w.var_int(i);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn tr() -> &'static Translator {
     ezzmc_protocol::translate::v1_21_11(ezzmc_world::legacy::state_to_canon)
 }
@@ -451,6 +622,70 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
                 return Ok(Some(Vec::new()));
             };
             w.var_int(ty).bytes(r.rest());
+        }
+        // VANILLA: ClientboundRecipeBookAddPacket — List<Entry(RecipeDisplayEntry, u8 flags)>, replace.
+        "recipe_book_add" => {
+            let n = r.length("recipe entries", 1 << 16)?;
+            w.var_int(n as i32);
+            for _ in 0..n {
+                recipe_entry(&mut r, &mut w)?;
+                w.u8(r.u8()?);
+            }
+            w.bytes(r.rest());
+        }
+        // VANILLA: ClientboundPlaceGhostRecipePacket — containerId, RecipeDisplay.
+        "place_ghost_recipe" => {
+            w.var_int(r.var_int()?);
+            recipe_display(&mut r, &mut w)?;
+        }
+        // VANILLA: ClientboundUpdateAdvancementsPacket. 1.21.11: x/y в DisplayInfo, иконка —
+        // ItemStack; 26.3: PositionedAdvancement(holder, x, y), иконка — ItemStackTemplate.
+        // Без DisplayInfo x = y = 0 (VANILLA-UNSURE: в 26.3 сервер шлёт позицию узла дерева).
+        "update_advancements" => {
+            w.bool(r.bool()?);
+            let n = r.length("advancements", 1 << 16)?;
+            w.var_int(n as i32);
+            for _ in 0..n {
+                str_id(&mut r, &mut w)?;
+                let parent = r.bool()?;
+                w.bool(parent);
+                if parent {
+                    str_id(&mut r, &mut w)?;
+                }
+                let display = r.bool()?;
+                w.bool(display);
+                let mut xy = (0.0, 0.0);
+                if display {
+                    tr().value(&mut r, &mut w, &Shape::Nbt, &Shape::Nbt)?;
+                    tr().value(&mut r, &mut w, &Shape::Nbt, &Shape::Nbt)?;
+                    let mut icon = Writer::new();
+                    if !tr().value(&mut r, &mut icon, &Shape::Stack, &Shape::ItemTemplate)? {
+                        icon = Writer::new();
+                        icon.var_int(0).var_int(1).var_int(0).var_int(0);
+                    }
+                    w.bytes(&icon.into_vec());
+                    w.var_int(r.var_int()?);
+                    let flags = r.i32()?;
+                    w.i32(flags);
+                    if flags & 1 != 0 {
+                        str_id(&mut r, &mut w)?;
+                    }
+                    xy = (r.f32()?, r.f32()?);
+                }
+                // AdvancementRequirements: List<List<String>>, затем sendsTelemetryEvent.
+                let groups = r.length("requirements", 1 << 16)?;
+                w.var_int(groups as i32);
+                for _ in 0..groups {
+                    let k = r.length("requirement", 1 << 16)?;
+                    w.var_int(k as i32);
+                    for _ in 0..k {
+                        str_id(&mut r, &mut w)?;
+                    }
+                }
+                w.bool(r.bool()?).f32(xy.0).f32(xy.1);
+            }
+            // removed, progress, showAdvancements — форматы совпадают.
+            w.bytes(r.rest());
         }
         "login" => {
             layouts().clear();
@@ -651,6 +886,33 @@ mod tests {
             .unwrap();
         let mut r = Reader::new(&out);
         assert_eq!((r.i64().unwrap(), r.var_int().unwrap()), (7, canon));
+    }
+
+    #[test]
+    fn ghost_recipe_slot_displays_renumbered() {
+        let stick = ezzmc_protocol::generated::r1_21_11::ITEM
+            .iter()
+            .position(|x| *x == "stick")
+            .unwrap() as i32;
+        let canon = ezzmc_protocol::generated::r26_3::ITEM
+            .iter()
+            .position(|x| *x == "stick")
+            .unwrap() as i32;
+        let mut w = Writer::new();
+        // stonecutter: input = tag, result = item_stack(4 stick), station = composite[any_fuel].
+        w.var_int(7).var_int(3);
+        w.var_int(4).string("minecraft:planks");
+        w.var_int(3).var_int(4).var_int(stick).var_int(0).var_int(0);
+        w.var_int(7).var_int(1).var_int(1);
+        let out = clientbound_1_21_11("place_ghost_recipe", &w.into_vec())
+            .unwrap()
+            .unwrap();
+        let mut e = Writer::new();
+        e.var_int(7).var_int(3);
+        e.var_int(6).var_int(0).string("minecraft:planks");
+        e.var_int(5).var_int(canon).var_int(4).var_int(0).var_int(0);
+        e.var_int(10).var_int(1).var_int(1);
+        assert_eq!(out, e.into_vec());
     }
 
     #[test]
