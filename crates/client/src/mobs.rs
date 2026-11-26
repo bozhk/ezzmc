@@ -579,6 +579,10 @@ pub struct Mobs {
     pub held_items: Vec<(ezzmc_protocol::item::ItemStack, Mat4, (u8, u8), bool)>,
     /// BlockDecorationLayer (медный голем): (имя блока, матрица головы, свет).
     antenna: Vec<(String, Mat4, (u8, u8))>,
+    /// CarriedBlockLayer (эндермен): (состояние блока, матрица корня модели, свет).
+    carried: Vec<(ezzmc_world::block::BlockState, Mat4, (u8, u8))>,
+    /// EndermanRenderer#random — дрожь злого эндермена (getRenderOffset).
+    creepy_rng: Option<ezzmc_world::noise::LegacyRandom>,
     /// События проигрывателя (1010/1011), ещё не розданные попугаям: (блок, играет).
     record_events: Vec<([i32; 3], bool)>,
 }
@@ -1815,6 +1819,52 @@ impl Mobs {
         }
     }
 
+    /// VANILLA: CarriedBlockLayer#submit + BlockModelRenderState#submit — блок в руках эндермена;
+    /// тинт BlockTintSource#color(state), свет max(сущность, blockLightCoords).
+    pub fn bake_carried(&self, models: &ezzmc_mesh::models::BlockModels, out: &mut Vec<u8>) {
+        use ezzmc_mesh::section::ModelProvider;
+        use ezzmc_render::particledraw::push_vertex_raw;
+        let t = |x, y, z| Mat4::from_translation(Vec3::new(x, y, z));
+        let layer = t(0.0, 0.6875, -0.75)
+            * Mat4::from_rotation_x(20f32.to_radians())
+            * Mat4::from_rotation_y(45f32.to_radians())
+            * t(0.25, 0.1875, 0.25)
+            * Mat4::from_scale(Vec3::new(-0.5, -0.5, 0.5))
+            * Mat4::from_rotation_y(90f32.to_radians());
+        for (st, root, l) in &self.carried {
+            let mut ps = Vec::new();
+            models.parts(*st, 0, 0, 0, &mut ps);
+            let mat = *root * layer;
+            // BlockModelResolver#update: emissiveRendering → полная яркость, иначе pack(lightEmission, 0).
+            let light = if ezzmc_mesh::blockinfo::has(*st, ezzmc_mesh::blockinfo::EMISSIVE) {
+                (15, 15)
+            } else {
+                let em = st.props().map_or(0, |p| p.light_emission);
+                (l.0.max(em), l.1)
+            };
+            let light = (u16::from(light.0) * 16, u16::from(light.1) * 16);
+            for part in &ps {
+                let qc = &part.quads;
+                for q in qc.unculled.iter().chain(qc.culled.iter().flatten()) {
+                    let sd = ezzmc_mesh::cull::offset(q.direction);
+                    let n = Vec3::new(sd[0] as f32, sd[1] as f32, sd[2] as f32);
+                    let n = mat.transform_vector3(n).normalize_or_zero();
+                    let v = 255.0 * ezzmc_render::entitymodel::mix_light(n);
+                    let tint = if q.is_tinted() {
+                        models.tint_in_hand(*st, q.tint_index)
+                    } else {
+                        [255; 3]
+                    };
+                    let c = tint.map(|c| (v * f32::from(c) / 255.0) as u8);
+                    for i in 0..4 {
+                        let p = mat.transform_point3(Vec3::from(q.pos[i]));
+                        push_vertex_raw(out, p.to_array(), q.uv[i], [c[0], c[1], c[2], 255], light);
+                    }
+                }
+            }
+        }
+    }
+
     /// Запекает всех известных мобов в вершины по текстурам; тени — в `shadow`.
     /// VANILLA: LevelEventHandler#notifyNearbyEntities (1010 играет / 1011 стоп) → попугаям рядом.
     pub fn record_event(&mut self, pos: [i32; 3], playing: bool) {
@@ -1846,6 +1896,7 @@ impl Mobs {
         self.mushrooms.clear();
         self.held_items.clear();
         self.antenna.clear();
+        self.carried.clear();
         let record_events = std::mem::take(&mut self.record_events);
         // Клиентские тики, а не game_time: set_time двигает его рывками → дубли/пропуски анимации.
         let now = level.client_ticks;
@@ -2286,11 +2337,24 @@ impl Mobs {
             } else {
                 Mat4::IDENTITY
             };
+            // VANILLA: EndermanRenderer#getRenderOffset — злой эндермен дрожит: gauss·0.02·scale по X/Z.
+            let shake = if sp.kind == Kind::Enderman && e.bool17 {
+                let r = self.creepy_rng.get_or_insert_with(|| {
+                    let seed = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_nanos() as i64);
+                    ezzmc_world::noise::LegacyRandom::new(seed)
+                });
+                let d = 0.02 * f64::from(sp.scale);
+                [r.next_gaussian() * d, r.next_gaussian() * d]
+            } else {
+                [0.0; 2]
+            };
             // VANILLA: LivingEntityRenderer — R_y(180−bodyRot)·S(−1,−1,1)·S(scale)·T(0,−1.501,0).
             let root = Mat4::from_translation(Vec3::new(
-                (pos[0] - cam[0]) as f32,
+                (pos[0] - cam[0] + shake[0]) as f32,
                 (pos[1] - cam[1]) as f32,
-                (pos[2] - cam[2]) as f32,
+                (pos[2] - cam[2] + shake[1]) as f32,
             )) * sq_pre
                 * Mat4::from_rotation_y((180.0 - body).to_radians())
                 * shulker_attach(sp.kind, e.int_meta(16))
@@ -2725,9 +2789,18 @@ impl Mobs {
                     outer.bake(root, [255; 4], light, out);
                 }
                 Rig::Enderman(model, parts) => {
+                    // VANILLA: Enderman#DATA_CARRY_STATE (#16, OPTIONAL_BLOCK_STATE; 0 — пусто).
+                    let carried = e
+                        .int_meta(16)
+                        .and_then(|v| u32::try_from(v).ok())
+                        .and_then(ezzmc_world::block::BlockState::from_id)
+                        .filter(|b| *b != ezzmc_world::block::BlockState::AIR);
                     humanoid::setup_anim(model, parts, &state);
-                    animals::enderman_tweak(model, parts, e.bool17);
+                    animals::enderman_tweak(model, parts, e.bool17, carried.is_some());
                     model.bake(root, [255; 4], light, out);
+                    if let Some(b) = carried {
+                        self.carried.push((b, root, light));
+                    }
                     // VANILLA: EnderEyesLayer — глаза, полная яркость.
                     model.bake_emissive(
                         root,

@@ -416,6 +416,31 @@ impl BlockModels {
     fn entry(&self, s: BlockState) -> Option<&StateEntry> {
         self.entries.get(s.id() as usize)?.as_ref()
     }
+
+    /// Тинт квада без мира. VANILLA: BlockTintSource#color(state) (BlockTintSources/BlockColors 26.3) —
+    /// BlockModelResolver: блок у эндермена (CarriedBlockLayer).
+    pub fn tint_in_hand(&self, s: BlockState, idx: i32) -> [u8; 3] {
+        let kind = self.entry(s).map_or(TintKind::None, |e| e.tint);
+        // VANILLA: GrassColor#getDefaultColor = get(0.5, 1.0).
+        let grass = || self.tints.maps.grass(0.5, 1.0);
+        let c = match kind {
+            // BlockTintSources#sugarCane: color(state) = -1.
+            TintKind::Grass if s.name() == "sugar_cane" => 0xFF_FFFF,
+            TintKind::Grass | TintKind::GrassDouble { .. } => grass(),
+            TintKind::GrassPetals if idx != 0 => grass(),
+            TintKind::GrassPetals | TintKind::None | TintKind::Water => 0xFF_FFFF,
+            TintKind::Foliage => 0x48_B518,    // -12012264
+            TintKind::DryFoliage => 0x5C_3C32, // -10732494
+            TintKind::LilyPad => 0x71_C35C,    // BlockColors#LILY_PAD_DEFAULT -9321636
+            TintKind::Fixed(c) => c,
+            TintKind::Redstone(p) => redstone_color(p),
+            TintKind::Stem(age) => {
+                let a = u32::from(age);
+                ((a * 32) << 16) | ((255 - a * 8) << 8) | (a * 4)
+            }
+        };
+        [(c >> 16) as u8, (c >> 8) as u8, c as u8]
+    }
 }
 
 /// Модели модовых состояний из дампа `.ezbake` (DEC-018, TODO-506): канонический id

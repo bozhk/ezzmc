@@ -4073,6 +4073,7 @@ impl WorldView {
                 );
                 self.mobs.bake_mushrooms(&self.models, &mut pdata);
                 self.mobs.bake_antenna(&self.models, &mut pdata);
+                self.mobs.bake_carried(&self.models, &mut pdata);
                 crate::pistonview::bake_falling(
                     l,
                     &self.models,

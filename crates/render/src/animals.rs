@@ -639,11 +639,18 @@ pub fn enderman_mesh() -> (Model, HumanoidParts) {
     )
 }
 
-/// VANILLA: EndermanModel#setupAnim (после HumanoidModel#setupAnim). `creepy` — Enderman#isCreepy.
-pub fn enderman_tweak(m: &mut Model, p: &HumanoidParts, creepy: bool) {
+/// VANILLA: EndermanModel#setupAnim (после HumanoidModel#setupAnim). `creepy` — Enderman#isCreepy,
+/// `carrying` — непустой carriedBlock.
+pub fn enderman_tweak(m: &mut Model, p: &HumanoidParts, creepy: bool, carrying: bool) {
     for i in [p.right_arm, p.left_arm, p.right_leg, p.left_leg] {
         let r = &mut m.parts[i].pose.x_rot;
         *r = (*r * 0.5).clamp(-0.4, 0.4);
+    }
+    if carrying {
+        m.parts[p.right_arm].pose.x_rot = -0.5;
+        m.parts[p.left_arm].pose.x_rot = -0.5;
+        m.parts[p.right_arm].pose.z_rot = 0.05;
+        m.parts[p.left_arm].pose.z_rot = -0.05;
     }
     if creepy {
         m.parts[p.head].pose.y -= 5.0;
