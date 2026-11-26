@@ -117,6 +117,14 @@ pub enum Shape {
     /// A bare value that newer versions wrap as the left branch of an
     /// [`Shape::Either`]. Source-version shapes only.
     Left(&'static Shape),
+    /// A value that newer versions wrap as the right branch of an
+    /// [`Shape::Either`]. Source-version shapes only.
+    Right(&'static Shape),
+    /// Pre-1.21.9 `CustomData.STREAM_CODEC`: a compound whose string `id`
+    /// names the registry entry; newer versions split it into
+    /// `TypedEntityData` (registry id, compound without `id`). Source-version
+    /// shapes only.
+    IdInNbt(ClientRegistry),
 }
 
 use Shape::*;
@@ -763,6 +771,58 @@ static COMPONENTS_1_21_10: &[(&str, Shape)] = &[
     ("can_break", List(UNBOUNDED, &BLOCK_PREDICATE_1_21_10)),
 ];
 
+/// `ResolvableProfile.STREAM_CODEC` before 1.21.9: optional name, optional
+/// id, properties — now the `Partial` branch, followed by an empty skin patch.
+static RESOLVABLE_PROFILE_1_21_8: Shape = Append(
+    &Right(&Struct(&[
+        Optional(&Utf(16)),
+        Optional(&Uuid),
+        Ref(&PROFILE_PROPERTIES),
+    ])),
+    &[0, 0, 0, 0],
+);
+
+/// Codecs changed in 1.21.9 (`TypedEntityData`, `ResolvableProfile`).
+static COMPONENTS_1_21_8: &[(&str, Shape)] = &[
+    // CustomData.STREAM_CODEC (1.21.8): the type is the compound's `id`.
+    ("entity_data", IdInNbt(ClientRegistry::EntityType)),
+    (
+        "block_entity_data",
+        IdInNbt(ClientRegistry::BlockEntityType),
+    ),
+    // BeehiveBlockEntity.Occupant (1.21.8): CustomData, ticks in hive, min ticks.
+    (
+        "bees",
+        List(
+            UNBOUNDED,
+            &Struct(&[IdInNbt(ClientRegistry::EntityType), VarInt, VarInt]),
+        ),
+    ),
+    ("profile", Ref(&RESOLVABLE_PROFILE_1_21_8)),
+];
+
+/// Component shapes of 1.21.7/1.21.8 by its own component type id.
+pub(crate) fn components_1_21_8() -> &'static [&'static Shape] {
+    static T: std::sync::LazyLock<Vec<&'static Shape>> = std::sync::LazyLock::new(|| {
+        crate::generated::r1_21_8::DATA_COMPONENT_TYPE
+            .iter()
+            .map(|name| {
+                [
+                    COMPONENTS_1_21_8,
+                    COMPONENTS_1_21_10,
+                    COMPONENTS_1_21_11,
+                    COMPONENTS_26_2,
+                ]
+                .iter()
+                .find_map(|layer| layer.iter().find(|(n, _)| n == name))
+                .map(|(_, s)| s)
+                .unwrap_or(&Shape::Nbt)
+            })
+            .collect()
+    });
+    &T
+}
+
 /// Component shapes of 1.21.10 by its own component type id.
 pub(crate) fn components_1_21_10() -> &'static [&'static Shape] {
     static T: std::sync::LazyLock<Vec<&'static Shape>> = std::sync::LazyLock::new(|| {
@@ -991,7 +1051,7 @@ pub fn walk(r: &mut Reader, shape: &'static Shape, depth: u32) -> ProtocolResult
                 return Err(bad("expected a non-empty NBT tag"));
             }
         }
-        Compound => match nbt::read_network(r)? {
+        Compound | IdInNbt(_) => match nbt::read_network(r)? {
             Some(t) if t.id() == 10 => {}
             _ => return Err(bad("expected an NBT compound")),
         },
@@ -1039,7 +1099,7 @@ pub fn walk(r: &mut Reader, shape: &'static Shape, depth: u32) -> ProtocolResult
         TagKey => {
             r.string(MAX_STRING_LENGTH)?;
         }
-        Append(inner, _) | Left(inner) => walk(r, inner, depth)?,
+        Append(inner, _) | Left(inner) | Right(inner) => walk(r, inner, depth)?,
         HolderSet | RegistrySet(_) => match r.var_int()? {
             0 => {
                 r.string(MAX_STRING_LENGTH)?;

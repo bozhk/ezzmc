@@ -2,7 +2,7 @@
 //! Совпадение по имени блока и значениям свойств; нет блока/значения → состояние по умолчанию
 //! канонического блока, нет блока вовсе → воздух (VANILLA-UNSURE: ViaVersion подставляет замены).
 use crate::block::{decode_state, BlockInfo};
-use crate::generated::{b1_20_1, b1_21_11, b26_3};
+use crate::generated::{b1_20_1, b1_21_11, b1_21_8, b26_3};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -55,6 +55,11 @@ fn table_1_21_11() -> &'static [u32] {
     T.get_or_init(|| build_state_map(b1_21_11::BLOCKS, b26_3::BLOCKS))
 }
 
+fn table_1_21_8() -> &'static [u32] {
+    static T: OnceLock<Vec<u32>> = OnceLock::new();
+    T.get_or_init(|| build_state_map(b1_21_8::BLOCKS, b26_3::BLOCKS))
+}
+
 fn table_1_20_1() -> &'static [u32] {
     static T: OnceLock<Vec<u32>> = OnceLock::new();
     T.get_or_init(|| build_state_map(b1_20_1::BLOCKS, b26_3::BLOCKS))
@@ -90,16 +95,26 @@ pub fn state_to_canon(id: u32) -> u32 {
             }
         };
     }
-    table_1_21_11().get(id as usize).copied().unwrap_or(0)
+    // 1.21.9/1.21.10 и 1.21.11 — одинаковые состояния; 1.21.7/1.21.8 — без медных блоков 1.21.9.
+    let t = if v.protocol == 772 {
+        table_1_21_8()
+    } else {
+        table_1_21_11()
+    };
+    t.get(id as usize).copied().unwrap_or(0)
 }
 
-/// id состояния канона → 1.21.11 (для пакетов клиента; несопоставимое — состояние по умолчанию блока).
-pub fn state_from_canon_1_21_11(id: u32) -> u32 {
-    static T: OnceLock<Vec<u32>> = OnceLock::new();
-    T.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_21_11::BLOCKS))
-        .get(id as usize)
-        .copied()
-        .unwrap_or(0)
+/// id состояния канона → версия соединения 1.21.x (для пакетов клиента; несопоставимое —
+/// состояние по умолчанию блока).
+pub fn state_from_canon(id: u32) -> u32 {
+    static T8: OnceLock<Vec<u32>> = OnceLock::new();
+    static T11: OnceLock<Vec<u32>> = OnceLock::new();
+    let t = if ezzmc_protocol::version::current().protocol == 772 {
+        T8.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_21_8::BLOCKS))
+    } else {
+        T11.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_21_11::BLOCKS))
+    };
+    t.get(id as usize).copied().unwrap_or(0)
 }
 
 /// Версия соединения не каноническая?

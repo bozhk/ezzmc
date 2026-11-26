@@ -4,9 +4,10 @@
 //! блоков) переводятся по именам. Несовместимое значение (`Ok(false)`) вызывающий отбрасывает:
 //! компонент выпадает из патча, стек становится пустым.
 use crate::error::{ProtocolError, ProtocolResult};
-use crate::generated::{r1_21_10, r1_21_11, r26_3 as canon};
+use crate::generated::{r1_21_10, r1_21_11, r1_21_8, r26_3 as canon};
 use crate::item::{
-    components, components_1_21_10, components_1_21_11, ClientRegistry, Shape, MAX_DEPTH,
+    components, components_1_21_10, components_1_21_11, components_1_21_8, ClientRegistry, Shape,
+    MAX_DEPTH,
 };
 use crate::version::build_remap;
 use crate::wire::{Reader, Writer};
@@ -52,6 +53,7 @@ macro_rules! src_names {
 }
 src_names!(names_1_21_11, r1_21_11);
 src_names!(names_1_21_10, r1_21_10);
+src_names!(names_1_21_8, r1_21_8);
 
 type Names = fn(ClientRegistry) -> &'static [&'static str];
 type Comps = fn() -> &'static [&'static Shape];
@@ -71,6 +73,21 @@ const SRC_1_21_10: Source = Source {
     names: names_1_21_10,
     components: components_1_21_10,
 };
+const SRC_1_21_8: Source = Source {
+    names: names_1_21_8,
+    components: components_1_21_8,
+};
+
+/// Источник перевода для версии соединения: 772 — 1.21.7/1.21.8, 773 — 1.21.9/1.21.10,
+/// остальное — 1.21.11.
+fn source_index(protocol: i32) -> usize {
+    match protocol {
+        772 => 0,
+        773 => 1,
+        _ => 2,
+    }
+}
+const SOURCES: [Source; 3] = [SRC_1_21_8, SRC_1_21_10, SRC_1_21_11];
 
 fn canon_names(reg: ClientRegistry) -> &'static [&'static str] {
     match reg {
@@ -404,6 +421,32 @@ impl Translator {
                 Ok(false)
             };
         }
+        // Канон → 1.21.8: TypedEntityData (id реестра, compound) → CustomData с `id` внутри.
+        // VANILLA: TypedEntityData (1.21.9) / CustomData (1.21.8).
+        if let (Struct([RegistryId(_), Compound]), Some(IdInNbt(reg)), true) = (s, d, self.rev) {
+            let id = r.var_int()?;
+            let Some(crate::nbt::Tag::Compound(mut fields)) = crate::nbt::read_network(r)? else {
+                return Err(bad("expected an NBT compound"));
+            };
+            let name = self
+                .id(*reg, id)
+                .and_then(|i| (self.src.names)(*reg).get(i as usize));
+            let Some(name) = name else {
+                return Ok(false);
+            };
+            fields.retain(|(k, _)| k != "id");
+            fields.insert(
+                0,
+                (
+                    "id".into(),
+                    crate::nbt::Tag::String(format!("minecraft:{name}")),
+                ),
+            );
+            let mut buf = Vec::new();
+            crate::nbt::write_network(&mut buf, Some(&crate::nbt::Tag::Compound(fields)))?;
+            w.bytes(&buf);
+            return Ok(true);
+        }
         // Исходная форма — Either, каноническая — нет (EitherHolder 1.21.11 → Holder):
         // левая ветвь переводится, ключ реестра (правая) не переводим.
         if let (Either(left, right), false) = (s, self.rev) {
@@ -548,6 +591,47 @@ impl Translator {
                 w.bool(true);
                 let ok = self.tr(r, w, inner, dl, depth)?;
                 Ok(ok && dl.is_some())
+            }
+            Right(inner) => {
+                // Значение старой версии → правая ветвь Either канона.
+                let dr = match d {
+                    Some(Either(_, r)) => Some(*r),
+                    _ => None,
+                };
+                w.bool(false);
+                let ok = self.tr(r, w, inner, dr, depth)?;
+                Ok(ok && dr.is_some())
+            }
+            IdInNbt(reg) => {
+                // VANILLA: TypedEntityData (1.21.9) — тип из строки `id` CustomData 1.21.8,
+                // сам compound без `id` (TypedEntityData#stripId).
+                let tag = crate::nbt::read_network(r)?;
+                let Some(crate::nbt::Tag::Compound(mut fields)) = tag else {
+                    return Err(bad("expected an NBT compound"));
+                };
+                let ok = matches!(d, Some(Struct(x))
+                    if matches!(x, [RegistryId(dr), Compound] if *dr as u8 == *reg as u8));
+                let name = fields
+                    .iter()
+                    .position(|(k, _)| k == "id")
+                    .map(|i| fields.remove(i).1);
+                let name = match &name {
+                    Some(crate::nbt::Tag::String(n)) => n.strip_prefix("minecraft:").unwrap_or(n),
+                    _ => return Ok(false),
+                };
+                let Some(id) = self
+                    .input_names(*reg)
+                    .iter()
+                    .position(|n| *n == name)
+                    .and_then(|i| self.id(*reg, i as i32))
+                else {
+                    return Ok(false);
+                };
+                w.var_int(id);
+                let mut buf = Vec::new();
+                crate::nbt::write_network(&mut buf, Some(&crate::nbt::Tag::Compound(fields)))?;
+                w.bytes(&buf);
+                Ok(ok)
             }
             Append(inner, extra) => {
                 // Поле, добавленное в каноне: исходное значение + значение по умолчанию.
@@ -700,40 +784,26 @@ fn len(r: &mut Reader, max: usize) -> ProtocolResult<usize> {
 
 /// Пропуск патча компонентов версии соединения (для [`Shape::Stack`] в `walk`).
 pub(crate) fn skip_patch_legacy(r: &mut Reader, depth: u32) -> ProtocolResult<()> {
-    static T10: OnceLock<Translator> = OnceLock::new();
-    static T11: OnceLock<Translator> = OnceLock::new();
-    let t = if crate::version::current().protocol == crate::version::V1_21_10.protocol {
-        T10.get_or_init(|| Translator::new(SRC_1_21_10, |s| s))
-    } else {
-        T11.get_or_init(|| Translator::new(SRC_1_21_11, |s| s))
-    };
-    t.patch(r, &mut Writer::new(), depth)?;
+    static T: [OnceLock<Translator>; 3] = [const { OnceLock::new() }; 3];
+    let k = source_index(crate::version::current().protocol);
+    T[k].get_or_init(|| Translator::new(SOURCES[k], |s| s))
+        .patch(r, &mut Writer::new(), depth)?;
     Ok(())
 }
 
-static T_1_21_11: OnceLock<Translator> = OnceLock::new();
-static T_TO_1_21_11: OnceLock<Translator> = OnceLock::new();
-static T_1_21_10: OnceLock<Translator> = OnceLock::new();
-static T_TO_1_21_10: OnceLock<Translator> = OnceLock::new();
-
-/// Переводчик канон → 1.21.11 (пакеты клиента); `block_state` — канон → 1.21.11.
-pub fn to_1_21_11(block_state: fn(u32) -> u32) -> &'static Translator {
-    T_TO_1_21_11.get_or_init(|| Translator::build(SRC_1_21_11, block_state, true))
+/// Переводчик версии соединения (1.21.7–1.21.11) → канон; `block_state` — перевод id
+/// состояний (ezzmc-world). Таблицы строятся один раз на версию.
+pub fn from_server(block_state: fn(u32) -> u32) -> &'static Translator {
+    static T: [OnceLock<Translator>; 3] = [const { OnceLock::new() }; 3];
+    let k = source_index(crate::version::current().protocol);
+    T[k].get_or_init(|| Translator::new(SOURCES[k], block_state))
 }
 
-/// Переводчик 1.21.11 → канон; `block_state` — перевод id состояний (ezzmc-world).
-pub fn v1_21_11(block_state: fn(u32) -> u32) -> &'static Translator {
-    T_1_21_11.get_or_init(|| Translator::new(SRC_1_21_11, block_state))
-}
-
-/// Переводчик канон → 1.21.10 (состояния блоков 1.21.10 и 1.21.11 совпадают).
-pub fn to_1_21_10(block_state: fn(u32) -> u32) -> &'static Translator {
-    T_TO_1_21_10.get_or_init(|| Translator::build(SRC_1_21_10, block_state, true))
-}
-
-/// Переводчик 1.21.10 → канон.
-pub fn v1_21_10(block_state: fn(u32) -> u32) -> &'static Translator {
-    T_1_21_10.get_or_init(|| Translator::new(SRC_1_21_10, block_state))
+/// Переводчик канон → версия соединения (пакеты клиента); `block_state` — канон → версия.
+pub fn to_server(block_state: fn(u32) -> u32) -> &'static Translator {
+    static T: [OnceLock<Translator>; 3] = [const { OnceLock::new() }; 3];
+    let k = source_index(crate::version::current().protocol);
+    T[k].get_or_init(|| Translator::build(SOURCES[k], block_state, true))
 }
 
 #[cfg(test)]
@@ -872,6 +942,78 @@ mod tests {
             .var_int(src_id(canon::BLOCK, "dirt"));
         v.bool(false).bool(false).var_int(0).var_int(0);
         assert_eq!(&*st.patch.added[0].1, v.into_vec().as_slice());
+    }
+
+    /// 1.21.8: entity_data — CustomData с `id` → TypedEntityData; profile — голый Partial →
+    /// правая ветвь Either + пустой PlayerSkin.Patch. Обратно entity_data собирается снова.
+    #[test]
+    fn components_1_21_8_entity_data_and_profile() {
+        use crate::generated::r1_21_8 as old;
+        use crate::nbt::{write_network, Tag};
+        let nbt = |t: Tag| {
+            let mut b = Vec::new();
+            write_network(&mut b, Some(&t)).unwrap();
+            b
+        };
+        let data = nbt(Tag::Compound(vec![
+            ("id".into(), Tag::String("minecraft:pig".into())),
+            ("NoAI".into(), Tag::Byte(1)),
+        ]));
+        let t = Translator::new(SRC_1_21_8, |s| s);
+        let mut w = Writer::new();
+        w.var_int(1).var_int(src_id(old::ITEM, "pig_spawn_egg"));
+        w.var_int(2).var_int(0);
+        w.var_int(src_id(old::DATA_COMPONENT_TYPE, "entity_data"))
+            .bytes(&data);
+        w.var_int(src_id(old::DATA_COMPONENT_TYPE, "profile"))
+            .bool(true)
+            .string("Bob")
+            .bool(false)
+            .var_int(0);
+        let buf = w.into_vec();
+        let mut r = Reader::new(&buf);
+        let mut out = Writer::new();
+        t.stack(&mut r, &mut out).unwrap();
+        assert_eq!(r.remaining(), 0);
+        let out = out.into_vec();
+        let st = crate::item::read_stack(&mut Reader::new(&out))
+            .unwrap()
+            .unwrap();
+        let mut e = Writer::new();
+        e.var_int(src_id(canon::ENTITY_TYPE, "pig"))
+            .bytes(&nbt(Tag::Compound(vec![("NoAI".into(), Tag::Byte(1))])));
+        let typed = e.into_vec();
+        assert_eq!(
+            st.patch.added[0],
+            (
+                src_id(canon::DATA_COMPONENT_TYPE, "entity_data") as u32,
+                typed.clone().into()
+            )
+        );
+        let mut e = Writer::new();
+        e.bool(false)
+            .bool(true)
+            .string("Bob")
+            .bool(false)
+            .var_int(0);
+        e.bytes(&[0, 0, 0, 0]);
+        assert_eq!(
+            st.patch.added[1],
+            (
+                src_id(canon::DATA_COMPONENT_TYPE, "profile") as u32,
+                e.into_vec().into()
+            )
+        );
+
+        // Обратно: TypedEntityData → compound с `id`.
+        let back = Translator::build(SRC_1_21_8, |s| s, true);
+        let mut r = Reader::new(&typed);
+        let mut o = Writer::new();
+        let shape =
+            &crate::item::components()[src_id(canon::DATA_COMPONENT_TYPE, "entity_data") as usize];
+        let dst = components_1_21_8()[src_id(old::DATA_COMPONENT_TYPE, "entity_data") as usize];
+        assert!(back.tr(&mut r, &mut o, shape, Some(dst), 0).unwrap());
+        assert_eq!(o.into_vec(), data);
     }
 
     /// 1.21.10: частичный предикат компонента — голый id типа предиката (`Shape::Left`),

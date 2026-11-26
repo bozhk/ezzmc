@@ -53,6 +53,18 @@ pub const V1_21_10: Version = Version {
     particle_type: generated::r1_21_10::PARTICLE_TYPE,
 };
 
+/// 1.21.7/1.21.8 (протокол 772).
+pub const V1_21_8: Version = Version {
+    name: "1.21.8",
+    protocol: 772,
+    packets: generated::v1_21_8::PACKETS,
+    item: generated::r1_21_8::ITEM,
+    block: generated::r1_21_8::BLOCK,
+    entity_type: generated::r1_21_8::ENTITY_TYPE,
+    sound_event: generated::r1_21_8::SOUND_EVENT,
+    particle_type: generated::r1_21_8::PARTICLE_TYPE,
+};
+
 /// Forge/ваниль 1.20.1 (протокол 763): нет Configuration-фазы, реестры внутри Play `login`.
 pub const V1_20_1: Version = Version {
     name: "1.20.1",
@@ -68,7 +80,7 @@ pub const V1_20_1: Version = Version {
 /// Каноническая версия (на ней написан весь клиент).
 pub const CANON: Version = V26_3;
 
-pub const SUPPORTED: &[Version] = &[V26_3, V1_21_11, V1_21_10, V1_20_1];
+pub const SUPPORTED: &[Version] = &[V26_3, V1_21_11, V1_21_10, V1_21_8, V1_20_1];
 
 /// Версия по protocol number из Status-ответа.
 pub fn by_protocol(protocol: i32) -> Option<Version> {
@@ -91,9 +103,9 @@ impl Version {
         self.protocol == CANON.protocol
     }
 
-    /// 1.21.9–1.21.11: переводятся одним путём (`legacy::clientbound_1_21_11`).
+    /// 1.21.7–1.21.11: переводятся одним путём (`legacy::clientbound_1_21_11`).
     pub fn is_1_21_late(&self) -> bool {
-        matches!(self.protocol, 773 | 774)
+        matches!(self.protocol, 772..=774)
     }
 }
 
@@ -114,6 +126,7 @@ mod tests {
         assert_eq!(by_protocol(777).map(|v| v.name), Some("26.3"));
         assert_eq!(by_protocol(774).map(|v| v.name), Some("1.21.11"));
         assert_eq!(by_protocol(773).map(|v| v.name), Some("1.21.10"));
+        assert_eq!(by_protocol(772).map(|v| v.name), Some("1.21.8"));
         assert!(by_protocol(1).is_none());
     }
 
