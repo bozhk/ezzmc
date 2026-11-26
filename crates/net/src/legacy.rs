@@ -13,6 +13,21 @@ fn entity_type_map() -> &'static [Option<u32>] {
     T.get_or_init(|| build_remap(V1_21_11.entity_type, CANON.entity_type))
 }
 
+/// Реестр block_entity_type 1.21.11 → канон (в 26.x убран `bed`, добавлен `potent_sulfur`).
+fn block_entity_type(id: i32) -> Option<i32> {
+    static T: OnceLock<Vec<Option<u32>>> = OnceLock::new();
+    T.get_or_init(|| {
+        build_remap(
+            ezzmc_protocol::generated::r1_21_11::BLOCK_ENTITY_TYPE,
+            ezzmc_protocol::generated::r26_3::BLOCK_ENTITY_TYPE,
+        )
+    })
+    .get(usize::try_from(id).ok()?)
+    .copied()
+    .flatten()
+    .map(|v| v as i32)
+}
+
 fn tr() -> &'static Translator {
     ezzmc_protocol::translate::v1_21_11(ezzmc_world::legacy::state_to_canon)
 }
@@ -111,6 +126,43 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
             };
             w.var_int(id).bytes(uuid).var_int(canon as i32);
             w.bytes(r.rest());
+        }
+        // VANILLA: ClientboundLevelChunkPacketData (1.21.11 = 26.3): heightmaps, byteArray секций,
+        // list<BlockEntityInfo{byte xz, short y, registry block_entity_type, OPTIONAL_COMPOUND_TAG}>,
+        // затем свет. Переводится только тип блок-сущности; без пары в каноне (bed) — запись выбрасывается.
+        "level_chunk_with_light" => {
+            let start = r.pos();
+            r.bytes(8)?;
+            for _ in 0..r.length("heightmaps", 16)? {
+                r.var_int()?;
+                let n = r.length("heightmap longs", 1 << 12)?;
+                r.bytes(n * 8)?;
+            }
+            let n = r.length("chunk buffer", 2 * 1024 * 1024)?;
+            r.bytes(n)?;
+            w.bytes(r.since(start));
+            let n = r.length("block entities", 1 << 16)?;
+            let mut list = Writer::new();
+            let mut kept = 0;
+            for _ in 0..n {
+                let head = r.bytes(3)?;
+                let ty = block_entity_type(r.var_int()?);
+                let tag = r.pos();
+                ezzmc_protocol::nbt::read_network(&mut r)?;
+                if let Some(ty) = ty {
+                    list.bytes(head).var_int(ty).bytes(r.since(tag));
+                    kept += 1;
+                }
+            }
+            w.var_int(kept).bytes(&list.into_vec()).bytes(r.rest());
+        }
+        // VANILLA: ClientboundBlockEntityDataPacket: BlockPos, registry block_entity_type, tag.
+        "block_entity_data" => {
+            w.bytes(r.bytes(8)?);
+            let Some(ty) = block_entity_type(r.var_int()?) else {
+                return Ok(Some(Vec::new()));
+            };
+            w.var_int(ty).bytes(r.rest());
         }
         // Стеки: ItemStack.OPTIONAL_STREAM_CODEC (id предметов и компонентов, формы компонентов).
         "container_set_content" => {
@@ -248,6 +300,31 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_entity_type_drops_bed() {
+        let src = |n: &str| {
+            ezzmc_protocol::generated::r1_21_11::BLOCK_ENTITY_TYPE
+                .iter()
+                .position(|x| *x == n)
+                .unwrap() as i32
+        };
+        let canon = ezzmc_protocol::generated::r26_3::BLOCK_ENTITY_TYPE
+            .iter()
+            .position(|x| *x == "sign")
+            .unwrap() as i32;
+        let mut w = Writer::new();
+        w.i64(7).var_int(src("bed")).u8(0);
+        let out = clientbound_1_21_11("block_entity_data", &w.into_vec()).unwrap();
+        assert_eq!(out, Some(Vec::new()));
+        let mut w = Writer::new();
+        w.i64(7).var_int(src("sign")).u8(0);
+        let out = clientbound_1_21_11("block_entity_data", &w.into_vec())
+            .unwrap()
+            .unwrap();
+        let mut r = Reader::new(&out);
+        assert_eq!((r.i64().unwrap(), r.var_int().unwrap()), (7, canon));
+    }
 
     #[test]
     fn set_time_becomes_clock_map() {
