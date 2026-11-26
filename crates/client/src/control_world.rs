@@ -202,9 +202,12 @@ fn props_json(s: BlockState) -> Value {
 fn block_json(l: &Level, p: P) -> Value {
     let s = l.chunks.block(p[0], p[1], p[2]);
     let loaded = l.chunks.get(p[0] >> 4, p[2] >> 4).is_some();
+    let (block_light, sky_light) =
+        crate::particles::light_at(l, f64::from(p[0]), f64::from(p[1]), f64::from(p[2]));
     json!({
         "pos": p, "block": name_of(s), "props": props_json(s), "loaded": loaded,
         "air": s.is_air(), "solid": top(s) > 0.0, "water": is_water(s), "hazard": hazard(s),
+        "block_light": block_light, "sky_light": sky_light,
     })
 }
 

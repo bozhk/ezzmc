@@ -323,6 +323,8 @@ pub struct Player {
     fluid_h: f64,
     lava_h: f64,
     pub mayfly: bool,
+    /// Режим SPECTATOR: Player#tick → noPhysics, всегда в полёте (LocalPlayer#aiStep).
+    pub spectator: bool,
     /// VANILLA: Abilities#flyingSpeed (по умолчанию 0.05).
     pub fly_speed: f32,
     pub fall_distance: f64,
@@ -401,6 +403,7 @@ impl Player {
             fluid_h: 0.0,
             lava_h: 0.0,
             mayfly: false,
+            spectator: false,
             fly_speed: 0.05,
             fall_distance: 0.0,
             stuck: [0.0; 3],
@@ -591,6 +594,10 @@ impl Player {
     /// VANILLA: LocalPlayer#aiStep (порядок как в ванили).
     pub fn tick(&mut self, w: &dyn Collider, input: Input, yaw: f32) {
         let mut input = input;
+        // VANILLA: Player#tick — noPhysics = isSpectator(); spectator → setOnGround(false).
+        if self.spectator {
+            self.on_ground = false;
+        }
         // VANILLA: Player#isImmobile → LivingEntity#aiStep обнуляет jumping/xxa/zza во сне.
         if self.sleeping {
             input = Input::default();
@@ -697,7 +704,13 @@ impl Player {
 
         // творческий полёт: двойное нажатие прыжка
         let mut just_toggled_flight = false;
-        if self.mayfly && !was_jump && input.jump && !was_auto_jump {
+        // VANILLA: LocalPlayer#aiStep — в spectator полёт включается принудительно.
+        if self.mayfly && self.spectator {
+            if !self.flying {
+                self.flying = true;
+                just_toggled_flight = true;
+            }
+        } else if self.mayfly && !was_jump && input.jump && !was_auto_jump {
             if self.jump_trigger_time == 0 {
                 self.jump_trigger_time = 7;
             } else if !self.swimming {
@@ -804,7 +817,8 @@ impl Player {
         if self.flying {
             self.vel[1] = oy * 0.6;
         }
-        if self.on_ground && self.flying {
+        // VANILLA: LocalPlayer#aiStep — onGround && flying && !isSpectator.
+        if self.on_ground && self.flying && !self.spectator {
             self.flying = false;
         }
         // VANILLA: Player#tick → updatePlayerPose после aiStep: поза SWIMMING, если влезаем хотя бы в неё.
@@ -1242,6 +1256,15 @@ impl Player {
 
     /// VANILLA: Entity#move (MoverType.SELF).
     fn do_move(&mut self, w: &dyn Collider, delta: [f64; 3]) {
+        // VANILLA: Entity#move — noPhysics: сдвиг без коллизий, флаги столкновений сброшены.
+        if self.spectator {
+            for (p, d) in self.pos.iter_mut().zip(delta) {
+                *p += d;
+            }
+            self.horizontal_collision = false;
+            self.minor_horizontal_collision = false;
+            return;
+        }
         let before = self.pos;
         let before_xz = (self.pos[0], self.pos[2]);
         // VANILLA: Entity#move — stuckSpeedMultiplier (паутина/ягоды): движение умножается, скорость обнуляется.
@@ -2022,6 +2045,31 @@ mod tests {
     }
 
     /// VANILLA: LocalPlayer#aiStep/tryToStartFallFlying — старт только в воздухе, с планером, по фронту прыжка.
+    #[test]
+    fn spectator_hovers_and_passes_through_ground() {
+        let w = Flat { extra: Vec::new() };
+        // Спектатор в воздухе, flying сброшен (как после смены режима на платформе): не падает.
+        let mut p = Player::new([0.5, 60.0, 0.5]);
+        p.mayfly = true;
+        p.spectator = true;
+        p.on_ground = true;
+        for _ in 0..40 {
+            p.tick(&w, Input::default(), 0.0);
+        }
+        assert!(p.flying && !p.on_ground);
+        assert!((p.pos[1] - 60.0).abs() < 1e-6, "{:?}", p.pos);
+        // noPhysics: вниз сквозь землю (Flat: пол на y=0).
+        p.pos[1] = 0.5;
+        let down = Input {
+            sneak: true,
+            ..Input::default()
+        };
+        for _ in 0..20 {
+            p.tick(&w, down, 0.0);
+        }
+        assert!(p.pos[1] < 0.0, "{:?}", p.pos);
+    }
+
     #[test]
     fn elytra_start_requires_air_and_glider() {
         let w = Flat { extra: Vec::new() };

@@ -1663,7 +1663,13 @@ impl WorldView {
                     if m != self.game_mode {
                         self.prev_game_mode = self.game_mode;
                     }
+                    // VANILLA: LocalPlayer#onGameModeChanged — переход в SPECTATOR обнуляет вертикальную скорость.
+                    // VANILLA-UNSURE: ваниль зовёт это из PlayerInfoUpdate(UPDATE_GAME_MODE), здесь — по смене режима.
+                    if m == 3 && self.game_mode != 3 {
+                        self.player.vel[1] = 0.0;
+                    }
                     self.game_mode = m;
+                    self.player.spectator = m == 3;
                     // VANILLA: Player#hasInfiniteMaterials — креатив.
                     self.inv.infinite_materials = m == 1;
                 }

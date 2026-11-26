@@ -264,6 +264,21 @@ mod tests {
     }
 
     #[test]
+    fn night_torch_texel_matches_lightmap_fsh() {
+        // Ночь 18000: SKY_LIGHT_FACTOR 0.24, SKY_LIGHT_COLOR #7a7aff, ambient #0a0a0a, gamma 0.5.
+        // Эталон посчитан по core/lightmap.fsh (26.3) вручную.
+        let u = LightmapParams {
+            sky_factor: 0.24,
+            sky_light_color: [122.0 / 255.0, 122.0 / 255.0, 1.0],
+            ..Default::default()
+        }
+        .to_uniform();
+        let d = compute(&u);
+        assert_eq!(px(&d, 10, 15), [204, 183, 183]);
+        assert_eq!(px(&d, 8, 15), [176, 158, 171]);
+    }
+
+    #[test]
     fn flicker_and_darkness_scale() {
         let mut f = Flicker::default();
         for _ in 0..200 {
