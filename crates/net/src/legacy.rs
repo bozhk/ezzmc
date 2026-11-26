@@ -6,7 +6,8 @@ use ezzmc_protocol::translate::Translator;
 use ezzmc_protocol::version::{build_remap, CANON, V1_21_11};
 use ezzmc_protocol::wire::{Reader, Writer};
 use ezzmc_protocol::ProtocolResult;
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 fn entity_type_map() -> &'static [Option<u32>] {
     static T: OnceLock<Vec<Option<u32>>> = OnceLock::new();
@@ -26,6 +27,291 @@ fn block_entity_type(id: i32) -> Option<i32> {
     .copied()
     .flatten()
     .map(|v| v as i32)
+}
+
+/// Сдвиг индексов полей SynchedEntityData 1.21.11 → 26.3 по классу сущности.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum DataLayout {
+    Same,
+    /// VANILLA: AgeableMob#defineSynchedData (26.3): после DATA_BABY_ID (#16) добавлен AGE_LOCKED (#17).
+    Ageable,
+    /// Cat: AgeableMob + DATA_SOUND_VARIANT_ID после DATA_VARIANT_ID (#20 в 26.3).
+    Cat,
+    /// Slime/MagmaCube: в 26.3 AbstractCubeMob extends AgeableMob (+DATA_BABY_ID, AGE_LOCKED перед ID_SIZE).
+    CubeMob,
+}
+
+impl DataLayout {
+    fn of(canon_type: &str) -> Self {
+        // Наследники AgeableMob и в 1.21.11, и в 26.3 (по EntityType/EntityTypes обеих версий).
+        const AGEABLE: &[&str] = &[
+            "armadillo",
+            "axolotl",
+            "bee",
+            "camel",
+            "camel_husk",
+            "chicken",
+            "cow",
+            "dolphin",
+            "donkey",
+            "fox",
+            "frog",
+            "glow_squid",
+            "goat",
+            "happy_ghast",
+            "hoglin",
+            "horse",
+            "llama",
+            "mooshroom",
+            "mule",
+            "nautilus",
+            "ocelot",
+            "panda",
+            "parrot",
+            "pig",
+            "polar_bear",
+            "rabbit",
+            "sheep",
+            "skeleton_horse",
+            "sniffer",
+            "squid",
+            "strider",
+            "trader_llama",
+            "turtle",
+            "villager",
+            "wandering_trader",
+            "wolf",
+            "zombie_horse",
+            "zombie_nautilus",
+        ];
+        match canon_type {
+            "cat" => Self::Cat,
+            "slime" | "magma_cube" => Self::CubeMob,
+            t if AGEABLE.contains(&t) => Self::Ageable,
+            _ => Self::Same,
+        }
+    }
+
+    fn index(self, i: u8) -> u8 {
+        let shift = match self {
+            Self::Same => 0,
+            Self::Ageable => u8::from(i >= 17),
+            Self::Cat => u8::from(i >= 17) + u8::from(i >= 20),
+            Self::CubeMob => 2 * u8::from(i >= 16),
+        };
+        i.saturating_add(shift)
+    }
+}
+
+/// Классы сущностей текущего соединения (id → раскладка), заполняется по add_entity.
+fn layouts() -> std::sync::MutexGuard<'static, HashMap<i32, DataLayout>> {
+    static M: OnceLock<Mutex<HashMap<i32, DataLayout>>> = OnceLock::new();
+    M.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// VANILLA: EntityDataSerializers — порядок регистрации 1.21.11 (id = индекс).
+const SERIALIZERS_1_21_11: &[&str] = &[
+    "BYTE",
+    "INT",
+    "LONG",
+    "FLOAT",
+    "STRING",
+    "COMPONENT",
+    "OPTIONAL_COMPONENT",
+    "ITEM_STACK",
+    "BOOLEAN",
+    "ROTATIONS",
+    "BLOCK_POS",
+    "OPTIONAL_BLOCK_POS",
+    "DIRECTION",
+    "OPTIONAL_LIVING_ENTITY_REFERENCE",
+    "BLOCK_STATE",
+    "OPTIONAL_BLOCK_STATE",
+    "PARTICLE",
+    "PARTICLES",
+    "VILLAGER_DATA",
+    "OPTIONAL_UNSIGNED_INT",
+    "POSE",
+    "CAT_VARIANT",
+    "COW_VARIANT",
+    "WOLF_VARIANT",
+    "WOLF_SOUND_VARIANT",
+    "FROG_VARIANT",
+    "PIG_VARIANT",
+    "CHICKEN_VARIANT",
+    "ZOMBIE_NAUTILUS_VARIANT",
+    "OPTIONAL_GLOBAL_POS",
+    "PAINTING_VARIANT",
+    "SNIFFER_STATE",
+    "ARMADILLO_STATE",
+    "COPPER_GOLEM_STATE",
+    "WEATHERING_COPPER_STATE",
+    "VECTOR3",
+    "QUATERNION",
+    "RESOLVABLE_PROFILE",
+    "HUMANOID_ARM",
+];
+/// VANILLA: EntityDataSerializers (26.3).
+const SERIALIZERS_26_3: &[&str] = &[
+    "BYTE",
+    "INT",
+    "LONG",
+    "FLOAT",
+    "STRING",
+    "COMPONENT",
+    "OPTIONAL_COMPONENT",
+    "ITEM_STACK",
+    "BOOLEAN",
+    "ROTATIONS",
+    "BLOCK_POS",
+    "OPTIONAL_BLOCK_POS",
+    "DIRECTION",
+    "OPTIONAL_LIVING_ENTITY_REFERENCE",
+    "BLOCK_STATE",
+    "OPTIONAL_BLOCK_STATE",
+    "PARTICLE",
+    "PARTICLES",
+    "VILLAGER_DATA",
+    "OPTIONAL_UNSIGNED_INT",
+    "POSE",
+    "CAT_VARIANT",
+    "CAT_SOUND_VARIANT",
+    "COW_VARIANT",
+    "COW_SOUND_VARIANT",
+    "WOLF_VARIANT",
+    "WOLF_SOUND_VARIANT",
+    "FROG_VARIANT",
+    "PIG_VARIANT",
+    "PIG_SOUND_VARIANT",
+    "CHICKEN_VARIANT",
+    "CHICKEN_SOUND_VARIANT",
+    "ZOMBIE_NAUTILUS_VARIANT",
+    "OPTIONAL_GLOBAL_POS",
+    "PAINTING_VARIANT",
+    "SNIFFER_STATE",
+    "ARMADILLO_STATE",
+    "COPPER_GOLEM_STATE",
+    "WEATHERING_COPPER_STATE",
+    "VECTOR3",
+    "QUATERNION",
+    "RESOLVABLE_PROFILE",
+    "HUMANOID_ARM",
+    "DYE_COLOR",
+];
+
+/// VANILLA: PaintingVariant.STREAM_CODEC — holder (id+1 | 0 + DIRECT: w, h, assetId, title?, author?).
+static PAINTING: Shape = Shape::Holder(&Shape::Struct(&[
+    Shape::VarInt,
+    Shape::VarInt,
+    Shape::Utf(32767),
+    Shape::Optional(&Shape::Nbt),
+    Shape::Optional(&Shape::Nbt),
+]));
+
+/// Значение SynchedEntityData 1.21.11 → канон. `false` — значение не переводится (запись выбросить).
+fn entity_data_value(r: &mut Reader, w: &mut Writer, ser: &str) -> ProtocolResult<bool> {
+    let state = ezzmc_world::legacy::state_to_canon;
+    let same = |r: &mut Reader, w: &mut Writer, s: &'static Shape| tr().value(r, w, s, s);
+    match ser {
+        "BYTE" | "BOOLEAN" => {
+            w.u8(r.u8()?);
+        }
+        "INT"
+        | "DIRECTION"
+        | "OPTIONAL_UNSIGNED_INT"
+        | "POSE"
+        | "SNIFFER_STATE"
+        | "ARMADILLO_STATE"
+        | "COPPER_GOLEM_STATE"
+        | "WEATHERING_COPPER_STATE"
+        | "HUMANOID_ARM"
+        | "CAT_VARIANT"
+        | "COW_VARIANT"
+        | "WOLF_VARIANT"
+        | "WOLF_SOUND_VARIANT"
+        | "FROG_VARIANT"
+        | "PIG_VARIANT"
+        | "CHICKEN_VARIANT"
+        | "ZOMBIE_NAUTILUS_VARIANT" => {
+            w.var_int(r.var_int()?);
+        }
+        "LONG" => {
+            w.var_long(r.var_long()?);
+        }
+        "FLOAT" => {
+            w.f32(r.f32()?);
+        }
+        "STRING" => {
+            w.string(&r.string(32767)?);
+        }
+        "COMPONENT" => return same(r, w, &Shape::Nbt),
+        "OPTIONAL_COMPONENT" => return same(r, w, &Shape::Optional(&Shape::Nbt)),
+        "ITEM_STACK" => tr().stack(r, w)?,
+        "ROTATIONS" | "VECTOR3" => {
+            w.bytes(r.bytes(12)?);
+        }
+        "QUATERNION" => {
+            w.bytes(r.bytes(16)?);
+        }
+        "BLOCK_POS" => {
+            w.bytes(r.bytes(8)?);
+        }
+        "OPTIONAL_BLOCK_POS" => {
+            let b = r.bool()?;
+            w.bool(b);
+            if b {
+                w.bytes(r.bytes(8)?);
+            }
+        }
+        "OPTIONAL_LIVING_ENTITY_REFERENCE" => {
+            let b = r.bool()?;
+            w.bool(b);
+            if b {
+                w.bytes(r.bytes(16)?);
+            }
+        }
+        // VANILLA: OPTIONAL_BLOCK_STATE_CODEC — 0 = пусто, иначе id состояния.
+        "BLOCK_STATE" | "OPTIONAL_BLOCK_STATE" => {
+            let v = r.var_int()?;
+            let empty = ser == "OPTIONAL_BLOCK_STATE" && v == 0;
+            w.var_int(if empty { 0 } else { state(v as u32) as i32 });
+        }
+        "PARTICLE" => return tr().value(r, w, &PARTICLE_1_21_11, &PARTICLE),
+        "PARTICLES" => {
+            let n = r.length("particles", 1 << 12)?;
+            let mut list = Writer::new();
+            let mut kept = 0;
+            for _ in 0..n {
+                if tr().value(r, &mut list, &PARTICLE_1_21_11, &PARTICLE)? {
+                    kept += 1;
+                }
+            }
+            w.var_int(kept).bytes(&list.into_vec());
+        }
+        // VANILLA: VillagerData.STREAM_CODEC — type, profession (реестры совпадают), level.
+        "VILLAGER_DATA" => {
+            w.var_int(r.var_int()?)
+                .var_int(r.var_int()?)
+                .var_int(r.var_int()?);
+        }
+        "OPTIONAL_GLOBAL_POS" => {
+            let b = r.bool()?;
+            w.bool(b);
+            if b {
+                w.string(&r.string(32767)?).bytes(r.bytes(8)?);
+            }
+        }
+        "PAINTING_VARIANT" => return same(r, w, &PAINTING),
+        "RESOLVABLE_PROFILE" => return same(r, w, &ezzmc_protocol::item::RESOLVABLE_PROFILE),
+        _ => {
+            return Err(ezzmc_protocol::ProtocolError::Other(format!(
+                "serializer {ser}"
+            )))
+        }
+    }
+    Ok(true)
 }
 
 fn tr() -> &'static Translator {
@@ -124,6 +410,8 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
                 // Нет такого типа в каноне: пакет пропускаем целиком (сущность не появится).
                 return Ok(Some(Vec::new()));
             };
+            let name = CANON.entity_type.get(canon as usize).copied().unwrap_or("");
+            layouts().insert(id, DataLayout::of(name));
             w.var_int(id).bytes(uuid).var_int(canon as i32);
             w.bytes(r.rest());
         }
@@ -163,6 +451,45 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
                 return Ok(Some(Vec::new()));
             };
             w.var_int(ty).bytes(r.rest());
+        }
+        "login" => {
+            layouts().clear();
+            return Ok(None);
+        }
+        "remove_entities" => {
+            let mut l = layouts();
+            for _ in 0..r.length("entities", 1 << 16)? {
+                l.remove(&r.var_int()?);
+            }
+            return Ok(None);
+        }
+        // VANILLA: ClientboundSetEntityDataPacket — id, записи (u8 индекс, VarInt сериализатор,
+        // значение), 0xFF. Сериализаторы и индексы полей переводятся в 26.3.
+        "set_entity_data" => {
+            let id = r.var_int()?;
+            let layout = layouts().get(&id).copied().unwrap_or(DataLayout::Same);
+            w.var_int(id);
+            loop {
+                let idx = r.u8()?;
+                if idx == 0xFF {
+                    break;
+                }
+                let src = r.var_int()?;
+                let ser = usize::try_from(src)
+                    .ok()
+                    .and_then(|i| SERIALIZERS_1_21_11.get(i))
+                    .ok_or(ezzmc_protocol::ProtocolError::InvalidValue {
+                        what: "entity data serializer",
+                        value: src.into(),
+                    })?;
+                let canon = SERIALIZERS_26_3.iter().position(|n| n == ser).unwrap_or(0);
+                let mut one = Writer::new();
+                one.u8(layout.index(idx)).var_int(canon as i32);
+                if entity_data_value(&mut r, &mut one, ser)? {
+                    w.bytes(&one.into_vec());
+                }
+            }
+            w.u8(0xFF);
         }
         // Стеки: ItemStack.OPTIONAL_STREAM_CODEC (id предметов и компонентов, формы компонентов).
         "container_set_content" => {
@@ -324,6 +651,45 @@ mod tests {
             .unwrap();
         let mut r = Reader::new(&out);
         assert_eq!((r.i64().unwrap(), r.var_int().unwrap()), (7, canon));
+    }
+
+    #[test]
+    fn entity_data_shifts_cat_fields() {
+        let ty = ezzmc_protocol::generated::r1_21_11::ENTITY_TYPE
+            .iter()
+            .position(|x| *x == "cat")
+            .unwrap() as i32;
+        let mut w = Writer::new();
+        w.var_int(4242).bytes(&[0; 16]).var_int(ty);
+        clientbound_1_21_11("add_entity", &w.into_vec()).unwrap();
+        let mut w = Writer::new();
+        // #0 BYTE, #19 CAT_VARIANT (21), #20 BOOLEAN IS_LYING, #22 INT collar.
+        w.var_int(4242).u8(0).var_int(0).u8(3);
+        w.u8(19).var_int(21).var_int(5);
+        w.u8(20).var_int(8).u8(1);
+        w.u8(22).var_int(1).var_int(14).u8(0xFF);
+        let out = clientbound_1_21_11("set_entity_data", &w.into_vec())
+            .unwrap()
+            .unwrap();
+        let mut r = Reader::new(&out);
+        assert_eq!(r.var_int().unwrap(), 4242);
+        let mut got = Vec::new();
+        loop {
+            let i = r.u8().unwrap();
+            if i == 0xFF {
+                break;
+            }
+            let s = r.var_int().unwrap();
+            let v = if s == 8 || s == 0 {
+                r.u8().unwrap() as i32
+            } else {
+                r.var_int().unwrap()
+            };
+            got.push((i, s, v));
+        }
+        assert_eq!(got, [(0, 0, 3), (20, 21, 5), (22, 8, 1), (24, 1, 14)]);
+        assert_eq!(DataLayout::of("slime").index(16), 18);
+        assert_eq!(DataLayout::of("zombie").index(17), 17);
     }
 
     #[test]
