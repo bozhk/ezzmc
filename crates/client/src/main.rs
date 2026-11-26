@@ -3608,12 +3608,15 @@ impl ApplicationHandler for App {
                                                 cross.4,
                                             );
                                         }
-                                        if !hid {
+                                        // VANILLA: Hud#extractHotbarAndDecorations — в spectator вместо
+                                        // хотбара предметов SpectatorGui#extractHotbar (пуст без меню).
+                                        let spectator = v.game_mode == 3;
+                                        if !hid && !spectator {
                                             hud::draw_hotbar(
                                                 p, t, &g.device, &g.queue, rm, &v.inv, gwf, ghf,
                                             );
                                         }
-                                        if v.cfg.attack_indicator == 2 && !hid {
+                                        if v.cfg.attack_indicator == 2 && !hid && !spectator {
                                             hud::draw_hotbar_attack(
                                                 p,
                                                 gwf,

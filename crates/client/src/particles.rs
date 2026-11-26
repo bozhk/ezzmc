@@ -82,6 +82,8 @@ enum Kind {
     EndRod,
     /// FireworkParticles.SparkParticle (SimpleAnimatedParticle + twinkle + fade).
     Firework,
+    /// SuspendedParticle (SingleQuadParticle без своей логики tick/размера).
+    Suspended,
     /// FireworkParticles.OverlayParticle (вспышка 4 тика).
     Flash,
     /// FlyTowardsPositionParticle.VaultConnectionProvider (светится, LifetimeAlpha 0→0.6).
@@ -527,7 +529,7 @@ impl Particle {
 
     fn tick(&mut self, level: &Level) {
         match self.kind {
-            Kind::Terrain => self.base_tick(level),
+            Kind::Terrain | Kind::Suspended => self.base_tick(level),
             Kind::Smoke => {
                 self.base_tick(level);
                 self.sprite_from_age();
@@ -1749,8 +1751,12 @@ impl ParticleEngine {
             return;
         };
         let seed = self.seed();
-        let mut p = Particle::with_speed(Kind::Smoke, x, y - 0.125, z, 0.0, 0.0, 0.0, seed);
+        // VANILLA: SingleQuadParticle(level, x, y, z, sprite) — без случайной скорости.
+        let mut p = Particle::base(Kind::Suspended, x, y - 0.125, z, seed);
         p.sprite = set[p.rng.next_int_bound(set.len() as i32) as usize];
+        p.quad_size = 0.1 * (p.rng.next_float() * 0.5 + 0.5) * 2.0;
+        // VANILLA: UnderwaterProvider — setColor(0.4, 0.4, 0.7).
+        p.rgb = [0.4, 0.4, 0.7];
         p.set_size(0.01, 0.01);
         p.quad_size *= p.rng.next_float() * 0.6 + 0.2;
         p.lifetime = (16.0 / (f64::from(p.rng.next_float()) * 0.8 + 0.2)) as i32;

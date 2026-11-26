@@ -330,6 +330,8 @@ pub struct WorldView {
     boat_out: Option<crate::boat::BoatOut>,
     /// VANILLA: GameRenderer#fovModifier / oldFovModifier (сглаживание 0.5 за тик).
     fov_mod: (f32, f32),
+    /// VANILLA: Camera#getFluidInCamera на последнем кадре (для modifyFovBasedOnDeathOrFluid).
+    cam_fluid: ezzmc_render::fog::FogType,
     /// LocalPlayer#spinningEffectTime/Speed (Nausea, портал).
     spin: (f32, f32),
     /// LocalPlayer#oPortalEffectIntensity / portalEffectIntensity.
@@ -1362,6 +1364,7 @@ impl WorldView {
             boat: None,
             boat_out: None,
             fov_mod: (1.0, 1.0),
+            cam_fluid: ezzmc_render::fog::FogType::Atmospheric,
             spin: (0.0, 0.0),
             zoom_held: false,
             zoom_factor: 1.0,
@@ -3574,7 +3577,21 @@ impl WorldView {
     pub fn fov_deg(&self) -> f32 {
         let pt = (self.tick_acc / 0.05) as f32;
         let (o, c) = self.fov_mod;
-        self.cfg.fov * (o + (c - o) * pt) * self.zoom_factor
+        self.fov_death_or_fluid(self.cfg.fov * (o + (c - o) * pt) * self.zoom_factor)
+    }
+
+    /// VANILLA: Camera#modifyFovBasedOnDeathOrFluid — смерть сужает FOV, вода/лава ×lerp(fovEffectScale, 1, 6/7).
+    fn fov_death_or_fluid(&self, mut fov: f32) -> f32 {
+        use ezzmc_render::fog::FogType;
+        if self.player.dead {
+            let pt = (self.tick_acc / 0.05) as f32;
+            let dur = (self.player.death_time as f32 + pt).min(20.0);
+            fov /= (1.0 - 500.0 / (dur + 500.0)) * 2.0 + 1.0;
+        }
+        if matches!(self.cam_fluid, FogType::Water | FogType::Lava) {
+            fov *= 1.0 + (0.857_142_87 - 1.0) * self.cfg.fov_effect;
+        }
+        fov
     }
 
     /// Плавный зум: к 1/4 FOV при удержании клавиши, обратно при отпускании.
@@ -4201,7 +4218,8 @@ impl WorldView {
         self.hand_item_visible = false;
         self.hand_map_visible = false;
         self.hand_map_labels.clear();
-        if self.perspective != 0 || !self.walking || !self.have_pos {
+        // VANILLA: GameRenderer#renderItemInHand — не в режиме SPECTATOR.
+        if self.perspective != 0 || !self.walking || !self.have_pos || self.game_mode == 3 {
             return;
         }
         let pt = (self.tick_acc / 0.05).clamp(0.0, 1.0) as f32;
@@ -4355,7 +4373,9 @@ impl WorldView {
                 .prepare_raw(&gpu.device, &gpu.queue, Mat4::IDENTITY, &map_data);
             self.hand_map_visible = true;
         }
-        let proj = Mat4::perspective_rh(70.0f32.to_radians(), aspect, NEAR, far) * self.bob(pt);
+        // VANILLA: Camera#calculateHudFov = modifyFovBasedOnDeathOrFluid(70).
+        let hud_fov = self.fov_death_or_fluid(70.0);
+        let proj = Mat4::perspective_rh(hud_fov.to_radians(), aspect, NEAR, far) * self.bob(pt);
         for l in &mut self.hand_map_labels {
             l.m = proj * l.m;
         }
@@ -6577,6 +6597,7 @@ impl WorldView {
             };
         };
         let fog_type = fluid_in_camera(l, self.cam, self.yaw, self.pitch, aspect);
+        self.cam_fluid = fog_type;
         let mut attrs = FogAttrs::default();
         // VANILLA: атрибуты измерения (visual/fog_*_distance; у Overworld их нет → дефолты).
         if let Some(d) = l.dimension.as_ref() {
