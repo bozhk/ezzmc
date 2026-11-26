@@ -4,6 +4,7 @@ pub mod generated;
 pub mod item;
 pub mod nbt;
 pub mod text;
+pub mod translate;
 pub mod types;
 pub mod version;
 pub mod wire;

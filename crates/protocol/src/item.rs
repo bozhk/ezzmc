@@ -20,6 +20,7 @@ pub enum ClientRegistry {
     BlockEntityType,
     ConsumeEffectType,
     EntityType,
+    Attribute,
 }
 
 impl ClientRegistry {
@@ -33,13 +34,14 @@ impl ClientRegistry {
             Self::BlockEntityType => reg::BLOCK_ENTITY_TYPE,
             Self::ConsumeEffectType => reg::CONSUME_EFFECT_TYPE,
             Self::EntityType => reg::ENTITY_TYPE,
+            Self::Attribute => reg::ATTRIBUTE,
         };
         t.get(id as usize).copied()
     }
 }
 
 /// fails before the stack does.
-const MAX_DEPTH: u32 = 512;
+pub(crate) const MAX_DEPTH: u32 = 512;
 
 /// `ByteBufCodecs.list()` / `map()` with no explicit limit.
 const UNBOUNDED: usize = usize::MAX;
@@ -98,6 +100,16 @@ pub enum Shape {
     ItemTemplate,
     /// `TypedDataComponent.STREAM_CODEC`: a component id and its value.
     TypedComponent,
+    /// A block state id (`Block.BLOCK_STATE_REGISTRY`); remapped between versions.
+    BlockState,
+    /// Pre-26.1 `ItemStack.OPTIONAL_STREAM_CODEC` (count, item, patch; empty when
+    /// count <= 0). Source-version shapes only.
+    Stack,
+    /// Pre-26.1 `TagKey.streamCodec`: a bare tag id. Source-version shapes only.
+    TagKey,
+    /// The inner value; translation then appends these canonical bytes for
+    /// fields newer versions added (defaults). Source-version shapes only.
+    Append(&'static Shape, &'static [u8]),
 }
 
 use Shape::*;
@@ -249,64 +261,72 @@ static BLOCK_ENTITY_DATA: Shape = Struct(&[RegistryId(ClientRegistry::BlockEntit
 static KINETIC_CONDITION: Shape = Struct(&[VarInt, Float, Float]);
 
 /// `BlockParticleOption.streamCodec`: a block state id.
-const BLOCK_STATE: Shape = VarInt;
+const BLOCK_STATE: Shape = BlockState;
 
 /// `ParticleTypes.STREAM_CODEC` in 26.2: the options of each particle type
 /// that has any; the rest are `SimpleParticleType`s with none.
-pub static PARTICLE: Shape = ByRegistryOr(
-    ClientRegistry::ParticleType,
-    &[
-        ("block", BLOCK_STATE),
-        ("block_marker", BLOCK_STATE),
-        // GeyserParticleOptions.java:31
-        ("geyser", Int),
-        ("geyser_plume", Int),
-        // GeyserBaseParticleOptions.java:33
-        ("geyser_base", Struct(&[Int, Float])),
-        ("geyser_poof", Struct(&[Int, Float])),
-        // PowerParticleOption.java:29
-        ("dragon_breath", Float),
-        // DustParticleOptions.java:32
-        ("dust", Struct(&[Int, Float])),
-        // DustColorTransitionOptions.java:32
-        ("dust_color_transition", Struct(&[Int, Int, Float])),
-        // SpellParticleOption.java:38
-        ("effect", Struct(&[Int, Float])),
-        ("instant_effect", Struct(&[Int, Float])),
-        // ColorParticleOption.java:29
-        ("entity_effect", Int),
-        ("tinted_leaves", Int),
-        ("flash", Int),
-        ("falling_dust", BLOCK_STATE),
-        // SculkChargeParticleOptions.java:28
-        ("sculk_charge", Float),
-        // ItemParticleOption.java:27
-        ("item", ItemTemplate),
-        // VibrationParticleOption.java:33: a `PositionSource`, then ticks.
-        (
-            "vibration",
-            Struct(&[
-                ByRegistry(
-                    ClientRegistry::PositionSourceType,
-                    &[
-                        // BlockPositionSource.java:29
-                        ("block", Long),
-                        // EntityPositionSource.java:38
-                        ("entity", Struct(&[VarInt, Float])),
-                    ],
+macro_rules! particle {
+    ($item:expr) => {
+        ByRegistryOr(
+            ClientRegistry::ParticleType,
+            &[
+                ("block", BLOCK_STATE),
+                ("block_marker", BLOCK_STATE),
+                // GeyserParticleOptions.java:31
+                ("geyser", Int),
+                ("geyser_plume", Int),
+                // GeyserBaseParticleOptions.java:33
+                ("geyser_base", Struct(&[Int, Float])),
+                ("geyser_poof", Struct(&[Int, Float])),
+                // PowerParticleOption.java:29
+                ("dragon_breath", Float),
+                // DustParticleOptions.java:32
+                ("dust", Struct(&[Int, Float])),
+                // DustColorTransitionOptions.java:32
+                ("dust_color_transition", Struct(&[Int, Int, Float])),
+                // SpellParticleOption.java:38
+                ("effect", Struct(&[Int, Float])),
+                ("instant_effect", Struct(&[Int, Float])),
+                // ColorParticleOption.java:29
+                ("entity_effect", Int),
+                ("tinted_leaves", Int),
+                ("flash", Int),
+                ("falling_dust", BLOCK_STATE),
+                // SculkChargeParticleOptions.java:28
+                ("sculk_charge", Float),
+                // ItemParticleOption.java:27
+                ("item", $item),
+                // VibrationParticleOption.java:33: a `PositionSource`, then ticks.
+                (
+                    "vibration",
+                    Struct(&[
+                        ByRegistry(
+                            ClientRegistry::PositionSourceType,
+                            &[
+                                // BlockPositionSource.java:29
+                                ("block", Long),
+                                // EntityPositionSource.java:38
+                                ("entity", Struct(&[VarInt, Float])),
+                            ],
+                        ),
+                        VarInt,
+                    ]),
                 ),
-                VarInt,
-            ]),
-        ),
-        // TrailParticleOption.java:28: a `Vec3`, colour and duration.
-        ("trail", Struct(&[Double, Double, Double, Int, VarInt])),
-        // ShriekParticleOption.java:28
-        ("shriek", VarInt),
-        ("dust_pillar", BLOCK_STATE),
-        ("block_crumble", BLOCK_STATE),
-    ],
-    &Unit,
-);
+                // TrailParticleOption.java:28: a `Vec3`, colour and duration.
+                ("trail", Struct(&[Double, Double, Double, Int, VarInt])),
+                // ShriekParticleOption.java:28
+                ("shriek", VarInt),
+                ("dust_pillar", BLOCK_STATE),
+                ("block_crumble", BLOCK_STATE),
+            ],
+            &Unit,
+        )
+    };
+}
+
+pub static PARTICLE: Shape = particle!(ItemTemplate);
+/// 1.21.11 ItemParticleOption.java:20: `ItemStack.STREAM_CODEC` instead of a template.
+pub static PARTICLE_1_21_11: Shape = particle!(Stack);
 
 /// The 26.2 value layout of each `DataComponents` entry, by registry name.
 /// Components without a network codec fall back to their persistent Codec as
@@ -353,7 +373,7 @@ static COMPONENTS_26_2: &[(&str, Shape)] = &[
         List(
             UNBOUNDED,
             &Struct(&[
-                VarInt,
+                RegistryId(ClientRegistry::Attribute),
                 Struct(&[IDENTIFIER, Double, VarInt]),
                 VarInt,
                 ById(&[Unit, Unit, TEXT]),
@@ -646,6 +666,83 @@ static COMPONENTS_26_3: &[(&str, Shape)] = &[
     ("cushion/color", VarInt),
 ];
 
+/// 1.21.11's components whose layout differs from 26.2's, layered over
+/// [`COMPONENTS_26_2`] (source side of the 1.21.11 → canon translation).
+static COMPONENTS_1_21_11: &[(&str, Shape)] = &[
+    // EitherHolder.streamCodec (1.21.11): a holder, or a registry key.
+    ("damage_type", Either(&VarInt, &IDENTIFIER)),
+    ("chicken/variant", Either(&VarInt, &IDENTIFIER)),
+    ("zombie_nautilus/variant", Either(&VarInt, &IDENTIFIER)),
+    (
+        "provides_trim_material",
+        Either(&TRIM_MATERIAL, &IDENTIFIER),
+    ),
+    (
+        "instrument",
+        Either(
+            &Holder(&Struct(&[Ref(&SOUND), Float, Float, TEXT])),
+            &IDENTIFIER,
+        ),
+    ),
+    (
+        "jukebox_playable",
+        Either(
+            &Holder(&Struct(&[Ref(&SOUND), TEXT, Float, VarInt])),
+            &IDENTIFIER,
+        ),
+    ),
+    // TagKey.streamCodec (1.21.11) where 26.x has a holder set.
+    ("provides_banner_patterns", TagKey),
+    ("damage_resistant", TagKey),
+    (
+        "blocks_attacks",
+        Struct(&[
+            Float,
+            Float,
+            List(
+                UNBOUNDED,
+                &Struct(&[Float, Optional(&HolderSet), Float, Float]),
+            ),
+            Struct(&[Float, Float, Float]),
+            Optional(&TagKey),
+            Optional(&SOUND),
+            Optional(&SOUND),
+        ]),
+    ),
+    // ItemStack codecs (1.21.11) where 26.x has ItemStackTemplate.
+    ("charged_projectiles", List(UNBOUNDED, &Stack)),
+    ("bundle_contents", List(UNBOUNDED, &Stack)),
+    ("use_remainder", Stack),
+    ("container", List(256, &Stack)),
+    // PotDecorations.java:30 (1.21.11): up to four item ids, brick = empty side.
+    (
+        "pot_decorations",
+        List(4, &RegistryId(ClientRegistry::Item)),
+    ),
+    // TeleportRandomlyConsumeEffect: 26.3 added `directionalParticles` (default true).
+    ("consumable", consumable!(&CONSUME_EFFECT_1_21_11)),
+    ("death_protection", List(UNBOUNDED, &CONSUME_EFFECT_1_21_11)),
+];
+
+static CONSUME_EFFECT_1_21_11: Shape = consume_effect!(Append(&Float, &[1]));
+
+/// Component shapes of 1.21.11 by its own component type id.
+pub(crate) fn components_1_21_11() -> &'static [&'static Shape] {
+    static T: std::sync::LazyLock<Vec<&'static Shape>> = std::sync::LazyLock::new(|| {
+        crate::generated::r1_21_11::DATA_COMPONENT_TYPE
+            .iter()
+            .map(|name| {
+                [COMPONENTS_1_21_11, COMPONENTS_26_2]
+                    .iter()
+                    .find_map(|layer| layer.iter().find(|(n, _)| n == name))
+                    .map(|(_, s)| s)
+                    .unwrap_or(&Shape::Nbt)
+            })
+            .collect()
+    });
+    &T
+}
+
 /// `SignText.STREAM_CODEC` (SignText.java:43): four lines, optional filtered
 /// lines, a dye color and the glowing flag; fixed-size lists carry no count.
 static SIGN_TEXT: Shape = Struct(&[
@@ -675,7 +772,7 @@ fn bad(what: &'static str) -> ProtocolError {
 }
 
 /// Таблица форм компонентов 26.3 по id типа компонента.
-fn components() -> &'static [&'static Shape] {
+pub(crate) fn components() -> &'static [&'static Shape] {
     static T: std::sync::LazyLock<Vec<&'static Shape>> = std::sync::LazyLock::new(|| {
         reg::DATA_COMPONENT_TYPE
             .iter()
@@ -875,9 +972,20 @@ pub fn walk(r: &mut Reader, shape: &'static Shape, depth: u32) -> ProtocolResult
                 walk(r, inline, depth)?;
             }
         }
-        RegistryId(_) => {
+        RegistryId(_) | BlockState => {
             r.var_int()?;
         }
+        Stack => {
+            let count = r.var_int()?;
+            if count > 0 {
+                r.var_int()?;
+                crate::translate::skip_patch_1_21_11(r, depth)?;
+            }
+        }
+        TagKey => {
+            r.string(MAX_STRING_LENGTH)?;
+        }
+        Append(inner, _) => walk(r, inner, depth)?,
         HolderSet => match r.var_int()? {
             0 => {
                 r.string(MAX_STRING_LENGTH)?;
