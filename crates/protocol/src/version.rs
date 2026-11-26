@@ -40,6 +40,19 @@ pub const V1_21_11: Version = Version {
     particle_type: generated::r1_21_11::PARTICLE_TYPE,
 };
 
+/// 1.21.9/1.21.10 (протокол 773): пакеты и состояния блоков как у 1.21.11, реестры уже;
+/// переводится тем же путём, что 1.21.11, со своими таблицами (TODO-373a).
+pub const V1_21_10: Version = Version {
+    name: "1.21.10",
+    protocol: 773,
+    packets: generated::v1_21_10::PACKETS,
+    item: generated::r1_21_10::ITEM,
+    block: generated::r1_21_10::BLOCK,
+    entity_type: generated::r1_21_10::ENTITY_TYPE,
+    sound_event: generated::r1_21_10::SOUND_EVENT,
+    particle_type: generated::r1_21_10::PARTICLE_TYPE,
+};
+
 /// Forge/ваниль 1.20.1 (протокол 763): нет Configuration-фазы, реестры внутри Play `login`.
 pub const V1_20_1: Version = Version {
     name: "1.20.1",
@@ -55,7 +68,7 @@ pub const V1_20_1: Version = Version {
 /// Каноническая версия (на ней написан весь клиент).
 pub const CANON: Version = V26_3;
 
-pub const SUPPORTED: &[Version] = &[V26_3, V1_21_11, V1_20_1];
+pub const SUPPORTED: &[Version] = &[V26_3, V1_21_11, V1_21_10, V1_20_1];
 
 /// Версия по protocol number из Status-ответа.
 pub fn by_protocol(protocol: i32) -> Option<Version> {
@@ -77,6 +90,11 @@ impl Version {
     pub fn is_canon(&self) -> bool {
         self.protocol == CANON.protocol
     }
+
+    /// 1.21.9–1.21.11: переводятся одним путём (`legacy::clientbound_1_21_11`).
+    pub fn is_1_21_late(&self) -> bool {
+        matches!(self.protocol, 773 | 774)
+    }
 }
 
 /// Таблица «id реестра версии сервера → id канона» по именам записей;
@@ -95,6 +113,7 @@ mod tests {
     fn detects_versions() {
         assert_eq!(by_protocol(777).map(|v| v.name), Some("26.3"));
         assert_eq!(by_protocol(774).map(|v| v.name), Some("1.21.11"));
+        assert_eq!(by_protocol(773).map(|v| v.name), Some("1.21.10"));
         assert!(by_protocol(1).is_none());
     }
 

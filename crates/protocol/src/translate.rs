@@ -4,8 +4,10 @@
 //! блоков) переводятся по именам. Несовместимое значение (`Ok(false)`) вызывающий отбрасывает:
 //! компонент выпадает из патча, стек становится пустым.
 use crate::error::{ProtocolError, ProtocolResult};
-use crate::generated::{r1_21_11 as src, r26_3 as canon};
-use crate::item::{components, components_1_21_11, ClientRegistry, Shape, MAX_DEPTH};
+use crate::generated::{r1_21_10, r1_21_11, r26_3 as canon};
+use crate::item::{
+    components, components_1_21_10, components_1_21_11, ClientRegistry, Shape, MAX_DEPTH,
+};
 use crate::version::build_remap;
 use crate::wire::{Reader, Writer};
 use std::sync::OnceLock;
@@ -29,20 +31,46 @@ const REGISTRIES: [ClientRegistry; 10] = [
     ClientRegistry::Block,
 ];
 
-fn src_names(reg: ClientRegistry) -> &'static [&'static str] {
-    match reg {
-        ClientRegistry::SoundEvent => src::SOUND_EVENT,
-        ClientRegistry::Item => src::ITEM,
-        ClientRegistry::DataComponentType => src::DATA_COMPONENT_TYPE,
-        ClientRegistry::PositionSourceType => src::POSITION_SOURCE_TYPE,
-        ClientRegistry::ParticleType => src::PARTICLE_TYPE,
-        ClientRegistry::BlockEntityType => src::BLOCK_ENTITY_TYPE,
-        ClientRegistry::ConsumeEffectType => src::CONSUME_EFFECT_TYPE,
-        ClientRegistry::EntityType => src::ENTITY_TYPE,
-        ClientRegistry::Attribute => src::ATTRIBUTE,
-        ClientRegistry::Block => src::BLOCK,
-    }
+/// Таблицы реестров версии сервера по [`ClientRegistry`].
+macro_rules! src_names {
+    ($fn:ident, $m:ident) => {
+        fn $fn(reg: ClientRegistry) -> &'static [&'static str] {
+            match reg {
+                ClientRegistry::SoundEvent => $m::SOUND_EVENT,
+                ClientRegistry::Item => $m::ITEM,
+                ClientRegistry::DataComponentType => $m::DATA_COMPONENT_TYPE,
+                ClientRegistry::PositionSourceType => $m::POSITION_SOURCE_TYPE,
+                ClientRegistry::ParticleType => $m::PARTICLE_TYPE,
+                ClientRegistry::BlockEntityType => $m::BLOCK_ENTITY_TYPE,
+                ClientRegistry::ConsumeEffectType => $m::CONSUME_EFFECT_TYPE,
+                ClientRegistry::EntityType => $m::ENTITY_TYPE,
+                ClientRegistry::Attribute => $m::ATTRIBUTE,
+                ClientRegistry::Block => $m::BLOCK,
+            }
+        }
+    };
 }
+src_names!(names_1_21_11, r1_21_11);
+src_names!(names_1_21_10, r1_21_10);
+
+type Names = fn(ClientRegistry) -> &'static [&'static str];
+type Comps = fn() -> &'static [&'static Shape];
+
+/// Исходная (не каноническая) версия перевода: реестры и формы компонентов.
+#[derive(Clone, Copy)]
+struct Source {
+    names: Names,
+    components: Comps,
+}
+
+const SRC_1_21_11: Source = Source {
+    names: names_1_21_11,
+    components: components_1_21_11,
+};
+const SRC_1_21_10: Source = Source {
+    names: names_1_21_10,
+    components: components_1_21_10,
+};
 
 fn canon_names(reg: ClientRegistry) -> &'static [&'static str] {
     match reg {
@@ -59,7 +87,7 @@ fn canon_names(reg: ClientRegistry) -> &'static [&'static str] {
     }
 }
 
-/// Компоненты, переименованные в каноне: 1.21.11 → 26.3.
+/// Компоненты, переименованные в каноне: 1.21.11 → 26.3 (в 1.21.10 обоих имён нет).
 fn canon_component_name(name: &str) -> &str {
     match name {
         // DataComponents (26.3): swing_animation разделён на attack/interact_animation.
@@ -85,19 +113,19 @@ pub struct Translator {
     components: Vec<Option<u32>>,
     block_state: fn(u32) -> u32,
     rev: bool,
+    src: Source,
 }
 
 impl Translator {
-    fn new(block_state: fn(u32) -> u32) -> Self {
-        Self::build(block_state, false)
+    fn new(src: Source, block_state: fn(u32) -> u32) -> Self {
+        Self::build(src, block_state, false)
     }
 
-    fn build(block_state: fn(u32) -> u32, rev: bool) -> Self {
-        type Names = fn(ClientRegistry) -> &'static [&'static str];
+    fn build(src: Source, block_state: fn(u32) -> u32, rev: bool) -> Self {
         let (from, to): (Names, Names) = if rev {
-            (canon_names, src_names)
+            (canon_names, src.names)
         } else {
-            (src_names, canon_names)
+            (src.names, canon_names)
         };
         let remaps = REGISTRIES
             .iter()
@@ -121,6 +149,7 @@ impl Translator {
             components,
             block_state,
             rev,
+            src,
         }
     }
 
@@ -128,7 +157,7 @@ impl Translator {
         if self.rev {
             canon_names(reg)
         } else {
-            src_names(reg)
+            (self.src.names)(reg)
         }
     }
 
@@ -136,13 +165,13 @@ impl Translator {
         if self.rev {
             components()
         } else {
-            components_1_21_11()
+            (self.src.components)()
         }
     }
 
     fn output_components(&self) -> &'static [&'static Shape] {
         if self.rev {
-            components_1_21_11()
+            (self.src.components)()
         } else {
             components()
         }
@@ -365,6 +394,16 @@ impl Translator {
             d = Some(inner);
         }
         let d = d;
+        // Канон → версия, где левая ветвь Either была голым значением (Shape::Left):
+        // левая ветвь пишется без флага, правую перевести нельзя.
+        if let (Either(left, right), Some(Left(x))) = (s, d) {
+            return if r.bool()? {
+                self.tr(r, w, left, Some(x), depth)
+            } else {
+                self.tr(r, w, right, None, depth)?;
+                Ok(false)
+            };
+        }
         // Исходная форма — Either, каноническая — нет (EitherHolder 1.21.11 → Holder):
         // левая ветвь переводится, ключ реестра (правая) не переводим.
         if let (Either(left, right), false) = (s, self.rev) {
@@ -499,6 +538,16 @@ impl Translator {
                     ok &= self.tr(r, w, f, di, depth)?;
                 }
                 Ok(ok)
+            }
+            Left(inner) => {
+                // Голое значение старой версии → левая ветвь Either канона.
+                let dl = match d {
+                    Some(Either(l, _)) => Some(*l),
+                    _ => None,
+                };
+                w.bool(true);
+                let ok = self.tr(r, w, inner, dl, depth)?;
+                Ok(ok && dl.is_some())
             }
             Append(inner, extra) => {
                 // Поле, добавленное в каноне: исходное значение + значение по умолчанию.
@@ -649,31 +698,49 @@ fn len(r: &mut Reader, max: usize) -> ProtocolResult<usize> {
     Ok(n)
 }
 
-/// Пропуск патча компонентов 1.21.11 (для [`Shape::Stack`] в `walk`).
-pub(crate) fn skip_patch_1_21_11(r: &mut Reader, depth: u32) -> ProtocolResult<()> {
-    static T: OnceLock<Translator> = OnceLock::new();
-    T.get_or_init(|| Translator::new(|s| s))
-        .patch(r, &mut Writer::new(), depth)?;
+/// Пропуск патча компонентов версии соединения (для [`Shape::Stack`] в `walk`).
+pub(crate) fn skip_patch_legacy(r: &mut Reader, depth: u32) -> ProtocolResult<()> {
+    static T10: OnceLock<Translator> = OnceLock::new();
+    static T11: OnceLock<Translator> = OnceLock::new();
+    let t = if crate::version::current().protocol == crate::version::V1_21_10.protocol {
+        T10.get_or_init(|| Translator::new(SRC_1_21_10, |s| s))
+    } else {
+        T11.get_or_init(|| Translator::new(SRC_1_21_11, |s| s))
+    };
+    t.patch(r, &mut Writer::new(), depth)?;
     Ok(())
 }
 
 static T_1_21_11: OnceLock<Translator> = OnceLock::new();
 static T_TO_1_21_11: OnceLock<Translator> = OnceLock::new();
+static T_1_21_10: OnceLock<Translator> = OnceLock::new();
+static T_TO_1_21_10: OnceLock<Translator> = OnceLock::new();
 
 /// Переводчик канон → 1.21.11 (пакеты клиента); `block_state` — канон → 1.21.11.
 pub fn to_1_21_11(block_state: fn(u32) -> u32) -> &'static Translator {
-    T_TO_1_21_11.get_or_init(|| Translator::build(block_state, true))
+    T_TO_1_21_11.get_or_init(|| Translator::build(SRC_1_21_11, block_state, true))
 }
 
 /// Переводчик 1.21.11 → канон; `block_state` — перевод id состояний (ezzmc-world).
 pub fn v1_21_11(block_state: fn(u32) -> u32) -> &'static Translator {
-    T_1_21_11.get_or_init(|| Translator::new(block_state))
+    T_1_21_11.get_or_init(|| Translator::new(SRC_1_21_11, block_state))
+}
+
+/// Переводчик канон → 1.21.10 (состояния блоков 1.21.10 и 1.21.11 совпадают).
+pub fn to_1_21_10(block_state: fn(u32) -> u32) -> &'static Translator {
+    T_TO_1_21_10.get_or_init(|| Translator::build(SRC_1_21_10, block_state, true))
+}
+
+/// Переводчик 1.21.10 → канон.
+pub fn v1_21_10(block_state: fn(u32) -> u32) -> &'static Translator {
+    T_1_21_10.get_or_init(|| Translator::new(SRC_1_21_10, block_state))
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::generated::r1_21_11 as src;
 
     fn src_id(t: &[&str], n: &str) -> i32 {
         t.iter().position(|x| *x == n).unwrap() as i32
@@ -681,7 +748,7 @@ mod tests {
 
     #[test]
     fn stack_with_container_and_rename() {
-        let t = Translator::new(|s| s);
+        let t = Translator::new(SRC_1_21_11, |s| s);
         let mut w = Writer::new();
         // shulker_box ×1: container [stone ×3, пусто], swing_animation, удалён damage
         w.var_int(1).var_int(src_id(src::ITEM, "shulker_box"));
@@ -732,7 +799,7 @@ mod tests {
 
     #[test]
     fn registry_sets_in_components_remapped() {
-        let t = Translator::new(|s| s);
+        let t = Translator::new(SRC_1_21_11, |s| s);
         let mut w = Writer::new();
         // diamond_pickaxe: repairable [diamond], tool [{blocks [cherry_log, dirt], speed 8}]
         w.var_int(1).var_int(src_id(src::ITEM, "diamond_pickaxe"));
@@ -774,7 +841,7 @@ mod tests {
 
     #[test]
     fn can_break_block_ids_remapped() {
-        let t = Translator::new(|s| s);
+        let t = Translator::new(SRC_1_21_11, |s| s);
         let mut w = Writer::new();
         w.var_int(1).var_int(src_id(src::ITEM, "diamond_pickaxe"));
         w.var_int(1).var_int(0);
@@ -807,9 +874,72 @@ mod tests {
         assert_eq!(&*st.patch.added[0].1, v.into_vec().as_slice());
     }
 
+    /// 1.21.10: частичный предикат компонента — голый id типа предиката (`Shape::Left`),
+    /// в каноне — левая ветвь Either; id предметов/компонентов/блоков по таблицам 1.21.10.
+    #[test]
+    fn can_break_1_21_10_partial_predicate_to_either() {
+        use crate::generated::r1_21_10 as old;
+        let t = Translator::new(SRC_1_21_10, |s| s);
+        let mut v = Writer::new();
+        v.var_int(1)
+            .bool(true)
+            .var_int(2)
+            .var_int(src_id(old::BLOCK, "cherry_log"));
+        v.bool(false).bool(false).var_int(0);
+        v.var_int(1).var_int(4).u8(10).u8(0); // partial: тип предиката 4, пустой compound
+        let v = v.into_vec();
+        let mut w = Writer::new();
+        w.var_int(1).var_int(src_id(old::ITEM, "diamond_pickaxe"));
+        w.var_int(1).var_int(0);
+        w.var_int(src_id(old::DATA_COMPONENT_TYPE, "can_break"))
+            .bytes(&v);
+        let buf = w.into_vec();
+        let mut r = Reader::new(&buf);
+        let mut out = Writer::new();
+        t.stack(&mut r, &mut out).unwrap();
+        assert_eq!(r.remaining(), 0);
+        let out = out.into_vec();
+        let st = crate::item::read_stack(&mut Reader::new(&out))
+            .unwrap()
+            .unwrap();
+        assert_eq!(st.item, src_id(canon::ITEM, "diamond_pickaxe") as u32);
+        assert_eq!(
+            st.patch.added[0].0,
+            src_id(canon::DATA_COMPONENT_TYPE, "can_break") as u32
+        );
+        let mut e = Writer::new();
+        e.var_int(1)
+            .bool(true)
+            .var_int(2)
+            .var_int(src_id(canon::BLOCK, "cherry_log"));
+        e.bool(false).bool(false).var_int(0);
+        e.var_int(1).bool(true).var_int(4).u8(10).u8(0);
+        assert_eq!(&*st.patch.added[0].1, e.into_vec().as_slice());
+
+        // Обратно (канон → 1.21.10): флаг Either снимается.
+        let back = Translator::build(SRC_1_21_10, |s| s, true);
+        let mut u = Writer::new();
+        u.var_int(1).var_int(st.item as i32).var_int(1).var_int(0);
+        u.var_int(st.patch.added[0].0 as i32)
+            .var_int(st.patch.added[0].1.len() as i32)
+            .bytes(&st.patch.added[0].1);
+        let ub = u.into_vec();
+        let mut o = Writer::new();
+        back.stack_untrusted(&mut Reader::new(&ub), &mut o).unwrap();
+        let mut x = Writer::new();
+        x.var_int(1)
+            .var_int(src_id(old::ITEM, "diamond_pickaxe"))
+            .var_int(1)
+            .var_int(0);
+        x.var_int(src_id(old::DATA_COMPONENT_TYPE, "can_break"))
+            .var_int(v.len() as i32)
+            .bytes(&v);
+        assert_eq!(o.into_vec(), x.into_vec());
+    }
+
     #[test]
     fn untrusted_stack_back_to_1_21_11() {
-        let t = Translator::build(|s| s, true);
+        let t = Translator::build(SRC_1_21_11, |s| s, true);
         let mut w = Writer::new();
         // канон: diamond_pickaxe x1, repairable [diamond], attack_animation, interact_animation
         w.var_int(1).var_int(src_id(canon::ITEM, "diamond_pickaxe"));
@@ -842,7 +972,7 @@ mod tests {
 
     #[test]
     fn unknown_key_drops_component_only() {
-        let t = Translator::new(|s| s);
+        let t = Translator::new(SRC_1_21_11, |s| s);
         let mut w = Writer::new();
         // damage_type как ключ реестра (правая ветвь EitherHolder) — компонент выпадает
         w.var_int(2).var_int(src_id(src::ITEM, "mace"));

@@ -3,30 +3,41 @@
 //! между версиями. Реестровые id (предметы, сущности, звуки, частицы) — позже в этом же месте.
 use ezzmc_protocol::item::{ClientRegistry, Shape, PARTICLE, PARTICLE_1_21_11, SOUND};
 use ezzmc_protocol::translate::Translator;
-use ezzmc_protocol::version::{build_remap, CANON, V1_21_11};
+use ezzmc_protocol::version::{build_remap, CANON, V1_21_10, V1_21_11};
 use ezzmc_protocol::wire::{Reader, Writer};
 use ezzmc_protocol::{Direction, ProtocolResult, State};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-fn entity_type_map() -> &'static [Option<u32>] {
-    static T: OnceLock<Vec<Option<u32>>> = OnceLock::new();
-    T.get_or_init(|| build_remap(V1_21_11.entity_type, CANON.entity_type))
+/// Соединение с сервером 1.21.9/1.21.10 (773)? Иначе 1.21.11 (774).
+fn is_1_21_10() -> bool {
+    ezzmc_protocol::version::current().protocol == V1_21_10.protocol
 }
 
-/// Реестр block_entity_type 1.21.11 → канон (в 26.x убран `bed`, добавлен `potent_sulfur`).
+fn entity_type_map() -> &'static [Option<u32>] {
+    static T10: OnceLock<Vec<Option<u32>>> = OnceLock::new();
+    static T11: OnceLock<Vec<Option<u32>>> = OnceLock::new();
+    if is_1_21_10() {
+        T10.get_or_init(|| build_remap(V1_21_10.entity_type, CANON.entity_type))
+    } else {
+        T11.get_or_init(|| build_remap(V1_21_11.entity_type, CANON.entity_type))
+    }
+}
+
+/// Реестр block_entity_type 1.21.10/1.21.11 → канон (в 26.x убран `bed`, добавлен `potent_sulfur`).
 fn block_entity_type(id: i32) -> Option<i32> {
-    static T: OnceLock<Vec<Option<u32>>> = OnceLock::new();
-    T.get_or_init(|| {
-        build_remap(
-            ezzmc_protocol::generated::r1_21_11::BLOCK_ENTITY_TYPE,
-            ezzmc_protocol::generated::r26_3::BLOCK_ENTITY_TYPE,
-        )
-    })
-    .get(usize::try_from(id).ok()?)
-    .copied()
-    .flatten()
-    .map(|v| v as i32)
+    use ezzmc_protocol::generated::{r1_21_10, r1_21_11, r26_3};
+    static T10: OnceLock<Vec<Option<u32>>> = OnceLock::new();
+    static T11: OnceLock<Vec<Option<u32>>> = OnceLock::new();
+    let t = if is_1_21_10() {
+        T10.get_or_init(|| build_remap(r1_21_10::BLOCK_ENTITY_TYPE, r26_3::BLOCK_ENTITY_TYPE))
+    } else {
+        T11.get_or_init(|| build_remap(r1_21_11::BLOCK_ENTITY_TYPE, r26_3::BLOCK_ENTITY_TYPE))
+    };
+    t.get(usize::try_from(id).ok()?)
+        .copied()
+        .flatten()
+        .map(|v| v as i32)
 }
 
 /// Сдвиг индексов полей SynchedEntityData 1.21.11 → 26.3 по классу сущности.
@@ -103,9 +114,9 @@ impl DataLayout {
     }
 }
 
-/// Классы сущностей текущего соединения (id → раскладка), заполняется по add_entity.
-fn layouts() -> std::sync::MutexGuard<'static, HashMap<i32, DataLayout>> {
-    static M: OnceLock<Mutex<HashMap<i32, DataLayout>>> = OnceLock::new();
+/// Классы сущностей текущего соединения (id → раскладка, канонический тип), заполняется по add_entity.
+fn layouts() -> std::sync::MutexGuard<'static, HashMap<i32, (DataLayout, &'static str)>> {
+    static M: OnceLock<Mutex<HashMap<i32, (DataLayout, &'static str)>>> = OnceLock::new();
     M.get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -153,6 +164,59 @@ const SERIALIZERS_1_21_11: &[&str] = &[
     "RESOLVABLE_PROFILE",
     "HUMANOID_ARM",
 ];
+/// VANILLA: EntityDataSerializers — порядок регистрации 1.21.10 (нет ZOMBIE_NAUTILUS_VARIANT, HUMANOID_ARM).
+const SERIALIZERS_1_21_10: &[&str] = &[
+    "BYTE",
+    "INT",
+    "LONG",
+    "FLOAT",
+    "STRING",
+    "COMPONENT",
+    "OPTIONAL_COMPONENT",
+    "ITEM_STACK",
+    "BOOLEAN",
+    "ROTATIONS",
+    "BLOCK_POS",
+    "OPTIONAL_BLOCK_POS",
+    "DIRECTION",
+    "OPTIONAL_LIVING_ENTITY_REFERENCE",
+    "BLOCK_STATE",
+    "OPTIONAL_BLOCK_STATE",
+    "PARTICLE",
+    "PARTICLES",
+    "VILLAGER_DATA",
+    "OPTIONAL_UNSIGNED_INT",
+    "POSE",
+    "CAT_VARIANT",
+    "COW_VARIANT",
+    "WOLF_VARIANT",
+    "WOLF_SOUND_VARIANT",
+    "FROG_VARIANT",
+    "PIG_VARIANT",
+    "CHICKEN_VARIANT",
+    "OPTIONAL_GLOBAL_POS",
+    "PAINTING_VARIANT",
+    "SNIFFER_STATE",
+    "ARMADILLO_STATE",
+    "COPPER_GOLEM_STATE",
+    "WEATHERING_COPPER_STATE",
+    "VECTOR3",
+    "QUATERNION",
+    "RESOLVABLE_PROFILE",
+];
+
+/// Поля 1.21.10, сменившие сериализатор в 1.21.11: (канонический тип сущности, индекс 1.21.10).
+/// VANILLA: Avatar#DATA_PLAYER_MAIN_HAND (1.21.10: BYTE 0 = левая, 1 = правая; 1.21.11: HUMANOID_ARM).
+/// VANILLA: Wolf#DATA_REMAINING_ANGER_TIME (#21), Bee (#18) (1.21.10: INT тиков; 1.21.11: LONG
+/// DATA_ANGER_END_TIME, −1 = не зол).
+fn retyped_1_21_10(ty: &str, idx: u8) -> Option<&'static str> {
+    match (ty, idx) {
+        ("player" | "mannequin", 15) => Some("HUMANOID_ARM"),
+        ("wolf", 21) | ("bee", 18) => Some("ANGER_END_TIME"),
+        _ => None,
+    }
+}
+
 /// VANILLA: EntityDataSerializers (26.3).
 const SERIALIZERS_26_3: &[&str] = &[
     "BYTE",
@@ -490,11 +554,23 @@ fn state_id(id: i32) -> i32 {
 }
 
 fn tr() -> &'static Translator {
-    ezzmc_protocol::translate::v1_21_11(ezzmc_world::legacy::state_to_canon)
+    use ezzmc_protocol::translate::{v1_21_10, v1_21_11};
+    if is_1_21_10() {
+        v1_21_10(ezzmc_world::legacy::state_to_canon)
+    } else {
+        v1_21_11(ezzmc_world::legacy::state_to_canon)
+    }
 }
 
+/// Канон → версия соединения; состояния блоков 1.21.10 и 1.21.11 совпадают.
 fn tr_back() -> &'static Translator {
-    ezzmc_protocol::translate::to_1_21_11(ezzmc_world::legacy::state_from_canon_1_21_11)
+    use ezzmc_protocol::translate::{to_1_21_10, to_1_21_11};
+    let back = ezzmc_world::legacy::state_from_canon_1_21_11;
+    if is_1_21_10() {
+        to_1_21_10(back)
+    } else {
+        to_1_21_11(back)
+    }
 }
 
 /// VANILLA: HashedStack.STREAM_CODEC — Optional(item, count, HashedPatchMap(added: id→int, removed: ids)),
@@ -537,10 +613,70 @@ fn hashed_stack_back(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
     Ok(())
 }
 
-/// Пакет клиента (собран в каноне, id из таблицы 1.21.11) → тело для сервера 1.21.11.
+/// VANILLA: ClientboundSetEntityDataPacket (1.21.10/1.21.11) → 26.3; `v10` — сервер 1.21.10.
+fn set_entity_data(r: &mut Reader, w: &mut Writer, v10: bool) -> ProtocolResult<()> {
+    let id = r.var_int()?;
+    let (layout, ty) = layouts()
+        .get(&id)
+        .copied()
+        .unwrap_or((DataLayout::Same, ""));
+    let table = if v10 {
+        SERIALIZERS_1_21_10
+    } else {
+        SERIALIZERS_1_21_11
+    };
+    let canon_of = |n: &str| SERIALIZERS_26_3.iter().position(|x| *x == n).unwrap_or(0);
+    w.var_int(id);
+    loop {
+        let idx = r.u8()?;
+        if idx == 0xFF {
+            break;
+        }
+        let src = r.var_int()?;
+        let ser = usize::try_from(src).ok().and_then(|i| table.get(i)).ok_or(
+            ezzmc_protocol::ProtocolError::InvalidValue {
+                what: "entity data serializer",
+                value: src.into(),
+            },
+        )?;
+        let mut one = Writer::new();
+        match v10.then(|| retyped_1_21_10(ty, idx)).flatten() {
+            Some("HUMANOID_ARM") if *ser == "BYTE" => {
+                // HumanoidArm: 0 = LEFT, 1 = RIGHT.
+                let arm = i32::from(r.u8()? != 0);
+                one.u8(layout.index(idx))
+                    .var_int(canon_of("HUMANOID_ARM") as i32);
+                w.bytes(&one.var_int(arm).buf);
+                continue;
+            }
+            Some("ANGER_END_TIME") if *ser == "INT" => {
+                // VANILLA-UNSURE: остаток тиков → момент окончания без игрового времени
+                // сервера; «зол» = i64::MAX до прихода 0 (−1, как define в 1.21.11).
+                let end = if r.var_int()? > 0 { i64::MAX } else { -1 };
+                one.u8(layout.index(idx)).var_int(canon_of("LONG") as i32);
+                w.bytes(&one.var_long(end).buf);
+                continue;
+            }
+            _ => {}
+        }
+        one.u8(layout.index(idx)).var_int(canon_of(ser) as i32);
+        if entity_data_value(r, &mut one, ser)? {
+            w.bytes(&one.into_vec());
+        }
+    }
+    w.u8(0xFF);
+    Ok(())
+}
+
+/// Пакет клиента (собран в каноне, id из таблицы версии) → тело для сервера 1.21.10/1.21.11.
 /// `None` — тело без изменений.
 pub fn serverbound_1_21_11(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
-    let Some(name) = ezzmc_protocol::generated::v1_21_11::PACKETS
+    let table = if is_1_21_10() {
+        V1_21_10.packets
+    } else {
+        V1_21_11.packets
+    };
+    let Some(name) = table
         .iter()
         .find(|p| p.state == State::Play && p.dir == Direction::Serverbound && p.id as i32 == id)
         .map(|p| p.name)
@@ -666,7 +802,7 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
                 return Ok(Some(Vec::new()));
             };
             let name = CANON.entity_type.get(canon as usize).copied().unwrap_or("");
-            layouts().insert(id, DataLayout::of(name));
+            layouts().insert(id, (DataLayout::of(name), name));
             w.var_int(id).bytes(uuid).var_int(canon as i32);
             if name != "falling_block" {
                 w.bytes(r.rest());
@@ -836,32 +972,7 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
         }
         // VANILLA: ClientboundSetEntityDataPacket — id, записи (u8 индекс, VarInt сериализатор,
         // значение), 0xFF. Сериализаторы и индексы полей переводятся в 26.3.
-        "set_entity_data" => {
-            let id = r.var_int()?;
-            let layout = layouts().get(&id).copied().unwrap_or(DataLayout::Same);
-            w.var_int(id);
-            loop {
-                let idx = r.u8()?;
-                if idx == 0xFF {
-                    break;
-                }
-                let src = r.var_int()?;
-                let ser = usize::try_from(src)
-                    .ok()
-                    .and_then(|i| SERIALIZERS_1_21_11.get(i))
-                    .ok_or(ezzmc_protocol::ProtocolError::InvalidValue {
-                        what: "entity data serializer",
-                        value: src.into(),
-                    })?;
-                let canon = SERIALIZERS_26_3.iter().position(|n| n == ser).unwrap_or(0);
-                let mut one = Writer::new();
-                one.u8(layout.index(idx)).var_int(canon as i32);
-                if entity_data_value(&mut r, &mut one, ser)? {
-                    w.bytes(&one.into_vec());
-                }
-            }
-            w.u8(0xFF);
-        }
+        "set_entity_data" => set_entity_data(&mut r, &mut w, is_1_21_10())?,
         // Стеки: ItemStack.OPTIONAL_STREAM_CODEC (id предметов и компонентов, формы компонентов).
         "container_set_content" => {
             w.var_int(r.var_int()?).var_int(r.var_int()?);
@@ -1066,6 +1177,46 @@ mod tests {
             .var_int(0);
         e.bool(false);
         assert_eq!(out, e.into_vec());
+    }
+
+    /// 1.21.10: рука игрока BYTE → HUMANOID_ARM, гнев волка INT → LONG, номера сериализаторов
+    /// по таблице 1.21.10 (FLOAT = 3 в обеих).
+    #[test]
+    fn entity_data_1_21_10_retyped_fields() {
+        let ser10 = |n: &str| SERIALIZERS_1_21_10.iter().position(|x| *x == n).unwrap() as i32;
+        let canon = |n: &str| SERIALIZERS_26_3.iter().position(|x| *x == n).unwrap() as i32;
+        layouts().insert(-7, (DataLayout::Same, "player"));
+        let mut w = Writer::new();
+        w.var_int(-7).u8(15).var_int(ser10("BYTE")).u8(0);
+        w.u8(9).var_int(ser10("FLOAT")).f32(20.0);
+        w.u8(0xFF);
+        let mut out = Writer::new();
+        set_entity_data(&mut Reader::new(&w.into_vec()), &mut out, true).unwrap();
+        let mut e = Writer::new();
+        e.var_int(-7)
+            .u8(15)
+            .var_int(canon("HUMANOID_ARM"))
+            .var_int(0);
+        e.u8(9).var_int(canon("FLOAT")).f32(20.0);
+        e.u8(0xFF);
+        assert_eq!(out.into_vec(), e.into_vec());
+
+        layouts().insert(-8, (DataLayout::Ageable, "wolf"));
+        let mut w = Writer::new();
+        w.var_int(-8)
+            .u8(21)
+            .var_int(ser10("INT"))
+            .var_int(400)
+            .u8(0xFF);
+        let mut out = Writer::new();
+        set_entity_data(&mut Reader::new(&w.into_vec()), &mut out, true).unwrap();
+        let mut e = Writer::new();
+        e.var_int(-8)
+            .u8(22)
+            .var_int(canon("LONG"))
+            .var_long(i64::MAX)
+            .u8(0xFF);
+        assert_eq!(out.into_vec(), e.into_vec());
     }
 
     #[test]

@@ -310,8 +310,8 @@ fn put(t: &mut Vec<(String, Tag)>, k: &str, v: Tag) {
     t.push((k.to_owned(), v));
 }
 
-/// dimension_type 1.20.1 → поля канона (`has_fixed_time`, `skybox`, `cardinal_light`).
-fn dimension_to_canon(t: Tag) -> Tag {
+/// dimension_type 1.20.1/1.21.10 → поля канона (`has_fixed_time`, `skybox`, `cardinal_light`).
+pub(crate) fn dimension_to_canon(t: Tag) -> Tag {
     let Tag::Compound(mut v) = t else { return t };
     let fixed = v.iter().any(|(k, _)| k == "fixed_time");
     let fx = v
@@ -330,8 +330,8 @@ fn dimension_to_canon(t: Tag) -> Tag {
     Tag::Compound(v)
 }
 
-/// biome 1.20.1 → канон: цвета неба/тумана из `effects` в `attributes`.
-fn biome_to_canon(t: Tag) -> Tag {
+/// biome 1.20.1/1.21.10 → канон: цвета неба/тумана из `effects` в `attributes`.
+pub(crate) fn biome_to_canon(t: Tag) -> Tag {
     let Tag::Compound(mut v) = t else { return t };
     let mut attrs = Vec::new();
     if let Some(fx) = v

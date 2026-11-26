@@ -114,6 +114,9 @@ pub enum Shape {
     /// The inner value; translation then appends these canonical bytes for
     /// fields newer versions added (defaults). Source-version shapes only.
     Append(&'static Shape, &'static [u8]),
+    /// A bare value that newer versions wrap as the left branch of an
+    /// [`Shape::Either`]. Source-version shapes only.
+    Left(&'static Shape),
 }
 
 use Shape::*;
@@ -212,6 +215,21 @@ static BLOCK_PREDICATE: Shape = Struct(&[
     Optional(&List(UNBOUNDED, &PROPERTY_MATCHER)),
     Optional(&Compound),
     Ref(&COMPONENT_MATCHERS),
+]);
+
+/// `DataComponentMatchers.STREAM_CODEC` (1.21.10): the partial predicate is a bare
+/// `DATA_COMPONENT_PREDICATE_TYPE` id (DataComponentPredicate.java, SINGLE_STREAM_CODEC);
+/// 1.21.11 made it `either(predicate type, component type)`.
+static COMPONENT_MATCHERS_1_21_10: Shape = Struct(&[
+    List(UNBOUNDED, &TypedComponent),
+    List(64, &Struct(&[Left(&VarInt), Nbt])),
+]);
+
+static BLOCK_PREDICATE_1_21_10: Shape = Struct(&[
+    Optional(&RegistrySet(ClientRegistry::Block)),
+    Optional(&List(UNBOUNDED, &PROPERTY_MATCHER)),
+    Optional(&Compound),
+    Ref(&COMPONENT_MATCHERS_1_21_10),
 ]);
 
 /// `ByteBufCodecs.GAME_PROFILE_PROPERTIES`.
@@ -737,6 +755,31 @@ static COMPONENTS_1_21_11: &[(&str, Shape)] = &[
 
 static CONSUME_EFFECT_1_21_11: Shape = consume_effect!(Append(&Float, &[1]));
 
+/// 1.21.10's components whose layout differs from 1.21.11's, layered over
+/// [`COMPONENTS_1_21_11`] and [`COMPONENTS_26_2`].
+static COMPONENTS_1_21_10: &[(&str, Shape)] = &[
+    // AdventureModePredicate (1.21.10): BlockPredicate with the bare predicate type id.
+    ("can_place_on", List(UNBOUNDED, &BLOCK_PREDICATE_1_21_10)),
+    ("can_break", List(UNBOUNDED, &BLOCK_PREDICATE_1_21_10)),
+];
+
+/// Component shapes of 1.21.10 by its own component type id.
+pub(crate) fn components_1_21_10() -> &'static [&'static Shape] {
+    static T: std::sync::LazyLock<Vec<&'static Shape>> = std::sync::LazyLock::new(|| {
+        crate::generated::r1_21_10::DATA_COMPONENT_TYPE
+            .iter()
+            .map(|name| {
+                [COMPONENTS_1_21_10, COMPONENTS_1_21_11, COMPONENTS_26_2]
+                    .iter()
+                    .find_map(|layer| layer.iter().find(|(n, _)| n == name))
+                    .map(|(_, s)| s)
+                    .unwrap_or(&Shape::Nbt)
+            })
+            .collect()
+    });
+    &T
+}
+
 /// Component shapes of 1.21.11 by its own component type id.
 pub(crate) fn components_1_21_11() -> &'static [&'static Shape] {
     static T: std::sync::LazyLock<Vec<&'static Shape>> = std::sync::LazyLock::new(|| {
@@ -990,13 +1033,13 @@ pub fn walk(r: &mut Reader, shape: &'static Shape, depth: u32) -> ProtocolResult
             let count = r.var_int()?;
             if count > 0 {
                 r.var_int()?;
-                crate::translate::skip_patch_1_21_11(r, depth)?;
+                crate::translate::skip_patch_legacy(r, depth)?;
             }
         }
         TagKey => {
             r.string(MAX_STRING_LENGTH)?;
         }
-        Append(inner, _) => walk(r, inner, depth)?,
+        Append(inner, _) | Left(inner) => walk(r, inner, depth)?,
         HolderSet | RegistrySet(_) => match r.var_int()? {
             0 => {
                 r.string(MAX_STRING_LENGTH)?;

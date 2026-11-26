@@ -376,7 +376,26 @@ pub fn configure(
             "disconnect" => return Err(NetError::Disconnected(disconnect_text(&p.body))),
             "keep_alive" => conn.send(ids.get(ST, S, "keep_alive")?, &p.body)?, // long как есть
             "ping" => conn.send(ids.get(ST, S, "pong")?, &p.body)?,             // int как есть
-            "registry_data" => cfg.registries.push(parse_registry_data(&p.body)?),
+            "registry_data" => {
+                let mut rd = parse_registry_data(&p.body)?;
+                // 1.21.10: цвета неба/тумана в `effects`, у измерений `effects` вместо
+                // skybox/attributes (атрибуты окружения появились в 1.21.11) — как у 1.20.1.
+                if ezzmc_protocol::version::current().protocol
+                    == ezzmc_protocol::version::V1_21_10.protocol
+                {
+                    let f: Option<fn(Tag) -> Tag> = match rd.registry.as_str() {
+                        "minecraft:dimension_type" => Some(crate::v1201::dimension_to_canon),
+                        "minecraft:worldgen/biome" => Some(crate::v1201::biome_to_canon),
+                        _ => None,
+                    };
+                    if let Some(f) = f {
+                        for (_, t) in &mut rd.entries {
+                            *t = t.take().map(f);
+                        }
+                    }
+                }
+                cfg.registries.push(rd);
+            }
             "update_tags" => cfg.tag_sets = parse_update_tags(&p.body)?,
             "update_enabled_features" => cfg.enabled_features = parse_features(&p.body)?,
             "select_known_packs" => {
