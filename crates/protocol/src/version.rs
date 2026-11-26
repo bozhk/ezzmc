@@ -65,6 +65,19 @@ pub const V1_21_8: Version = Version {
     particle_type: generated::r1_21_8::PARTICLE_TYPE,
 };
 
+/// 1.21.6 (протокол 771): пакеты и блоки как у 1.21.8; в реестрах item/sound_event нет
+/// пластинки lava_chicken (добавлена в 1.21.7).
+pub const V1_21_6: Version = Version {
+    name: "1.21.6",
+    protocol: 771,
+    packets: generated::v1_21_8::PACKETS,
+    item: generated::r1_21_6::ITEM,
+    block: generated::r1_21_6::BLOCK,
+    entity_type: generated::r1_21_6::ENTITY_TYPE,
+    sound_event: generated::r1_21_6::SOUND_EVENT,
+    particle_type: generated::r1_21_6::PARTICLE_TYPE,
+};
+
 /// Forge/ваниль 1.20.1 (протокол 763): нет Configuration-фазы, реестры внутри Play `login`.
 pub const V1_20_1: Version = Version {
     name: "1.20.1",
@@ -80,7 +93,7 @@ pub const V1_20_1: Version = Version {
 /// Каноническая версия (на ней написан весь клиент).
 pub const CANON: Version = V26_3;
 
-pub const SUPPORTED: &[Version] = &[V26_3, V1_21_11, V1_21_10, V1_21_8, V1_20_1];
+pub const SUPPORTED: &[Version] = &[V26_3, V1_21_11, V1_21_10, V1_21_8, V1_21_6, V1_20_1];
 
 /// Версия по protocol number из Status-ответа.
 pub fn by_protocol(protocol: i32) -> Option<Version> {
@@ -105,7 +118,7 @@ impl Version {
 
     /// 1.21.7–1.21.11: переводятся одним путём (`legacy::clientbound_1_21_11`).
     pub fn is_1_21_late(&self) -> bool {
-        matches!(self.protocol, 772..=774)
+        matches!(self.protocol, 771..=774)
     }
 }
 
@@ -127,6 +140,7 @@ mod tests {
         assert_eq!(by_protocol(774).map(|v| v.name), Some("1.21.11"));
         assert_eq!(by_protocol(773).map(|v| v.name), Some("1.21.10"));
         assert_eq!(by_protocol(772).map(|v| v.name), Some("1.21.8"));
+        assert_eq!(by_protocol(771).map(|v| v.name), Some("1.21.6"));
         assert!(by_protocol(1).is_none());
     }
 

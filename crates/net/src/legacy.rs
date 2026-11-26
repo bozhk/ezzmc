@@ -9,11 +9,12 @@ use ezzmc_protocol::{Direction, ProtocolResult, State};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-/// Версия соединения среди 1.21.7–1.21.11: 0 — 1.21.7/1.21.8 (772), 1 — 1.21.9/1.21.10 (773),
+/// Версия соединения среди 1.21.6–1.21.11: 0 — 1.21.6–1.21.8 (771/772: пакеты, сущности и
+/// block_entity_type совпадают; предметы/звуки — в `Translator`), 1 — 1.21.9/1.21.10 (773),
 /// 2 — 1.21.11 (774).
 fn ver() -> usize {
     match ezzmc_protocol::version::current().protocol {
-        772 => 0,
+        771 | 772 => 0,
         773 => 1,
         _ => 2,
     }

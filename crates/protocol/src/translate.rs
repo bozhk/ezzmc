@@ -4,7 +4,7 @@
 //! блоков) переводятся по именам. Несовместимое значение (`Ok(false)`) вызывающий отбрасывает:
 //! компонент выпадает из патча, стек становится пустым.
 use crate::error::{ProtocolError, ProtocolResult};
-use crate::generated::{r1_21_10, r1_21_11, r1_21_8, r26_3 as canon};
+use crate::generated::{r1_21_10, r1_21_11, r1_21_6, r1_21_8, r26_3 as canon};
 use crate::item::{
     components, components_1_21_10, components_1_21_11, components_1_21_8, ClientRegistry, Shape,
     MAX_DEPTH,
@@ -54,6 +54,7 @@ macro_rules! src_names {
 src_names!(names_1_21_11, r1_21_11);
 src_names!(names_1_21_10, r1_21_10);
 src_names!(names_1_21_8, r1_21_8);
+src_names!(names_1_21_6, r1_21_6);
 
 type Names = fn(ClientRegistry) -> &'static [&'static str];
 type Comps = fn() -> &'static [&'static Shape];
@@ -78,16 +79,23 @@ const SRC_1_21_8: Source = Source {
     components: components_1_21_8,
 };
 
-/// Источник перевода для версии соединения: 772 — 1.21.7/1.21.8, 773 — 1.21.9/1.21.10,
-/// остальное — 1.21.11.
+/// 1.21.6: компоненты как у 1.21.8 (DATA_COMPONENT_TYPE совпадает), свои item/sound_event.
+const SRC_1_21_6: Source = Source {
+    names: names_1_21_6,
+    components: components_1_21_8,
+};
+
+/// Источник перевода для версии соединения: 771 — 1.21.6, 772 — 1.21.7/1.21.8,
+/// 773 — 1.21.9/1.21.10, остальное — 1.21.11.
 fn source_index(protocol: i32) -> usize {
     match protocol {
+        771 => 3,
         772 => 0,
         773 => 1,
         _ => 2,
     }
 }
-const SOURCES: [Source; 3] = [SRC_1_21_8, SRC_1_21_10, SRC_1_21_11];
+const SOURCES: [Source; 4] = [SRC_1_21_8, SRC_1_21_10, SRC_1_21_11, SRC_1_21_6];
 
 fn canon_names(reg: ClientRegistry) -> &'static [&'static str] {
     match reg {
@@ -784,7 +792,7 @@ fn len(r: &mut Reader, max: usize) -> ProtocolResult<usize> {
 
 /// Пропуск патча компонентов версии соединения (для [`Shape::Stack`] в `walk`).
 pub(crate) fn skip_patch_legacy(r: &mut Reader, depth: u32) -> ProtocolResult<()> {
-    static T: [OnceLock<Translator>; 3] = [const { OnceLock::new() }; 3];
+    static T: [OnceLock<Translator>; 4] = [const { OnceLock::new() }; 4];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::new(SOURCES[k], |s| s))
         .patch(r, &mut Writer::new(), depth)?;
@@ -794,14 +802,14 @@ pub(crate) fn skip_patch_legacy(r: &mut Reader, depth: u32) -> ProtocolResult<()
 /// Переводчик версии соединения (1.21.7–1.21.11) → канон; `block_state` — перевод id
 /// состояний (ezzmc-world). Таблицы строятся один раз на версию.
 pub fn from_server(block_state: fn(u32) -> u32) -> &'static Translator {
-    static T: [OnceLock<Translator>; 3] = [const { OnceLock::new() }; 3];
+    static T: [OnceLock<Translator>; 4] = [const { OnceLock::new() }; 4];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::new(SOURCES[k], block_state))
 }
 
 /// Переводчик канон → версия соединения (пакеты клиента); `block_state` — канон → версия.
 pub fn to_server(block_state: fn(u32) -> u32) -> &'static Translator {
-    static T: [OnceLock<Translator>; 3] = [const { OnceLock::new() }; 3];
+    static T: [OnceLock<Translator>; 4] = [const { OnceLock::new() }; 4];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::build(SOURCES[k], block_state, true))
 }

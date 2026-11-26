@@ -95,8 +95,8 @@ pub fn state_to_canon(id: u32) -> u32 {
             }
         };
     }
-    // 1.21.9/1.21.10 и 1.21.11 — одинаковые состояния; 1.21.7/1.21.8 — без медных блоков 1.21.9.
-    let t = if v.protocol == 772 {
+    // 1.21.9/1.21.10 и 1.21.11 — одинаковые состояния; 1.21.6–1.21.8 — без медных блоков 1.21.9.
+    let t = if matches!(v.protocol, 771 | 772) {
         table_1_21_8()
     } else {
         table_1_21_11()
@@ -109,7 +109,7 @@ pub fn state_to_canon(id: u32) -> u32 {
 pub fn state_from_canon(id: u32) -> u32 {
     static T8: OnceLock<Vec<u32>> = OnceLock::new();
     static T11: OnceLock<Vec<u32>> = OnceLock::new();
-    let t = if ezzmc_protocol::version::current().protocol == 772 {
+    let t = if matches!(ezzmc_protocol::version::current().protocol, 771 | 772) {
         T8.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_21_8::BLOCKS))
     } else {
         T11.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_21_11::BLOCKS))
