@@ -2075,22 +2075,24 @@ impl ParticleEngine {
                     let pz = fz + self.rng.next_double();
                     self.add_smoke(px, fy + 0.8, pz, 0.0, 0.0, 0.0);
                 } else if name == "end_gateway" {
-                    // VANILLA: EndGatewayBlock#animateTick (1 частица portal; без BE getParticleAmount).
-                    let mut px = fx + self.rng.next_double();
-                    let py = fy + self.rng.next_double();
-                    let mut pz = fz + self.rng.next_double();
-                    let mut xa = (self.rng.next_double() - 0.5) * 0.5;
-                    let ya = (self.rng.next_double() - 0.5) * 0.5;
-                    let mut za = (self.rng.next_double() - 0.5) * 0.5;
-                    let flip = f64::from(self.rng.next_int_bound(2) * 2 - 1);
-                    if self.rng.next_boolean() {
-                        pz = fz + 0.5 + 0.25 * flip;
-                        za = f64::from(self.rng.next_float() * 2.0) * flip;
-                    } else {
-                        px = fx + 0.5 + 0.25 * flip;
-                        xa = f64::from(self.rng.next_float() * 2.0) * flip;
+                    // VANILLA: EndGatewayBlock#animateTick — getParticleAmount() частиц portal.
+                    for _ in 0..crate::endportal::gateway_particle_amount(level, [x, y, z]) {
+                        let mut px = fx + self.rng.next_double();
+                        let py = fy + self.rng.next_double();
+                        let mut pz = fz + self.rng.next_double();
+                        let mut xa = (self.rng.next_double() - 0.5) * 0.5;
+                        let ya = (self.rng.next_double() - 0.5) * 0.5;
+                        let mut za = (self.rng.next_double() - 0.5) * 0.5;
+                        let flip = f64::from(self.rng.next_int_bound(2) * 2 - 1);
+                        if self.rng.next_boolean() {
+                            pz = fz + 0.5 + 0.25 * flip;
+                            za = f64::from(self.rng.next_float() * 2.0) * flip;
+                        } else {
+                            px = fx + 0.5 + 0.25 * flip;
+                            xa = f64::from(self.rng.next_float() * 2.0) * flip;
+                        }
+                        self.add_portal(px, py, pz, xa, ya, za);
                     }
-                    self.add_portal(px, py, pz, xa, ya, za);
                 } else if name == "bubble_column" {
                     // VANILLA: BubbleColumnBlock#animateTick.
                     if st.property("drag") == Some("true") {

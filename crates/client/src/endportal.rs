@@ -87,10 +87,7 @@ impl EndPortals {
                 let show = if kind == 1 {
                     dir < 2 // shouldRenderFace: ось Y
                 } else {
-                    // VANILLA-UNSURE: Block#shouldRenderFace ≈ «сосед не тот же блок и не полный непрозрачный».
-                    let n = level.chunks.block(p[0] + d[0], p[1] + d[1], p[2] + d[2]);
-                    n.name() != "end_gateway"
-                        && !n.props().is_some_and(|pr| pr.has(FLAG_CAN_OCCLUDE))
+                    gateway_face_visible(level, *p, *d)
                 };
                 if !show {
                     continue;
@@ -101,4 +98,19 @@ impl EndPortals {
             }
         }
     }
+}
+
+/// VANILLA: TheEndGatewayBlockEntity#shouldRenderFace → Block#shouldRenderFace.
+/// VANILLA-UNSURE: ≈ «сосед не тот же блок и не полный непрозрачный».
+fn gateway_face_visible(level: &Level, p: [i32; 3], d: [i32; 3]) -> bool {
+    let n = level.chunks.block(p[0] + d[0], p[1] + d[1], p[2] + d[2]);
+    n.name() != "end_gateway" && !n.props().is_some_and(|pr| pr.has(FLAG_CAN_OCCLUDE))
+}
+
+/// VANILLA: TheEndGatewayBlockEntity#getParticleAmount — число видимых граней.
+pub fn gateway_particle_amount(level: &Level, p: [i32; 3]) -> u32 {
+    OFFSETS
+        .iter()
+        .filter(|d| gateway_face_visible(level, p, **d))
+        .count() as u32
 }
