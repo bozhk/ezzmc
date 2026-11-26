@@ -1,6 +1,8 @@
 # data/versions.toml — источник истины по версиям (1.5.2 → latest release).
 # Источники: Mojang version_manifest_v2 (даты) + PrismarineJS/minecraft-data protocolVersions.json (protocol, data version).
-# Получено 2026-11-07. Номера protocol сверять с живым сервером при тестах (STATUS → матрица версий).
+# Получено 2026-11-07. Проверка первоисточником: `cargo xtask verify-versions` (TODO-370, 2026-11-26):
+# 1.7.10–26.3 сверены с jar Mojang (version.json / RealmsSharedConstants), 1.5.2 — по эталону reference/1.5.2;
+# 1.6.1–1.6.4 и 1.7.2–1.7.9 — только вторичные источники (minecraft-data, wiki), TODO-459.
 # era: pre-netty (≤1.6.4, TCP без Netty-фрейминга) · netty-early (1.7.x) · play · config (≥1.20.2, есть состояние Configuration)
 # Ванильная версия-канон = latest. Записи отсортированы по дате выхода.
 # Нет в источнике protocol: 1.7.3 (по wiki protocol 4 как у 1.7.2) — добавить после проверки, TODO-452.

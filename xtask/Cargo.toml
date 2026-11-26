@@ -13,5 +13,6 @@ ezzmc-net.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 sha1 = "0.10"
+libdeflater = "1.26.1"
 ureq = { version = "2", features = ["json"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }

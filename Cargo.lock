@@ -7057,6 +7057,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "ezzmc-net",
+ "libdeflater",
  "serde",
  "serde_json",
  "sha1",

@@ -1,4 +1,4 @@
-//! Dev-задачи: `cargo xtask <cmd>`. Команды: bench, fetch-reference <ver>, gen-reports <ver>, gen-protocol <ver>, gen-registries <ver>, gen-blockstates <ver>, gen-blockprops <ver>, gen-tags <ver>.
+//! Dev-задачи: `cargo xtask <cmd>`. Команды: bench, fetch-reference <ver>, gen-reports <ver>, gen-protocol <ver>, gen-registries <ver>, gen-blockstates <ver>, gen-blockprops <ver>, gen-tags <ver>, verify-versions.
 mod capture_golden;
 mod fetch_reference;
 mod gen_blockprops;
@@ -9,6 +9,7 @@ mod gen_reports;
 mod gen_tags;
 mod mappings;
 mod server;
+mod verify_versions;
 
 use std::process::{Command, ExitCode};
 
@@ -123,6 +124,13 @@ fn main() -> ExitCode {
             }
             _ => {
                 eprintln!("использование: cargo xtask record <protocol> <listen host:port> <target host:port> <out.ezrec>");
+                ExitCode::FAILURE
+            }
+        },
+        Some("verify-versions") => match verify_versions::run_cmd() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("verify-versions: {e}");
                 ExitCode::FAILURE
             }
         },
