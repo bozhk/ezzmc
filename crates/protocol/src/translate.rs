@@ -68,37 +68,87 @@ fn canon_component_name(name: &str) -> &str {
     }
 }
 
-/// Перевод из 1.21.11: таблицы id → канон и перевод состояний блоков.
+/// Обратное к [`canon_component_name`]: 26.3 → 1.21.11 (interact_animation в 1.21.11 нет).
+fn src_component_name(name: &str) -> &str {
+    match name {
+        "attack_animation" => "swing_animation",
+        n => n,
+    }
+}
+
+/// Перевод между 1.21.11 и каноном: таблицы id и перевод состояний блоков.
+/// Прямой (`rev = false`): 1.21.11 → канон; обратный: канон → 1.21.11 (пакеты клиента).
+/// Обратный переводит только формы, совпадающие по структуре; асимметричные случаи
+/// (EitherHolder, TagKey, Append, шаблоны стеков) дают `false` — компонент выпадает.
 pub struct Translator {
     remaps: Vec<Vec<Option<u32>>>,
     components: Vec<Option<u32>>,
     block_state: fn(u32) -> u32,
+    rev: bool,
 }
 
 impl Translator {
     fn new(block_state: fn(u32) -> u32) -> Self {
+        Self::build(block_state, false)
+    }
+
+    fn build(block_state: fn(u32) -> u32, rev: bool) -> Self {
+        type Names = fn(ClientRegistry) -> &'static [&'static str];
+        let (from, to): (Names, Names) = if rev {
+            (canon_names, src_names)
+        } else {
+            (src_names, canon_names)
+        };
         let remaps = REGISTRIES
             .iter()
-            .map(|r| build_remap(src_names(*r), canon_names(*r)))
+            .map(|r| build_remap(from(*r), to(*r)))
             .collect();
-        let components = src::DATA_COMPONENT_TYPE
+        let name_map: fn(&str) -> &str = if rev {
+            src_component_name
+        } else {
+            canon_component_name
+        };
+        let to_comps = to(ClientRegistry::DataComponentType);
+        let components = from(ClientRegistry::DataComponentType)
             .iter()
             .map(|n| {
-                let n = canon_component_name(n);
-                canon::DATA_COMPONENT_TYPE
-                    .iter()
-                    .position(|c| *c == n)
-                    .map(|i| i as u32)
+                let n = name_map(n);
+                to_comps.iter().position(|c| *c == n).map(|i| i as u32)
             })
             .collect();
         Self {
             remaps,
             components,
             block_state,
+            rev,
         }
     }
 
-    /// id реестра 1.21.11 → канон.
+    fn input_names(&self, reg: ClientRegistry) -> &'static [&'static str] {
+        if self.rev {
+            canon_names(reg)
+        } else {
+            src_names(reg)
+        }
+    }
+
+    fn input_components(&self) -> &'static [&'static Shape] {
+        if self.rev {
+            components()
+        } else {
+            components_1_21_11()
+        }
+    }
+
+    fn output_components(&self) -> &'static [&'static Shape] {
+        if self.rev {
+            components_1_21_11()
+        } else {
+            components()
+        }
+    }
+
+    /// id реестра: исходная версия → целевая.
     pub fn id(&self, reg: ClientRegistry, id: i32) -> Option<i32> {
         let k = REGISTRIES.iter().position(|r| *r as u8 == reg as u8)?;
         let id = usize::try_from(id).ok()?;
@@ -114,6 +164,75 @@ impl Translator {
             w.var_int(0);
         }
         Ok(())
+    }
+
+    /// `ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC` (значения компонентов с префиксом длины).
+    /// Непереводимый предмет → пустой стек; непереводимые компоненты выпадают.
+    pub fn stack_untrusted(&self, r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+        let count = r.var_int()?;
+        if count <= 0 {
+            w.var_int(0);
+            return Ok(());
+        }
+        let Some(item) = self.id(ClientRegistry::Item, r.var_int()?) else {
+            w.var_int(0);
+            return Ok(());
+        };
+        let added = r.length("added components", 4096)?;
+        let removed = r.length("removed components", 4096)?;
+        let (from, to) = (self.input_components(), self.output_components());
+        let mut out: Vec<(i32, Vec<u8>)> = Vec::with_capacity(added);
+        for _ in 0..added {
+            let id = r.var_int()?;
+            let n = r.length("component value", r.remaining())?;
+            let body = r.bytes(n)?;
+            let shape = usize::try_from(id)
+                .ok()
+                .and_then(|i| from.get(i))
+                .copied()
+                .ok_or_else(|| bad("unknown data component type"))?;
+            let Some(cid) = self.components.get(id as usize).copied().flatten() else {
+                continue;
+            };
+            let mut br = Reader::new(body);
+            let mut tmp = Writer::new();
+            let ok = match self.tr(&mut br, &mut tmp, shape, to.get(cid as usize).copied(), 0) {
+                Ok(ok) => ok && br.remaining() == 0,
+                Err(_) => false,
+            };
+            if ok {
+                out.push((cid as i32, tmp.into_vec()));
+            }
+        }
+        let mut gone = Vec::with_capacity(removed);
+        for _ in 0..removed {
+            let id = r.var_int()?;
+            if let Some(c) = usize::try_from(id)
+                .ok()
+                .and_then(|i| self.components.get(i))
+                .copied()
+                .flatten()
+            {
+                gone.push(c as i32);
+            }
+        }
+        w.var_int(count)
+            .var_int(item)
+            .var_int(out.len() as i32)
+            .var_int(gone.len() as i32);
+        for (id, v) in &out {
+            w.var_int(*id).var_int(v.len() as i32).bytes(v);
+        }
+        for id in gone {
+            w.var_int(id);
+        }
+        Ok(())
+    }
+
+    /// id компонента: исходная версия → целевая.
+    pub fn component(&self, id: i32) -> Option<i32> {
+        let i = usize::try_from(id).ok()?;
+        self.components.get(i).copied().flatten().map(|c| c as i32)
     }
 
     /// Значение формы `src_shape` (1.21.11) → форма `dst` канона. `false` — перевести нельзя
@@ -148,8 +267,8 @@ impl Translator {
     fn patch(&self, r: &mut Reader, w: &mut Writer, depth: u32) -> ProtocolResult<bool> {
         let added = r.length("added components", 4096)?;
         let removed = r.length("removed components", 4096)?;
-        let shapes = components_1_21_11();
-        let dst = components();
+        let shapes = self.input_components();
+        let dst = self.output_components();
         let mut out: Vec<(i32, Vec<u8>)> = Vec::with_capacity(added);
         for _ in 0..added {
             let id = r.var_int()?;
@@ -160,9 +279,14 @@ impl Translator {
                 .ok_or_else(|| bad("unknown data component type"))?;
             let canon_id = self.components.get(id as usize).copied().flatten();
             let mut tmp = Writer::new();
-            let name = src::DATA_COMPONENT_TYPE.get(id as usize).copied();
+            let name = self
+                .input_names(ClientRegistry::DataComponentType)
+                .get(id as usize)
+                .copied();
             let ok = match canon_id {
-                Some(_) if name == Some("pot_decorations") => self.pot_decorations(r, &mut tmp)?,
+                Some(_) if !self.rev && name == Some("pot_decorations") => {
+                    self.pot_decorations(r, &mut tmp)?
+                }
                 Some(c) => {
                     let d = dst.get(c as usize).copied();
                     self.tr(r, &mut tmp, shape, d, depth + 1)?
@@ -243,7 +367,7 @@ impl Translator {
         let d = d;
         // Исходная форма — Either, каноническая — нет (EitherHolder 1.21.11 → Holder):
         // левая ветвь переводится, ключ реестра (правая) не переводим.
-        if let Either(left, right) = s {
+        if let (Either(left, right), false) = (s, self.rev) {
             if !matches!(d, None | Some(Either(..))) {
                 return if r.bool()? {
                     self.tr(r, w, left, d, depth)
@@ -298,7 +422,7 @@ impl Translator {
                 // TagKey (1.21.11) → holderSet: 0, затем id тега.
                 let tag = r.string(MAX_STRING_LENGTH)?;
                 w.var_int(0).string(&tag);
-                Ok(matches!(d, Some(HolderSet)))
+                Ok(!self.rev && matches!(d, Some(HolderSet)))
             }
             BlockState => {
                 let id = r.var_int()?;
@@ -384,7 +508,7 @@ impl Translator {
                 };
                 let ok = self.tr(r, w, inner, df, depth)?;
                 w.bytes(extra);
-                Ok(ok && df.is_some())
+                Ok(!self.rev && ok && df.is_some())
             }
             Holder(inline) | RegistryHolder(_, inline) => {
                 let id = r.var_int()?;
@@ -422,7 +546,7 @@ impl Translator {
                 let id = r.var_int()?;
                 let name = usize::try_from(id)
                     .ok()
-                    .and_then(|i| src_names(*reg).get(i))
+                    .and_then(|i| self.input_names(*reg).get(i))
                     .copied()
                     .ok_or_else(|| bad("unknown dispatch type"))?;
                 let arm = match (arms.iter().find(|(n, _)| *n == name), s) {
@@ -450,17 +574,17 @@ impl Translator {
                 let ci = self.id(ClientRegistry::Item, item);
                 w.var_int(ci.unwrap_or(0)).var_int(count);
                 let ok = self.patch(r, w, depth)?;
-                Ok(ok && ci.is_some() && matches!(d, Some(ItemTemplate)))
+                Ok(!self.rev && ok && ci.is_some() && matches!(d, Some(ItemTemplate)))
             }
             TypedComponent => {
                 let id = r.var_int()?;
                 let shape = usize::try_from(id)
                     .ok()
-                    .and_then(|i| components_1_21_11().get(i))
+                    .and_then(|i| self.input_components().get(i))
                     .copied()
                     .ok_or_else(|| bad("unknown data component type"))?;
                 let cid = self.components.get(id as usize).copied().flatten();
-                let ds = cid.and_then(|c| components().get(c as usize).copied());
+                let ds = cid.and_then(|c| self.output_components().get(c as usize).copied());
                 w.var_int(cid.map_or(0, |c| c as i32));
                 let ok = self.tr(r, w, shape, ds, depth)?;
                 Ok(ok && ds.is_some() && matches!(d, Some(TypedComponent)))
@@ -497,6 +621,9 @@ impl Translator {
         let ok = self.patch(r, &mut patch, depth)? && ci.is_some();
         let ci = ci.unwrap_or(0);
         let patch = patch.into_vec();
+        if self.rev && !matches!(d, Some(Shape::Stack)) {
+            return Ok(false);
+        }
         match d {
             Some(Shape::Stack) => {
                 w.var_int(count).var_int(ci);
@@ -531,6 +658,12 @@ pub(crate) fn skip_patch_1_21_11(r: &mut Reader, depth: u32) -> ProtocolResult<(
 }
 
 static T_1_21_11: OnceLock<Translator> = OnceLock::new();
+static T_TO_1_21_11: OnceLock<Translator> = OnceLock::new();
+
+/// Переводчик канон → 1.21.11 (пакеты клиента); `block_state` — канон → 1.21.11.
+pub fn to_1_21_11(block_state: fn(u32) -> u32) -> &'static Translator {
+    T_TO_1_21_11.get_or_init(|| Translator::build(block_state, true))
+}
 
 /// Переводчик 1.21.11 → канон; `block_state` — перевод id состояний (ezzmc-world).
 pub fn v1_21_11(block_state: fn(u32) -> u32) -> &'static Translator {
@@ -672,6 +805,39 @@ mod tests {
             .var_int(src_id(canon::BLOCK, "dirt"));
         v.bool(false).bool(false).var_int(0).var_int(0);
         assert_eq!(&*st.patch.added[0].1, v.into_vec().as_slice());
+    }
+
+    #[test]
+    fn untrusted_stack_back_to_1_21_11() {
+        let t = Translator::build(|s| s, true);
+        let mut w = Writer::new();
+        // канон: diamond_pickaxe x1, repairable [diamond], attack_animation, interact_animation
+        w.var_int(1).var_int(src_id(canon::ITEM, "diamond_pickaxe"));
+        w.var_int(2).var_int(0);
+        let mut v = Writer::new();
+        v.var_int(2).var_int(src_id(canon::ITEM, "diamond"));
+        let v = v.into_vec();
+        w.var_int(src_id(canon::DATA_COMPONENT_TYPE, "repairable"))
+            .var_int(v.len() as i32)
+            .bytes(&v);
+        w.var_int(src_id(canon::DATA_COMPONENT_TYPE, "interact_animation"))
+            .var_int(1)
+            .u8(0);
+        let buf = w.into_vec();
+        let mut r = Reader::new(&buf);
+        let mut out = Writer::new();
+        t.stack_untrusted(&mut r, &mut out).unwrap();
+        assert_eq!(r.remaining(), 0);
+        let mut e = Writer::new();
+        e.var_int(1).var_int(src_id(src::ITEM, "diamond_pickaxe"));
+        e.var_int(1).var_int(0);
+        let mut v = Writer::new();
+        v.var_int(2).var_int(src_id(src::ITEM, "diamond"));
+        let v = v.into_vec();
+        e.var_int(src_id(src::DATA_COMPONENT_TYPE, "repairable"))
+            .var_int(v.len() as i32)
+            .bytes(&v);
+        assert_eq!(out.into_vec(), e.into_vec());
     }
 
     #[test]

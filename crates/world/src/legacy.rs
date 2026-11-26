@@ -93,6 +93,15 @@ pub fn state_to_canon(id: u32) -> u32 {
     table_1_21_11().get(id as usize).copied().unwrap_or(0)
 }
 
+/// id состояния канона → 1.21.11 (для пакетов клиента; несопоставимое — состояние по умолчанию блока).
+pub fn state_from_canon_1_21_11(id: u32) -> u32 {
+    static T: OnceLock<Vec<u32>> = OnceLock::new();
+    T.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_21_11::BLOCKS))
+        .get(id as usize)
+        .copied()
+        .unwrap_or(0)
+}
+
 /// Версия соединения не каноническая?
 #[inline]
 pub fn is_legacy() -> bool {

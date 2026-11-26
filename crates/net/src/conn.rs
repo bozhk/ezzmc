@@ -163,6 +163,11 @@ impl Connection {
             }
             return Ok(());
         }
+        if self.state == State::Play && ezzmc_protocol::version::current().protocol == 774 {
+            if let Some(b) = crate::legacy::serverbound_1_21_11(id, body)? {
+                return self.send_raw(id, &b);
+            }
+        }
         self.send_raw(id, body)
     }
 

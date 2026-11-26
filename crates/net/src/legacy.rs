@@ -5,7 +5,7 @@ use ezzmc_protocol::item::{ClientRegistry, Shape, PARTICLE, PARTICLE_1_21_11, SO
 use ezzmc_protocol::translate::Translator;
 use ezzmc_protocol::version::{build_remap, CANON, V1_21_11};
 use ezzmc_protocol::wire::{Reader, Writer};
-use ezzmc_protocol::ProtocolResult;
+use ezzmc_protocol::{Direction, ProtocolResult, State};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -493,6 +493,86 @@ fn tr() -> &'static Translator {
     ezzmc_protocol::translate::v1_21_11(ezzmc_world::legacy::state_to_canon)
 }
 
+fn tr_back() -> &'static Translator {
+    ezzmc_protocol::translate::to_1_21_11(ezzmc_world::legacy::state_from_canon_1_21_11)
+}
+
+/// VANILLA: HashedStack.STREAM_CODEC — Optional(item, count, HashedPatchMap(added: id→int, removed: ids)),
+/// канон → 1.21.11. Непереводимый предмет — пустой стек (сервер пришлёт верное состояние).
+fn hashed_stack_back(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    if !r.bool()? {
+        w.bool(false);
+        return Ok(());
+    }
+    let item = tr_back().id(ClientRegistry::Item, r.var_int()?);
+    let count = r.var_int()?;
+    let n = r.length("hashed components", 256)?;
+    let mut added = Vec::with_capacity(n);
+    for _ in 0..n {
+        let (id, hash) = (r.var_int()?, r.i32()?);
+        if let Some(c) = tr_back().component(id) {
+            added.push((c, hash));
+        }
+    }
+    let n = r.length("removed components", 256)?;
+    let mut removed = Vec::with_capacity(n);
+    for _ in 0..n {
+        if let Some(c) = tr_back().component(r.var_int()?) {
+            removed.push(c);
+        }
+    }
+    let Some(item) = item else {
+        w.bool(false);
+        return Ok(());
+    };
+    w.bool(true).var_int(item).var_int(count);
+    w.var_int(added.len() as i32);
+    for (c, h) in added {
+        w.var_int(c).i32(h);
+    }
+    w.var_int(removed.len() as i32);
+    for c in removed {
+        w.var_int(c);
+    }
+    Ok(())
+}
+
+/// Пакет клиента (собран в каноне, id из таблицы 1.21.11) → тело для сервера 1.21.11.
+/// `None` — тело без изменений.
+pub fn serverbound_1_21_11(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
+    let Some(name) = ezzmc_protocol::generated::v1_21_11::PACKETS
+        .iter()
+        .find(|p| p.state == State::Play && p.dir == Direction::Serverbound && p.id as i32 == id)
+        .map(|p| p.name)
+    else {
+        return Ok(None);
+    };
+    let mut r = Reader::new(body);
+    let mut w = Writer::new();
+    match name {
+        // VANILLA: ServerboundContainerClickPacket — containerId, stateId, slot, button,
+        // ClickType (1.21.11) = ContainerInput (26.3), changedSlots, carried.
+        "container_click" => {
+            w.var_int(r.var_int()?).var_int(r.var_int()?);
+            w.bytes(r.bytes(3)?).var_int(r.var_int()?);
+            let n = r.length("changed slots", 128)?;
+            w.var_int(n as i32);
+            for _ in 0..n {
+                w.i16(r.i16()?);
+                hashed_stack_back(&mut r, &mut w)?;
+            }
+            hashed_stack_back(&mut r, &mut w)?;
+        }
+        // VANILLA: ServerboundSetCreativeModeSlotPacket — short slot, OPTIONAL_UNTRUSTED stack.
+        "set_creative_mode_slot" => {
+            w.i16(r.i16()?);
+            tr_back().stack_untrusted(&mut r, &mut w)?;
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(w.into_vec()))
+}
+
 /// VANILLA: ItemCost.STREAM_CODEC — предмет, количество, DataComponentExactPredicate.
 static ITEM_COST: Shape = Shape::Struct(&[
     Shape::RegistryId(ClientRegistry::Item),
@@ -942,6 +1022,50 @@ mod tests {
             .unwrap();
         let mut r = Reader::new(&out);
         assert_eq!((r.i64().unwrap(), r.var_int().unwrap()), (7, canon));
+    }
+
+    #[test]
+    fn container_click_item_ids_back_to_1_21_11() {
+        let id = ezzmc_protocol::generated::v1_21_11::PACKETS
+            .iter()
+            .find(|p| {
+                p.state == State::Play
+                    && p.dir == Direction::Serverbound
+                    && p.name == "container_click"
+            })
+            .unwrap()
+            .id as i32;
+        let pos = |t: &[&str]| t.iter().position(|x| *x == "cherry_log").unwrap() as i32;
+        let mut w = Writer::new();
+        w.var_int(0)
+            .var_int(5)
+            .i16(36)
+            .u8(0)
+            .var_int(0)
+            .var_int(1)
+            .i16(36);
+        w.bool(true)
+            .var_int(pos(ezzmc_protocol::generated::r26_3::ITEM))
+            .var_int(3)
+            .var_int(0)
+            .var_int(0);
+        w.bool(false);
+        let out = serverbound_1_21_11(id, &w.into_vec()).unwrap().unwrap();
+        let mut e = Writer::new();
+        e.var_int(0)
+            .var_int(5)
+            .i16(36)
+            .u8(0)
+            .var_int(0)
+            .var_int(1)
+            .i16(36);
+        e.bool(true)
+            .var_int(pos(ezzmc_protocol::generated::r1_21_11::ITEM))
+            .var_int(3)
+            .var_int(0)
+            .var_int(0);
+        e.bool(false);
+        assert_eq!(out, e.into_vec());
     }
 
     #[test]
