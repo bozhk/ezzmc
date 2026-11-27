@@ -5,11 +5,11 @@
 //! компонент выпадает из патча, стек становится пустым.
 use crate::error::{ProtocolError, ProtocolResult};
 use crate::generated::{
-    r1_21_10, r1_21_11, r1_21_3, r1_21_4, r1_21_5, r1_21_6, r1_21_8, r26_3 as canon,
+    r1_21_1, r1_21_10, r1_21_11, r1_21_3, r1_21_4, r1_21_5, r1_21_6, r1_21_8, r26_3 as canon,
 };
 use crate::item::{
-    components, components_1_21_10, components_1_21_11, components_1_21_3, components_1_21_4,
-    components_1_21_5, components_1_21_8, ClientRegistry, Shape, MAX_DEPTH,
+    components, components_1_21_1, components_1_21_10, components_1_21_11, components_1_21_3,
+    components_1_21_4, components_1_21_5, components_1_21_8, ClientRegistry, Shape, MAX_DEPTH,
 };
 use crate::version::build_remap;
 use crate::wire::{Reader, Writer};
@@ -61,6 +61,45 @@ src_names!(names_1_21_5, r1_21_5);
 src_names!(names_1_21_4, r1_21_4);
 src_names!(names_1_21_3, r1_21_3);
 
+/// Реестры 1.21/1.21.1 под именами 1.21.2+: атрибуты без префикса `generic.`/`player.`/
+/// `zombie.`, `fire_resistant` → `damage_resistant`, лодки → дубовые; consume_effect_type нет.
+// VANILLA: Attributes, DataComponents, EntityType (1.21.1 → 1.21.2).
+fn names_1_21_1(reg: ClientRegistry) -> &'static [&'static str] {
+    fn renamed(
+        cell: &'static OnceLock<Vec<&'static str>>,
+        src: &'static [&'static str],
+        f: fn(&'static str) -> &'static str,
+    ) -> &'static [&'static str] {
+        cell.get_or_init(|| src.iter().map(|n| f(n)).collect())
+    }
+    static ATTR: OnceLock<Vec<&'static str>> = OnceLock::new();
+    static COMP: OnceLock<Vec<&'static str>> = OnceLock::new();
+    static ENT: OnceLock<Vec<&'static str>> = OnceLock::new();
+    match reg {
+        ClientRegistry::SoundEvent => r1_21_1::SOUND_EVENT,
+        ClientRegistry::Item => r1_21_1::ITEM,
+        ClientRegistry::DataComponentType => {
+            renamed(&COMP, r1_21_1::DATA_COMPONENT_TYPE, |n| match n {
+                "fire_resistant" => "damage_resistant",
+                n => n,
+            })
+        }
+        ClientRegistry::PositionSourceType => r1_21_1::POSITION_SOURCE_TYPE,
+        ClientRegistry::ParticleType => r1_21_1::PARTICLE_TYPE,
+        ClientRegistry::BlockEntityType => r1_21_1::BLOCK_ENTITY_TYPE,
+        ClientRegistry::ConsumeEffectType => &[],
+        ClientRegistry::EntityType => renamed(&ENT, r1_21_1::ENTITY_TYPE, |n| match n {
+            "boat" => "oak_boat",
+            "chest_boat" => "oak_chest_boat",
+            n => n,
+        }),
+        ClientRegistry::Attribute => renamed(&ATTR, r1_21_1::ATTRIBUTE, |n| {
+            n.split_once('.').map_or(n, |(_, x)| x)
+        }),
+        ClientRegistry::Block => r1_21_1::BLOCK,
+    }
+}
+
 type Names = fn(ClientRegistry) -> &'static [&'static str];
 type Comps = fn() -> &'static [&'static Shape];
 
@@ -103,15 +142,22 @@ const SRC_1_21_4: Source = Source {
 };
 
 /// 1.21.2/1.21.3: custom_model_data — одно число, материал отделки с item_model_index.
+/// 1.21/1.21.1: еда с эффектами, fire_resistant, зелья без custom_name.
+const SRC_1_21_1: Source = Source {
+    names: names_1_21_1,
+    components: components_1_21_1,
+};
+
 const SRC_1_21_3: Source = Source {
     names: names_1_21_3,
     components: components_1_21_3,
 };
 
-/// Источник перевода для версии соединения: 768 — 1.21.2/1.21.3, 769 — 1.21.4, 770 — 1.21.5, 771 — 1.21.6, 772 — 1.21.7/1.21.8,
+/// Источник перевода для версии соединения: 767 — 1.21/1.21.1, 768 — 1.21.2/1.21.3, 769 — 1.21.4, 770 — 1.21.5, 771 — 1.21.6, 772 — 1.21.7/1.21.8,
 /// 773 — 1.21.9/1.21.10, остальное — 1.21.11.
 fn source_index(protocol: i32) -> usize {
     match protocol {
+        767 => 7,
         768 => 6,
         769 => 5,
         770 => 4,
@@ -121,7 +167,7 @@ fn source_index(protocol: i32) -> usize {
         _ => 2,
     }
 }
-const SOURCES: [Source; 7] = [
+const SOURCES: [Source; 8] = [
     SRC_1_21_8,
     SRC_1_21_10,
     SRC_1_21_11,
@@ -129,6 +175,7 @@ const SOURCES: [Source; 7] = [
     SRC_1_21_5,
     SRC_1_21_4,
     SRC_1_21_3,
+    SRC_1_21_1,
 ];
 
 fn canon_names(reg: ClientRegistry) -> &'static [&'static str] {
@@ -470,6 +517,11 @@ impl Translator {
             w.bytes(extra);
             return Ok(ok);
         }
+        // Канон → версия, где значения не было (Shape::Const): значение пропускается.
+        if let Some(Const(_)) = d {
+            crate::item::walk(r, s, depth)?;
+            return Ok(true);
+        }
         // Канон → 1.21.3: CustomModelData (списки) → одно число — первый float (0 без него).
         if let (Struct(xs), Some(IntAsFloats)) = (s, d) {
             let n = r.length("custom model floats", 1 << 16)?;
@@ -726,6 +778,10 @@ impl Translator {
                 w.bytes(extra);
                 Ok(ok)
             }
+            Const(bytes) => {
+                w.bytes(bytes);
+                Ok(d.is_some())
+            }
             IntAsFloats => {
                 // VANILLA: 1.21.4 CustomModelData — старое число становится единственным float.
                 let v = r.var_int()?;
@@ -889,7 +945,7 @@ fn len(r: &mut Reader, max: usize) -> ProtocolResult<usize> {
 
 /// Пропуск патча компонентов версии соединения (для [`Shape::Stack`] в `walk`).
 pub(crate) fn skip_patch_legacy(r: &mut Reader, depth: u32) -> ProtocolResult<()> {
-    static T: [OnceLock<Translator>; 7] = [const { OnceLock::new() }; 7];
+    static T: [OnceLock<Translator>; 8] = [const { OnceLock::new() }; 8];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::new(SOURCES[k], |s| s))
         .patch(r, &mut Writer::new(), depth)?;
@@ -899,14 +955,14 @@ pub(crate) fn skip_patch_legacy(r: &mut Reader, depth: u32) -> ProtocolResult<()
 /// Переводчик версии соединения (1.21.7–1.21.11) → канон; `block_state` — перевод id
 /// состояний (ezzmc-world). Таблицы строятся один раз на версию.
 pub fn from_server(block_state: fn(u32) -> u32) -> &'static Translator {
-    static T: [OnceLock<Translator>; 7] = [const { OnceLock::new() }; 7];
+    static T: [OnceLock<Translator>; 8] = [const { OnceLock::new() }; 8];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::new(SOURCES[k], block_state))
 }
 
 /// Переводчик канон → версия соединения (пакеты клиента); `block_state` — канон → версия.
 pub fn to_server(block_state: fn(u32) -> u32) -> &'static Translator {
-    static T: [OnceLock<Translator>; 7] = [const { OnceLock::new() }; 7];
+    static T: [OnceLock<Translator>; 8] = [const { OnceLock::new() }; 8];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::build(SOURCES[k], block_state, true))
 }
@@ -1286,6 +1342,64 @@ mod tests {
         assert!(back.tr(&mut r, &mut o, dst, Some(shape), 0).unwrap());
         assert_eq!(r.remaining(), 0);
         assert_eq!(o.into_vec(), vec![7]);
+    }
+
+    /// 1.21.1: еда с eat_seconds/эффектами → FoodProperties 1.21.2 (хвост отбрасывается),
+    /// обратно — значения по умолчанию (1.6 с, без эффектов).
+    #[test]
+    fn food_1_21_1_trailing() {
+        use crate::generated::r1_21_1 as old;
+        let back = Translator::build(SRC_1_21_1, |s| s, true);
+        let t = Translator::new(SRC_1_21_1, |s| s);
+        let shape = components_1_21_1()[src_id(old::DATA_COMPONENT_TYPE, "food") as usize];
+        let dst = &crate::item::components()[src_id(canon::DATA_COMPONENT_TYPE, "food") as usize];
+        let mut v = Writer::new();
+        v.var_int(4).f32(2.4).bool(false);
+        let head = v.buf.clone();
+        v.f32(3.2).bool(false).var_int(0);
+        let v = v.into_vec();
+        let mut r = Reader::new(&v);
+        let mut o = Writer::new();
+        assert!(t.tr(&mut r, &mut o, shape, Some(dst), 0).unwrap());
+        assert_eq!(r.remaining(), 0);
+        assert_eq!(o.into_vec(), head);
+        let mut r = Reader::new(&head);
+        let mut o = Writer::new();
+        assert!(back.tr(&mut r, &mut o, dst, Some(shape), 0).unwrap());
+        let mut want = head.clone();
+        want.extend([0x3f, 0xcc, 0xcc, 0xcd, 0, 0]);
+        assert_eq!(o.into_vec(), want);
+    }
+
+    /// 1.21.1: `fire_resistant` (Unit) → `damage_resistant` с тегом `#is_fire`; обратно —
+    /// пустое значение.
+    #[test]
+    fn fire_resistant_1_21_1_const() {
+        use crate::generated::r1_21_1 as old;
+        let t = Translator::new(SRC_1_21_1, |s| s);
+        let back = Translator::build(SRC_1_21_1, |s| s, true);
+        let mut w = Writer::new();
+        w.var_int(1).var_int(src_id(old::ITEM, "netherite_ingot"));
+        w.var_int(1).var_int(0);
+        w.var_int(src_id(old::DATA_COMPONENT_TYPE, "fire_resistant"));
+        let buf = w.into_vec();
+        let mut r = Reader::new(&buf);
+        let mut out = Writer::new();
+        t.stack(&mut r, &mut out).unwrap();
+        assert_eq!(r.remaining(), 0);
+        let mut want = Writer::new();
+        want.var_int(1)
+            .var_int(src_id(canon::ITEM, "netherite_ingot"));
+        want.var_int(1).var_int(0);
+        want.var_int(src_id(canon::DATA_COMPONENT_TYPE, "damage_resistant"));
+        want.var_int(0).string("minecraft:is_fire");
+        let want = want.into_vec();
+        assert_eq!(out.into_vec(), want);
+        let mut r = Reader::new(&want);
+        let mut o = Writer::new();
+        back.stack(&mut r, &mut o).unwrap();
+        assert_eq!(r.remaining(), 0);
+        assert_eq!(o.into_vec(), buf);
     }
 
     /// 1.21.10: частичный предикат компонента — голый id типа предиката (`Shape::Left`),

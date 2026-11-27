@@ -958,9 +958,11 @@ fn run(
                 }
             }
             // Сервер старой версии: тело → формат канона (глава 18).
-            let canon_pname = (ver.protocol == 763)
-                .then(|| pname.map(|n| ezzmc_net::v1201::canon_name(n, &p.body)))
-                .flatten();
+            let canon_pname = match ver.protocol {
+                763 => pname.map(|n| ezzmc_net::v1201::canon_name(n, &p.body)),
+                767 => pname.map(|n| ezzmc_net::legacy::canon_name_1_21_1(n, &p.body)),
+                _ => None,
+            };
             let mut p = p;
             p.body = match ezzmc_net::legacy::to_canon(pname, std::mem::take(&mut p.body)) {
                 Ok(Some(b)) => b,
@@ -973,7 +975,7 @@ fn run(
                     continue;
                 }
             };
-            // 1.20.1: имя пакета в каноне (тело уже переведено).
+            // 1.20.1/1.21.1: имя пакета в каноне (тело уже переведено).
             let pname = canon_pname.or(pname);
             // VANILLA: рендер ClientLevel держит секции чанков после forget_level_chunk (сервер шлёт их
             // при смерти), поэтому под экраном смерти виден мир; новые чанки придут после Respawn.

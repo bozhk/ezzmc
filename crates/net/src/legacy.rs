@@ -6,7 +6,7 @@ use ezzmc_protocol::item::{
 };
 use ezzmc_protocol::translate::Translator;
 use ezzmc_protocol::version::{
-    build_remap, Version, CANON, V1_21_10, V1_21_11, V1_21_3, V1_21_4, V1_21_5, V1_21_8,
+    build_remap, Version, CANON, V1_21_1, V1_21_10, V1_21_11, V1_21_3, V1_21_4, V1_21_5, V1_21_8,
 };
 use ezzmc_protocol::wire::{Reader, Writer};
 use ezzmc_protocol::{Direction, ProtocolResult, State};
@@ -19,9 +19,10 @@ use std::sync::{Mutex, OnceLock};
 /// block_entity_type совпадают; предметы/звуки — в `Translator`), 1 — 1.21.9/1.21.10 (773),
 /// 2 — 1.21.11 (774), 3 — 1.21.5 (770: свои id пакетов и сущностей, форматы как у 1.21.8),
 /// 4 — 1.21.4 (769: форматы 1.21.5 плюс отличия ниже), 5 — 1.21.2/1.21.3 (768: как 1.21.4
-/// плюс свои отличия).
+/// плюс свои отличия), 6 — 1.21/1.21.1 (767: как 1.21.3 плюс отличия до 1.21.2).
 fn ver() -> usize {
     match ezzmc_protocol::version::current().protocol {
+        767 => 6,
         768 => 5,
         769 => 4,
         770 => 3,
@@ -30,26 +31,33 @@ fn ver() -> usize {
         _ => 2,
     }
 }
-const VERSIONS: [&Version; 6] = [&V1_21_8, &V1_21_10, &V1_21_11, &V1_21_5, &V1_21_4, &V1_21_3];
+const VERSIONS: [&Version; 7] = [
+    &V1_21_8, &V1_21_10, &V1_21_11, &V1_21_5, &V1_21_4, &V1_21_3, &V1_21_1,
+];
 
 /// Форматы до 1.21.9 (1.21.5–1.21.8): скорости short, BlockPos спавна без измерения и т. п.
 fn pre_1_21_9(k: usize) -> bool {
-    matches!(k, 0 | 3 | 4 | 5)
+    matches!(k, 0 | 3..=6)
 }
 
-/// Форматы до 1.21.6 (1.21.2–1.21.5): PRESS/RELEASE_SHIFT_KEY, нет HangingEntity#DATA_DIRECTION.
+/// Форматы до 1.21.6 (1.21–1.21.5): PRESS/RELEASE_SHIFT_KEY, нет HangingEntity#DATA_DIRECTION.
 fn pre_1_21_6(k: usize) -> bool {
-    matches!(k, 3..=5)
+    matches!(k, 3..=6)
 }
 
-/// Форматы до 1.21.5 (1.21.2–1.21.4): add_experience_orb, showInTooltip, NBT-карты высот и т. п.
+/// Форматы до 1.21.5 (1.21–1.21.4): add_experience_orb, showInTooltip, NBT-карты высот и т. п.
 fn pre_1_21_5(k: usize) -> bool {
-    matches!(k, 4 | 5)
+    matches!(k, 4..=6)
 }
 
-/// Форма частиц версии соединения: 1.21.2/1.21.3 — `trail` без длительности.
+/// Форматы до 1.21.2 (1.21/1.21.1): id контейнеров байтом, старые позиция/телепорт/взрыв.
+fn pre_1_21_2(k: usize) -> bool {
+    k == 6
+}
+
+/// Форма частиц версии соединения: 1.21–1.21.3 — `trail` без длительности (в 1.21.1 его нет).
 fn particle_src() -> &'static Shape {
-    if ver() == 5 {
+    if matches!(ver(), 5 | 6) {
         &PARTICLE_1_21_3
     } else {
         &PARTICLE_1_21_11
@@ -57,10 +65,20 @@ fn particle_src() -> &'static Shape {
 }
 
 fn entity_type_map() -> &'static [Option<u32>] {
-    static T: [OnceLock<Vec<Option<u32>>>; 6] = [const { OnceLock::new() }; 6];
+    static T: [OnceLock<Vec<Option<u32>>>; 7] = [const { OnceLock::new() }; 7];
     let k = ver();
     T[k].get_or_init(|| {
         let mut t = build_remap(VERSIONS[k].entity_type, CANON.entity_type);
+        // VANILLA: EntityType (1.21.2) — лодка/лодка с сундуком разделены по породе дерева.
+        // VANILLA-UNSURE: порода из Boat#DATA_ID_TYPE (1.21.1) не учитывается — всегда дуб.
+        let pos = |name: &str| CANON.entity_type.iter().position(|n| *n == name);
+        for (i, n) in VERSIONS[k].entity_type.iter().enumerate() {
+            match *n {
+                "boat" => t[i] = pos("oak_boat").map(|c| c as u32),
+                "chest_boat" => t[i] = pos("oak_chest_boat").map(|c| c as u32),
+                _ => {}
+            }
+        }
         // VANILLA: CreakingTransient (1.21.2/1.21.3) — скрипун сердца; в 1.21.4 слит в creaking.
         let creaking = CANON.entity_type.iter().position(|n| *n == "creaking");
         for (i, n) in VERSIONS[k].entity_type.iter().enumerate() {
@@ -75,17 +93,18 @@ fn entity_type_map() -> &'static [Option<u32>] {
 /// Реестр block_entity_type версии соединения → канон (в 26.x убран `bed`, добавлен `potent_sulfur`).
 fn block_entity_type(id: i32) -> Option<i32> {
     use ezzmc_protocol::generated::{
-        r1_21_10, r1_21_11, r1_21_3, r1_21_4, r1_21_5, r1_21_8, r26_3,
+        r1_21_1, r1_21_10, r1_21_11, r1_21_3, r1_21_4, r1_21_5, r1_21_8, r26_3,
     };
-    const SRC: [&[&str]; 6] = [
+    const SRC: [&[&str]; 7] = [
         r1_21_8::BLOCK_ENTITY_TYPE,
         r1_21_10::BLOCK_ENTITY_TYPE,
         r1_21_11::BLOCK_ENTITY_TYPE,
         r1_21_5::BLOCK_ENTITY_TYPE,
         r1_21_4::BLOCK_ENTITY_TYPE,
         r1_21_3::BLOCK_ENTITY_TYPE,
+        r1_21_1::BLOCK_ENTITY_TYPE,
     ];
-    static T: [OnceLock<Vec<Option<u32>>>; 6] = [const { OnceLock::new() }; 6];
+    static T: [OnceLock<Vec<Option<u32>>>; 7] = [const { OnceLock::new() }; 7];
     let k = ver();
     T[k].get_or_init(|| build_remap(SRC[k], r26_3::BLOCK_ENTITY_TYPE))
         .get(usize::try_from(id).ok()?)
@@ -353,6 +372,19 @@ const SERIALIZERS_1_21_4: &[&str] = &[
 /// VANILLA: 1.21.4 → 1.21.5 — седло свиньи/страйдера ушло в снаряжение, у дельфина и черепахи
 /// убраны позиции (TREASURE_POS, HOME_POS, TRAVEL_POS) и флаги пути, у вагонеток блок-витрина
 /// стал OPTIONAL_BLOCK_STATE без флага CUSTOM_DISPLAY. Базовые поля Animal — с 17.
+/// Индекс поля 1.21.1 → 1.21.3 (канонический тип сущности). VANILLA (1.21.2): AbstractArrow
+/// +IN_GROUND (#10); Squid/GlowSquid/Dolphin — AgeableWaterCreature (+DATA_BABY_ID #16);
+/// AbstractBoat без DATA_ID_TYPE (#11, порода стала типом сущности).
+fn index_1_21_1(ty: &str, idx: u8) -> Option<u8> {
+    match (ty, idx) {
+        ("arrow", 10) | ("trident", 10 | 11) => Some(idx + 1),
+        ("glow_squid" | "dolphin", 16..) => Some(idx + 1),
+        (t, 11) if t.ends_with("boat") || t.ends_with("raft") => None,
+        (t, 12..=14) if t.ends_with("boat") || t.ends_with("raft") => Some(idx - 1),
+        _ => Some(idx),
+    }
+}
+
 fn index_1_21_4(ty: &str, idx: u8) -> Option<u8> {
     match (ty, idx) {
         ("pig", 17) => None,
@@ -806,6 +838,7 @@ fn set_entity_data(r: &mut Reader, w: &mut Writer, k: usize) -> ProtocolResult<(
         SERIALIZERS_1_21_8,
         SERIALIZERS_1_21_4,
         SERIALIZERS_1_21_4,
+        SERIALIZERS_1_21_4,
     ][k];
     // VANILLA: HangingEntity#DATA_DIRECTION (#8) появился в 1.21.6 — поля рамок/картин 1.21.5
     // с #8 сдвигаются на 1 (направление приходит в add_entity, как и в 1.21.6).
@@ -829,7 +862,12 @@ fn set_entity_data(r: &mut Reader, w: &mut Writer, k: usize) -> ProtocolResult<(
             },
         )?;
         if pre_1_21_5(k) {
-            let Some(i) = index_1_21_4(ty, idx) else {
+            let i = if pre_1_21_2(k) {
+                index_1_21_1(ty, idx)
+            } else {
+                Some(idx)
+            };
+            let Some(i) = i.and_then(|i| index_1_21_4(ty, i)) else {
                 entity_data_value(r, &mut Writer::new(), ser)?;
                 continue;
             };
@@ -922,6 +960,16 @@ static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
 /// Пакет клиента (собран в каноне, id из таблицы версии) → пакеты для сервера 1.21.5–1.21.11
 /// (id, тело) в порядке отправки. `None` — пакет без изменений.
 pub fn serverbound_1_21_11(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<Packet>>> {
+    // VANILLA: книга рецептов 1.21.1 — id рецептов строками (ResourceLocation), в каноне —
+    // RecipeDisplayId; перевести нечем, пакеты не отправляются.
+    if pre_1_21_2(ver())
+        && matches!(
+            packet_name(id),
+            Some("place_recipe" | "recipe_book_seen_recipe")
+        )
+    {
+        return Ok(Some(Vec::new()));
+    }
     let b = serverbound_body(id, body)?;
     let mut out = Vec::new();
     // VANILLA: LocalPlayer#sendShiftKeyState (1.21.5) — до ServerboundPlayerInputPacket, при
@@ -972,7 +1020,8 @@ fn serverbound_body(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
         // VANILLA: ServerboundContainerClickPacket — containerId, stateId, slot, button,
         // ClickType (1.21.11) = ContainerInput (26.3), changedSlots, carried.
         "container_click" => {
-            w.var_int(r.var_int()?).var_int(r.var_int()?);
+            container_id_back(&mut r, &mut w)?;
+            w.var_int(r.var_int()?);
             w.bytes(r.bytes(3)?).var_int(r.var_int()?);
             let n = r.length("changed slots", 128)?;
             w.var_int(n as i32);
@@ -1003,7 +1052,7 @@ fn serverbound_body(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
         // VANILLA: ServerboundPlayerCommandPacket.Action (1.21.5): перед STOP_SLEEPING ещё
         // PRESS_SHIFT_KEY, RELEASE_SHIFT_KEY.
         // VANILLA: ServerboundMoveVehiclePacket (1.21.4) дописал onGround; в 1.21.3 его нет.
-        "move_vehicle" if ver() == 5 => {
+        "move_vehicle" if matches!(ver(), 5 | 6) => {
             let Some((_, head)) = body.split_last() else {
                 return Ok(None);
             };
@@ -1013,9 +1062,97 @@ fn serverbound_body(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
             let (eid, action, data) = (r.var_int()?, r.var_int()?, r.var_int()?);
             w.var_int(eid).var_int(action + 2).var_int(data);
         }
+        // VANILLA: ServerboundContainerClosePacket (1.21.1) — id окна байтом.
+        "container_close" if pre_1_21_2(ver()) => container_id_back(&mut r, &mut w)?,
+        // VANILLA: ServerboundMovePlayerPacket (1.21.1) — bool onGround; в 1.21.2 байт флагов
+        // (бит 0 onGround, бит 1 horizontalCollision).
+        "move_player_pos"
+        | "move_player_pos_rot"
+        | "move_player_rot"
+        | "move_player_status_only"
+            if pre_1_21_2(ver()) =>
+        {
+            let Some((flags, head)) = body.split_last() else {
+                return Ok(None);
+            };
+            w.bytes(head).u8(flags & 1);
+        }
+        // VANILLA: ServerboundPlayerInputPacket (1.21.1): float xxa, float zza, байт флагов
+        // (1 — прыжок, 2 — шифт); канон — Input (вперёд 1, назад 2, влево 4, вправо 8,
+        // прыжок 16, шифт 32, спринт 64).
+        // VANILLA-UNSURE: LocalPlayer 1.21.1 шлёт пакет только верхом и с xxa/zza после
+        // замедления (шифт 0.3); здесь — импульсы ±1 при каждом изменении ввода.
+        "player_input" if pre_1_21_2(ver()) => {
+            let i = r.u8()?;
+            let axis = |pos: u8, neg: u8| {
+                f32::from(u8::from(i & pos != 0)) - f32::from(u8::from(i & neg != 0))
+            };
+            w.f32(axis(4, 8)).f32(axis(1, 2));
+            w.u8(u8::from(i & 16 != 0) | (u8::from(i & 32 != 0) << 1));
+        }
+        // VANILLA: ClientInformation (1.21.1) — без particleStatus (появился в 1.21.2).
+        "client_information" if pre_1_21_2(ver()) => {
+            let Some((_, head)) = body.split_last() else {
+                return Ok(None);
+            };
+            w.bytes(head);
+        }
         _ => return Ok(None),
     }
     Ok(Some(w.into_vec()))
+}
+
+/// VarInt ContainerId канона → байт окна 1.21.1 (`writeByte`), для остальных версий — как есть.
+fn container_id_back(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    let id = r.var_int()?;
+    if pre_1_21_2(ver()) {
+        w.u8(id as u8);
+    } else {
+        w.var_int(id);
+    }
+    Ok(())
+}
+
+/// Байт окна 1.21.1 (`readUnsignedByte`) → VarInt ContainerId канона.
+fn container_id(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    if pre_1_21_2(ver()) {
+        w.var_int(i32::from(r.u8()?));
+    } else {
+        w.var_int(r.var_int()?);
+    }
+    Ok(())
+}
+
+/// Имя пакета сервера 1.21.1 в каноне (тело переводит [`clientbound_1_21_11`]). VANILLA:
+/// ClientPacketListener#handleContainerSetSlot (1.21.1) — окно -1 курсор, -2 инвентарь игрока.
+pub fn canon_name_1_21_1<'a>(name: &'a str, body: &[u8]) -> &'a str {
+    match (name, body.first()) {
+        ("set_carried_item", _) => "set_held_slot",
+        ("container_set_slot", Some(0xFF)) => "set_cursor_item",
+        ("container_set_slot", Some(0xFE)) => "set_player_inventory",
+        (n, _) => n,
+    }
+}
+
+/// CommonPlayerSpawnInfo 1.21.1 после ключа измерения (seed, режимы, флаги, место смерти,
+/// portalCooldown) → + seaLevel (1.21.2). Остаток пакета копируется.
+/// VANILLA-UNSURE: уровень моря берётся по измерению (NoiseGeneratorSettings: 63 / 32 / 0).
+fn spawn_info_1_21_1(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    let start = r.pos();
+    r.bytes(8 + 2 + 2)?;
+    if r.bool()? {
+        r.string(32767)?;
+        r.bytes(8)?;
+    }
+    r.var_int()?;
+    w.bytes(r.since(start));
+    let sea = match dimension().as_str() {
+        "minecraft:the_nether" => 32,
+        "minecraft:the_end" => 0,
+        _ => 63,
+    };
+    w.var_int(sea).bytes(r.rest());
+    Ok(())
 }
 
 /// HashedStack канона → ItemStack.OPTIONAL_STREAM_CODEC 1.21.4 (count, item, пустой патч).
@@ -1330,7 +1467,7 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
             w.bytes(r.rest());
         }
         // VANILLA: ClientboundPlaceGhostRecipePacket — containerId, RecipeDisplay.
-        "place_ghost_recipe" => {
+        "place_ghost_recipe" if !pre_1_21_2(ver()) => {
             w.var_int(r.var_int()?);
             recipe_display(&mut r, &mut w)?;
         }
@@ -1428,11 +1565,19 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
             }
             r.bytes(3)?;
             remember_dimension(&mut r)?;
-            return Ok(None);
+            if !pre_1_21_2(ver()) {
+                return Ok(None);
+            }
+            w.bytes(r.since(0));
+            spawn_info_1_21_1(&mut r, &mut w)?;
         }
         "respawn" => {
             remember_dimension(&mut r)?;
-            return Ok(None);
+            if !pre_1_21_2(ver()) {
+                return Ok(None);
+            }
+            w.bytes(r.since(0));
+            spawn_info_1_21_1(&mut r, &mut w)?;
         }
         // VANILLA: ClientboundSetDefaultSpawnPositionPacket (1.21.8): BlockPos, float angle →
         // (1.21.9) RespawnData: GlobalPos (измерение, BlockPos), yaw, pitch.
@@ -1467,16 +1612,80 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
         "set_entity_data" => set_entity_data(&mut r, &mut w, ver())?,
         // Стеки: ItemStack.OPTIONAL_STREAM_CODEC (id предметов и компонентов, формы компонентов).
         "container_set_content" => {
-            w.var_int(r.var_int()?).var_int(r.var_int()?);
+            container_id(&mut r, &mut w)?;
+            w.var_int(r.var_int()?);
             let n = r.length("container items", 1 << 16)?;
             w.var_int(n as i32);
             for _ in 0..=n {
                 tr().stack(&mut r, &mut w)?;
             }
         }
+        "container_set_slot" if pre_1_21_2(ver()) => {
+            let win = r.i8()?;
+            let state = r.var_int()?;
+            let slot = r.i16()?;
+            match win {
+                -1 => {}
+                -2 => {
+                    w.var_int(i32::from(slot));
+                }
+                _ => {
+                    w.var_int(i32::from(win as u8)).var_int(state).i16(slot);
+                }
+            }
+            tr().stack(&mut r, &mut w)?;
+        }
         "container_set_slot" => {
             w.var_int(r.var_int()?).var_int(r.var_int()?).i16(r.i16()?);
             tr().stack(&mut r, &mut w)?;
+        }
+        // VANILLA: id окна 1.21.1 байтом (ContainerSetData, ContainerClose, HorseScreenOpen).
+        "container_set_data" | "container_close" | "horse_screen_open" if pre_1_21_2(ver()) => {
+            container_id(&mut r, &mut w)?;
+            w.bytes(r.rest());
+        }
+        // VANILLA: ClientboundSetCarriedItemPacket (1.21.1) — байт слота; set_held_slot — VarInt.
+        "set_carried_item" => {
+            w.var_int(i32::from(r.u8()?));
+        }
+        // VANILLA: книга рецептов и рецепты 1.21.1 (ClientboundRecipePacket, полные Recipe в
+        // update_recipes, id рецепта в place_ghost_recipe) несовместимы с RecipeDisplay 1.21.2.
+        "recipe" | "update_recipes" | "place_ghost_recipe" if pre_1_21_2(ver()) => {
+            return Ok(Some(Vec::new()));
+        }
+        // VANILLA: ClientboundCooldownPacket (1.21.1) — id предмета; в 1.21.2 группа (Identifier,
+        // по умолчанию id предмета).
+        "cooldown" if pre_1_21_2(ver()) => {
+            let item = r.var_int()?;
+            let Some(name) = usize::try_from(item)
+                .ok()
+                .and_then(|i| VERSIONS[ver()].item.get(i))
+            else {
+                return Ok(Some(Vec::new()));
+            };
+            w.string(&format!("minecraft:{name}")).bytes(r.rest());
+        }
+        // VANILLA: ClientboundTeleportEntityPacket (1.21.1): id, xyz, byte yRot/xRot, onGround →
+        // (1.21.2) id, PositionMoveRotation (xyz, delta 0, float повороты), Relative (пусто), onGround.
+        "teleport_entity" if pre_1_21_2(ver()) => {
+            w.var_int(r.var_int()?).bytes(r.bytes(24)?);
+            w.f64(0.0).f64(0.0).f64(0.0);
+            let (y, x) = (r.i8()?, r.i8()?);
+            w.f32(f32::from(y) * 360.0 / 256.0)
+                .f32(f32::from(x) * 360.0 / 256.0)
+                .i32(0)
+                .bool(r.bool()?);
+        }
+        // VANILLA: ClientboundPlayerPositionPacket (1.21.1): xyz, yRot, xRot, байт RelativeMovement,
+        // id → (1.21.2) id, PositionMoveRotation, Relative. handleMovePlayer 1.21.1 сохраняет
+        // скорость по относительной оси — в 1.21.2 это DELTA_X/Y/Z (биты 5–7).
+        "player_position" if pre_1_21_2(ver()) => {
+            let pos = r.bytes(24)?;
+            let rot = r.bytes(8)?;
+            let fl = i32::from(r.u8()? & 0x1F);
+            w.var_int(r.var_int()?).bytes(pos);
+            w.f64(0.0).f64(0.0).f64(0.0);
+            w.bytes(rot).i32(fl | ((fl & 7) << 5));
         }
         "set_cursor_item" => tr().stack(&mut r, &mut w)?,
         "set_player_inventory" => {
@@ -1521,7 +1730,7 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
         "level_particles" => {
             // VANILLA: ClientboundLevelParticlesPacket (1.21.4) — overrideLimiter, alwaysShow;
             // в 1.21.3 только overrideLimiter (LevelRenderer#addParticle с alwaysShow = false).
-            let flags: &[u8] = if ver() == 5 {
+            let flags: &[u8] = if matches!(ver(), 5 | 6) {
                 &[r.u8()?, 0]
             } else {
                 r.bytes(2)?
@@ -1542,6 +1751,42 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
                 return Ok(Some(Vec::new()));
             }
             w.bytes(r.rest());
+        }
+        // VANILLA: ClientboundExplodePacket (1.21.1): xyz, power, toBlow (байтовые смещения),
+        // отброс float×3, BlockInteraction, малая и большая частицы, звук. Explosion#finalizeExplosion
+        // (клиент): большая частица при power ≥ 2 и BlockInteraction != KEEP, иначе малая.
+        "explode" if pre_1_21_2(ver()) => {
+            w.bytes(r.bytes(24)?);
+            let power = r.f32()?;
+            let n = r.length("explosion blocks", 1 << 16)?;
+            r.bytes(n * 3)?;
+            let kb = [r.f32()?, r.f32()?, r.f32()?];
+            let interacts = r.var_int()? != 0;
+            w.f32(power).i32(n as i32);
+            let has_kb = kb.iter().any(|v| *v != 0.0);
+            w.bool(has_kb);
+            if has_kb {
+                kb.iter().for_each(|v| {
+                    w.f64(f64::from(*v));
+                });
+            }
+            let mut small = Writer::new();
+            let small_ok = tr().value(&mut r, &mut small, particle_src(), &PARTICLE)?;
+            let mut large = Writer::new();
+            let large_ok = tr().value(&mut r, &mut large, particle_src(), &PARTICLE)?;
+            let (ok, part) = if power >= 2.0 && interacts {
+                (large_ok, large)
+            } else {
+                (small_ok, small)
+            };
+            if !ok {
+                return Ok(Some(Vec::new()));
+            }
+            w.bytes(&part.into_vec());
+            if !tr().value(&mut r, &mut w, &SOUND, &SOUND)? {
+                return Ok(Some(Vec::new()));
+            }
+            w.var_int(0).bool(true);
         }
         // VANILLA: ClientboundExplodePacket (26.3) добавил playSound в конце; в 1.21.11 звук всегда.
         "explode" => {
@@ -1606,7 +1851,14 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
         }
         // 1.21.11: gameTime, dayTime, tickDayTime → 26.3: gameTime, {часы overworld: total, 0, rate}.
         "set_time" => {
-            let (game, day, tick) = (r.i64()?, r.i64()?, r.bool()?);
+            let (game, day) = (r.i64()?, r.i64()?);
+            // VANILLA: ClientLevel#setDayTime (1.21.1) — отрицательное время = doDaylightCycle false;
+            // в 1.21.2 отдельный bool tickDayTime.
+            let (day, tick) = if pre_1_21_2(ver()) {
+                (day.abs(), day >= 0)
+            } else {
+                (day, r.bool()?)
+            };
             w.i64(game).var_int(1).var_int(0).var_long(day).f32(0.0);
             w.f32(if tick { 1.0 } else { 0.0 });
         }
@@ -1825,6 +2077,43 @@ mod tests {
             .u8(17)
             .var_int(canon("INT"))
             .var_int(2)
+            .u8(0xFF);
+        assert_eq!(out.into_vec(), e.into_vec());
+    }
+
+    /// 1.21.1: у лодки нет порода-поля (#11 TYPE выбрасывается, весла/пузыри −1), у стрелы
+    /// цвет эффекта #10 → #11 (AbstractArrow#IN_GROUND в 1.21.2).
+    #[test]
+    fn entity_data_1_21_1_boat_and_arrow() {
+        let ser = |n: &str| SERIALIZERS_1_21_4.iter().position(|x| *x == n).unwrap() as i32;
+        let canon = |n: &str| SERIALIZERS_26_3.iter().position(|x| *x == n).unwrap() as i32;
+        layouts().insert(-41, (DataLayout::Same, "oak_boat"));
+        let mut w = Writer::new();
+        w.var_int(-41).u8(11).var_int(ser("INT")).var_int(3);
+        w.u8(12).var_int(ser("BOOLEAN")).u8(1).u8(0xFF);
+        let mut out = Writer::new();
+        set_entity_data(&mut Reader::new(&w.into_vec()), &mut out, 6).unwrap();
+        let mut e = Writer::new();
+        e.var_int(-41)
+            .u8(11)
+            .var_int(canon("BOOLEAN"))
+            .u8(1)
+            .u8(0xFF);
+        assert_eq!(out.into_vec(), e.into_vec());
+        layouts().insert(-42, (DataLayout::Same, "arrow"));
+        let mut w = Writer::new();
+        w.var_int(-42)
+            .u8(10)
+            .var_int(ser("INT"))
+            .var_int(-1)
+            .u8(0xFF);
+        let mut out = Writer::new();
+        set_entity_data(&mut Reader::new(&w.into_vec()), &mut out, 6).unwrap();
+        let mut e = Writer::new();
+        e.var_int(-42)
+            .u8(11)
+            .var_int(canon("INT"))
+            .var_int(-1)
             .u8(0xFF);
         assert_eq!(out.into_vec(), e.into_vec());
     }

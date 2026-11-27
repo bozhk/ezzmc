@@ -314,7 +314,9 @@ fn login(
                 }
             },
             "login_compression" => conn.set_compression(Reader::new(&p.body).var_int()?),
-            "login_finished" => {
+            // VANILLA: ClientboundGameProfilePacket (1.21.1; в 1.21.2 переименован) — профиль и
+            // strictErrorHandling (байт в конце не читаем).
+            "login_finished" | "game_profile" => {
                 let profile = GameProfile::read(&mut Reader::new(&p.body))?;
                 conn.send(ids.get(State::Login, S, "login_acknowledged")?, &[])?;
                 conn.set_state(State::Configuration)?;
@@ -354,6 +356,10 @@ pub fn configure(
     conn.send(ids.get(ST, S, "custom_payload")?, &w.buf)?;
     let mut w = Writer::new();
     info.write(&mut w);
+    // VANILLA: ClientInformation (1.21.1) — без particleStatus (VarInt 0..2, один байт).
+    if ezzmc_protocol::version::current().protocol == 767 {
+        w.buf.pop();
+    }
     conn.send(ids.get(ST, S, "client_information")?, &w.buf)?;
 
     let mut cfg = ServerConfig::default();
@@ -378,9 +384,9 @@ pub fn configure(
             "ping" => conn.send(ids.get(ST, S, "pong")?, &p.body)?,             // int как есть
             "registry_data" => {
                 let mut rd = parse_registry_data(&p.body)?;
-                // 1.21.2–1.21.10: цвета неба/тумана в `effects`, у измерений `effects` вместо
+                // 1.21–1.21.10: цвета неба/тумана в `effects`, у измерений `effects` вместо
                 // skybox/attributes (атрибуты окружения появились в 1.21.11) — как у 1.20.1.
-                if matches!(ezzmc_protocol::version::current().protocol, 768..=773) {
+                if matches!(ezzmc_protocol::version::current().protocol, 767..=773) {
                     let f: Option<fn(Tag) -> Tag> = match rd.registry.as_str() {
                         "minecraft:dimension_type" => Some(crate::v1201::dimension_to_canon),
                         "minecraft:worldgen/biome" => Some(crate::v1201::biome_to_canon),

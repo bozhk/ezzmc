@@ -137,6 +137,10 @@ pub enum Shape {
     /// hold four lists (floats, flags, strings, colors) and the old value is the
     /// single float. Source-version shapes only.
     IntAsFloats,
+    /// No bytes in the source version; translation writes these canonical bytes
+    /// (e.g. pre-1.21.2 unit `fire_resistant` → `damage_resistant` with the
+    /// `is_fire` tag). Source-version shapes only.
+    Const(&'static [u8]),
 }
 
 use Shape::*;
@@ -1007,6 +1011,95 @@ static COMPONENTS_1_21_3: &[(&str, Shape)] = &[
     ),
 ];
 
+/// `TrimMaterial.STREAM_CODEC` (1.21/1.21.1): overrides keyed by the
+/// `armor_material` registry id (1.21.2: by identifier).
+static TRIM_MATERIAL_1_21_1: Shape = Holder(&Struct(&[
+    STRING,
+    RegistryId(ClientRegistry::Item),
+    Float,
+    Map(&VarInt, &STRING),
+    TEXT,
+]));
+
+/// 1.21.1 → 1.21.2: food lost eat_seconds/using_converts_to/effects (moved to
+/// `consumable`), `fire_resistant` became `damage_resistant` (#is_fire), potion
+/// contents got `custom_name`, instruments a float duration and description.
+// VANILLA: FoodProperties, PotionContents, Instrument, TrimMaterial,
+// DataComponents#FIRE_RESISTANT (1.21.1).
+static COMPONENTS_1_21_1: &[(&str, Shape)] = &[
+    (
+        "food",
+        Trailing(
+            &Struct(&[VarInt, Float, Bool]),
+            &Struct(&[
+                Float,
+                Optional(&Stack),
+                List(UNBOUNDED, &Struct(&[Ref(&MOB_EFFECT_INSTANCE), Float])),
+            ]),
+            // eat_seconds 1.6F, no using_converts_to, no effects
+            &[0x3f, 0xcc, 0xcc, 0xcd, 0, 0],
+        ),
+    ),
+    // HolderSet: 0 = tag, then the tag id.
+    ("damage_resistant", Const(b"\x00\x11minecraft:is_fire")),
+    (
+        "potion_contents",
+        Extend(
+            &[
+                Optional(&VarInt),
+                Optional(&Int),
+                List(UNBOUNDED, &MOB_EFFECT_INSTANCE),
+            ],
+            &[0],
+        ),
+    ),
+    // VANILLA-UNSURE: an inline instrument (int use_duration, no description)
+    // is not translated; registry ids are.
+    ("instrument", Holder(&Struct(&[Ref(&SOUND), VarInt, Float]))),
+    (
+        "trim",
+        Trailing(
+            &Struct(&[Ref(&TRIM_MATERIAL_1_21_1), Ref(&TRIM_PATTERN_1_21_4)]),
+            &Bool,
+            &[1],
+        ),
+    ),
+];
+
+/// Component shapes of 1.21/1.21.1 by their own component type id (with
+/// `fire_resistant` named `damage_resistant`, see `translate::names_1_21_1`).
+pub(crate) fn components_1_21_1() -> &'static [&'static Shape] {
+    static T: std::sync::LazyLock<Vec<&'static Shape>> = std::sync::LazyLock::new(|| {
+        crate::generated::r1_21_1::DATA_COMPONENT_TYPE
+            .iter()
+            .map(|name| {
+                if *name == "fire_resistant" {
+                    "damage_resistant"
+                } else {
+                    name
+                }
+            })
+            .map(|name| {
+                [
+                    COMPONENTS_1_21_1,
+                    COMPONENTS_1_21_3,
+                    COMPONENTS_1_21_4,
+                    COMPONENTS_1_21_5,
+                    COMPONENTS_1_21_8,
+                    COMPONENTS_1_21_10,
+                    COMPONENTS_1_21_11,
+                    COMPONENTS_26_2,
+                ]
+                .iter()
+                .find_map(|layer| layer.iter().find(|(n, _)| *n == name))
+                .map(|(_, s)| s)
+                .unwrap_or(&Shape::Nbt)
+            })
+            .collect()
+    });
+    &T
+}
+
 /// Component shapes of 1.21.2/1.21.3 by their own component type id.
 pub(crate) fn components_1_21_3() -> &'static [&'static Shape] {
     static T: std::sync::LazyLock<Vec<&'static Shape>> = std::sync::LazyLock::new(|| {
@@ -1381,6 +1474,7 @@ pub fn walk(r: &mut Reader, shape: &'static Shape, depth: u32) -> ProtocolResult
         IntAsFloats => {
             r.var_int()?;
         }
+        Const(_) => {}
         Trailing(inner, skipped, _) => {
             walk(r, inner, depth)?;
             walk(r, skipped, depth)?;
