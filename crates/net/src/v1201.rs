@@ -149,12 +149,15 @@ pub fn login(conn: &mut Connection, ids: &PacketIds, name: &str) -> NetResult<Jo
     use Direction::{Clientbound as C, Serverbound as S};
     let mut w = Writer::new();
     // VANILLA: ServerboundHelloPacket (1.20.1): name, Optional<UUID>;
-    // 1.19.2: name, Optional<ProfilePublicKey.Data> (нет ключа чата), Optional<UUID>
+    // 1.19.2: name, Optional<ProfilePublicKey.Data> (нет ключа чата), Optional<UUID>;
+    // 1.19: name, Optional<ProfilePublicKey.Data>
     w.string(name);
     if is_1_19_2() {
         w.bool(false);
     }
-    w.bool(true).uuid(offline_uuid(name));
+    if !is_1_19() {
+        w.bool(true).uuid(offline_uuid(name));
+    }
     conn.send(ids.get(State::Login, S, "hello")?, &w.buf)?;
     let profile = loop {
         let p = conn.recv()?;
@@ -217,6 +220,52 @@ pub fn login(conn: &mut Connection, ids: &PacketIds, name: &str) -> NetResult<Jo
         conn.push_front(p);
     }
     Ok(Joined { profile, cfg })
+}
+
+/// Тело клиентского пакета 1.19 → формат 1.19.2 (`None` — тело не меняется).
+pub fn from_1_19(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
+    let mut r = Reader::new(body);
+    let mut w = Writer::with_capacity(body.len() + 16);
+    match name {
+        // VANILLA: ClientboundSystemChatPacket (1.19): Component, varint typeId (реестр chat_type).
+        // VANILLA-UNSURE: ChatType#bootstrap (1.19) — game_info третий (id 2) = overlay; id берётся
+        // из реестра сервера, ванильный сервер пишет его в порядке bootstrap.
+        "system_chat" => {
+            let text = r.string(262144)?;
+            w.string(&text).bool(r.var_int()? == 2);
+        }
+        // VANILLA: ClientboundPlayerChatPacket (1.19): Component signed, Optional<Component>
+        // unsigned, varint typeId, ChatSender (UUID, Component имя, Nullable команда), instant,
+        // SaltSignaturePair → 1.19.2: без подписей, signed — как decorated, BoundNetwork.
+        "player_chat" => {
+            let signed = r.string(262144)?;
+            let unsigned = r.optional(|r| r.string(262144))?;
+            let kind = r.var_int()?;
+            let sender = r.bytes(16)?;
+            let name = r.string(262144)?;
+            let team = r.optional(|r| r.string(262144))?;
+            let ts = r.i64()?;
+            let salt = r.i64()?;
+            w.bool(false).bytes(sender).var_int(0); // header без prev, подпись заголовка
+            w.string("")
+                .bool(true)
+                .string(&signed)
+                .i64(ts)
+                .i64(salt)
+                .var_int(0);
+            match unsigned {
+                Some(u) => w.bool(true).string(&u),
+                None => w.bool(false),
+            };
+            w.var_int(0).var_int(kind).string(&name);
+            match team {
+                Some(t) => w.bool(true).string(&t),
+                None => w.bool(false),
+            };
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(w.into_vec()))
 }
 
 /// 1.19.2 `player_info` (одно действие на пакет) → имя пакета 1.19.3: REMOVE_PLAYER (4) →
@@ -735,6 +784,7 @@ fn enchant_names() -> Vec<String> {
         ezzmc_protocol::generated::r1_19_4::ENCHANTMENT,
         ezzmc_protocol::generated::r1_19_3::ENCHANTMENT,
         ezzmc_protocol::generated::r1_19_2::ENCHANTMENT,
+        ezzmc_protocol::generated::r1_19::ENCHANTMENT,
     ][era()];
     names.iter().map(|n| enchant_canon_name(n)).collect()
 }
@@ -899,14 +949,19 @@ fn nbt_to_components(t: &Tag, book: bool) -> Vec<(u32, Vec<u8>)> {
     out
 }
 
-/// Сервер 1.19.1–1.19.4 (760–762): тот же путь, тела сначала переводятся в формат 1.20.1.
+/// Сервер 1.19–1.19.4 (759–762): тот же путь, тела сначала переводятся в формат 1.20.1.
 fn is_1_19_4() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 760..=762)
+    matches!(ezzmc_protocol::version::current().protocol, 759..=762)
 }
 
-/// Сервер 1.19.1/1.19.2 (760): тела сначала переводятся в формат 1.19.3 (`from_1_19_2`).
+/// Сервер 1.19–1.19.2 (759–760): тела сначала переводятся в формат 1.19.3 (`from_1_19_2`).
 fn is_1_19_2() -> bool {
-    ezzmc_protocol::version::current().protocol == 760
+    matches!(ezzmc_protocol::version::current().protocol, 759 | 760)
+}
+
+/// Сервер 1.19 (759): тела сначала переводятся в формат 1.19.2 (`from_1_19`).
+fn is_1_19() -> bool {
+    ezzmc_protocol::version::current().protocol == 759
 }
 
 /// Индекс версии для таблиц: 0 — 1.20.1, 1 — 1.19.4, 2 — 1.19.3, 3 — 1.19.2.
@@ -915,12 +970,13 @@ fn era() -> usize {
         762 => 1,
         761 => 2,
         760 => 3,
+        759 => 4,
         _ => 0,
     }
 }
 
 type Remap = std::sync::OnceLock<Vec<Option<u32>>>;
-const ERAS: usize = 4;
+const ERAS: usize = 5;
 
 /// Таблица перевода id для версии `era()`, строится лениво.
 fn remap_for<'a>(
@@ -941,6 +997,7 @@ fn item_map() -> &'static [Option<u32>] {
             ezzmc_protocol::version::V1_19_4.item,
             ezzmc_protocol::version::V1_19_3.item,
             ezzmc_protocol::version::V1_19_2.item,
+            ezzmc_protocol::version::V1_19.item,
         ],
         ezzmc_protocol::version::CANON.item,
     )
@@ -955,6 +1012,7 @@ fn menu_map() -> &'static [Option<u32>] {
             ezzmc_protocol::generated::r1_19_4::MENU,
             ezzmc_protocol::generated::r1_19_3::MENU,
             ezzmc_protocol::generated::r1_19_2::MENU,
+            ezzmc_protocol::generated::r1_19::MENU,
         ],
         ezzmc_protocol::generated::r26_3::MENU,
     )
@@ -1079,6 +1137,7 @@ fn hashed_to_nbt_stack(r: &mut Reader, w: &mut Writer, v1204: bool) -> ProtocolR
             ezzmc_protocol::version::V1_19_4.item,
             ezzmc_protocol::version::V1_19_3.item,
             ezzmc_protocol::version::V1_19_2.item,
+            ezzmc_protocol::version::V1_19.item,
         ];
         ezzmc_protocol::version::build_remap(ezzmc_protocol::version::CANON.item, to[k])
     });
@@ -1119,6 +1178,7 @@ fn entity_type_map() -> &'static [Option<u32>] {
             ezzmc_protocol::version::V1_19_4.entity_type,
             ezzmc_protocol::version::V1_19_3.entity_type,
             ezzmc_protocol::version::V1_19_2.entity_type,
+            ezzmc_protocol::version::V1_19.entity_type,
         ],
         ezzmc_protocol::version::CANON.entity_type,
     )
@@ -1222,9 +1282,15 @@ pub fn play_from_canon(id: i32, body: &[u8]) -> ProtocolResult<Vec<(i32, Vec<u8>
         // VANILLA: ServerboundChatPacket/ServerboundChatCommandPacket (1.19.2): строка, instant, salt,
         // MessageSignature (byte[]) | ArgumentSignatures, bool signedPreview, LastSeenMessages.Update
         // (список + Optional<Entry>). Без подписи: пустые поля.
-        "chat" | "chat_command" if is_1_19_2() => {
+        "chat" | "chat_command" if is_1_19_2() && !is_1_19() => {
             w.string(&r.string(256)?).i64(r.i64()?).i64(r.i64()?);
             w.var_int(0).bool(false).var_int(0).bool(false);
+        }
+        // VANILLA: ServerboundChatPacket/ServerboundChatCommandPacket (1.19): строка, instant,
+        // SaltSignaturePair | ArgumentSignatures (оба: long salt, затем byte[] / map), bool preview.
+        "chat" | "chat_command" if is_1_19() => {
+            w.string(&r.string(256)?).i64(r.i64()?).i64(r.i64()?);
+            w.var_int(0).bool(false);
         }
         // 1.19.2: Update со списком последних увиденных; без подписей не нужен
         "chat_ack" if is_1_19_2() => return Ok(Vec::new()),
@@ -1376,7 +1442,13 @@ pub(crate) fn heightmap_id(name: &str) -> Option<i32> {
 
 /// Белый список clientbound-пакетов Play 1.20.1 → тело канона (`None` — отбросить).
 pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
-    let (conv0, conv);
+    let (conv00, conv0, conv);
+    let body = if is_1_19() {
+        conv00 = from_1_19(name, body)?;
+        conv00.as_deref().unwrap_or(body)
+    } else {
+        body
+    };
     let (name, body) = if is_1_19_2() {
         conv0 = from_1_19_2(name, body)?;
         (rename_1_19_2(name, body), conv0.as_deref().unwrap_or(body))
