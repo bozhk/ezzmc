@@ -190,7 +190,7 @@ pub fn state_to_canon(id: u32) -> u32 {
     // 1.21.5 — ещё и без dried_ghast.
     let t = match v.protocol {
         757 | 758 => table_1_18_2(),
-        578 => table_1_15_2(),
+        573..=578 => table_1_15_2(),
         735 | 736 => table_1_16_1(),
         751..=754 => table_1_16_5(),
         755 | 756 => table_1_17_1(),
@@ -233,7 +233,7 @@ pub fn state_from_canon(id: u32) -> u32 {
     static T1152: OnceLock<Vec<u32>> = OnceLock::new();
     static T1161: OnceLock<Vec<u32>> = OnceLock::new();
     let t = match ezzmc_protocol::version::current().protocol {
-        578 => T1152.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_15_2::BLOCKS)),
+        573..=578 => T1152.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_15_2::BLOCKS)),
         735 | 736 => T1161.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_16_1::BLOCKS)),
         751..=754 => T1165.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_16_5::BLOCKS)),
         755 | 756 => T1171.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_17_1::BLOCKS)),

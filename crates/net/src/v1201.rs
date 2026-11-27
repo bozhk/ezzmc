@@ -1387,46 +1387,46 @@ fn nbt_to_components(t: &Tag, book: bool) -> Vec<(u32, Vec<u8>)> {
 
 /// Сервер 1.17–1.19.4 (755–762): тот же путь, тела сначала переводятся в формат 1.20.1.
 fn is_1_19_4() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 578..=762)
+    matches!(ezzmc_protocol::version::current().protocol, 573..=762)
 }
 
 /// Сервер 1.17–1.19.2 (755–760): тела сначала переводятся в формат 1.19.3 (`from_1_19_2`).
 fn is_1_19_2() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 578..=760)
+    matches!(ezzmc_protocol::version::current().protocol, 573..=760)
 }
 
 /// Сервер 1.17–1.19 (755–759): тела сначала переводятся в формат 1.19.2 (`from_1_19`).
 fn is_1_19() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 578..=759)
+    matches!(ezzmc_protocol::version::current().protocol, 573..=759)
 }
 
 /// Сервер 1.17–1.18.2 (755–758): тела сначала переводятся в формат 1.19 (`from_1_18_2`).
 fn is_1_18() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 578..=758)
+    matches!(ezzmc_protocol::version::current().protocol, 573..=758)
 }
 
 /// Сервер 1.17/1.17.1 (755/756): тела сначала переводятся в формат 1.18.2 (`from_1_17_1`).
 /// 1.15.2–1.16.5 (`v1165`).
 pub(crate) fn is_1_16() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 578..=754)
+    matches!(ezzmc_protocol::version::current().protocol, 573..=754)
 }
 
 /// 1.16/1.16.1: вход, респаун и чанк отличаются от 1.16.2.
 pub(crate) fn is_1_16_1() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 578..=736)
+    matches!(ezzmc_protocol::version::current().protocol, 573..=736)
 }
 
-/// 1.15.2: тела сначала переводятся в формат 1.16.1 (`v1152`).
+/// 1.15–1.15.2: тела сначала переводятся в формат 1.16.1 (`v1152`).
 pub(crate) fn is_1_15() -> bool {
-    ezzmc_protocol::version::current().protocol == 578
+    matches!(ezzmc_protocol::version::current().protocol, 573..=578)
 }
 
 fn is_1_17() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 578..=756)
+    matches!(ezzmc_protocol::version::current().protocol, 573..=756)
 }
 
 /// Индекс версии для таблиц: 0 — 1.20.1, 1 — 1.19.4, 2 — 1.19.3, 3 — 1.19.2, 4 — 1.19, 5 — 1.18–1.18.2,
-/// 6 — 1.17–1.17.1, 7 — 1.16.2–1.16.5, 8 — 1.16–1.16.1, 9 — 1.15.2.
+/// 6 — 1.17–1.17.1, 7 — 1.16.2–1.16.5, 8 — 1.16–1.16.1, 9 — 1.15–1.15.2.
 fn era() -> usize {
     match ezzmc_protocol::version::current().protocol {
         762 => 1,
@@ -1439,7 +1439,7 @@ fn era() -> usize {
         755 | 756 => 6,
         751..=754 => 7,
         735 | 736 => 8,
-        578 => 9,
+        573..=578 => 9,
         _ => 0,
     }
 }
