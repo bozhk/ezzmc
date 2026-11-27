@@ -1,4 +1,4 @@
-//! Отличия протоколов 1.13–1.13.2 (393–404) от 1.14.4: тела приводятся к формату 1.14.4, дальше идут
+//! Отличия протоколов 1.12.2–1.13.2 (340–404) от 1.14.4: тела приводятся к формату 1.14.4, дальше идут
 //! общим путём `v1152`/`v1165`/`v1201`. Пакеты, которых общий путь не разбирает, не переводятся.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,6 +100,9 @@ fn item_id_out(id: i32) -> Option<i32> {
 /// Предмет 1.13/1.13.1 (`short id`, -1 — пусто, byte count, NBT) → формат 1.13.2.
 /// VANILLA: PacketByteBuf#readItemStack (1.13.2: bool, varint id).
 pub(crate) fn item_to_1_13_2(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    if current() == 340 {
+        return crate::v1122::item_to_1_13_2(r, w);
+    }
     let id = r.i16()?;
     if id < 0 {
         w.bool(false);
@@ -122,6 +125,9 @@ pub(crate) fn item_to_1_13_2(r: &mut Reader, w: &mut Writer) -> ProtocolResult<(
 
 /// Обратный перевод для serverbound.
 fn item_from_1_13_2(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    if current() == 340 {
+        return crate::v1122::item_from_1_13_2(r, w);
+    }
     if !r.bool()? {
         w.i16(-1);
         return Ok(());
@@ -378,10 +384,21 @@ fn light_to_1_14(c: &Chunk, sky: bool) -> Vec<u8> {
 
 /// `level_chunk` → тот же пакет под внутренним id и синтезированный `light_update`.
 pub fn expand(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<Packet>>> {
+    let legacy = current() == 340;
+    if legacy && crate::v1122::is_untranslated(name) {
+        return Ok(Some(Vec::new()));
+    }
     if name != "level_chunk" {
         return Ok(None);
     }
     let sky = SKY_LIGHT.load(Ordering::Relaxed);
+    let converted;
+    let body = if legacy {
+        converted = crate::v1122::chunk_to_1_13(body, sky)?;
+        converted.as_slice()
+    } else {
+        body
+    };
     let chunk = parse_chunk(body, sky)?;
     // VANILLA: ChunkHolder (1.13.2) — от 64 изменений идёт частичный чанк (fullChunk=false):
     // меняются только присланные секции.

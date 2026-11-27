@@ -1406,52 +1406,52 @@ fn nbt_to_components(t: &Tag, book: bool) -> Vec<(u32, Vec<u8>)> {
 
 /// Сервер 1.17–1.19.4 (755–762): тот же путь, тела сначала переводятся в формат 1.20.1.
 fn is_1_19_4() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 393..=762)
+    matches!(ezzmc_protocol::version::current().protocol, 340..=762)
 }
 
 /// Сервер 1.17–1.19.2 (755–760): тела сначала переводятся в формат 1.19.3 (`from_1_19_2`).
 fn is_1_19_2() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 393..=760)
+    matches!(ezzmc_protocol::version::current().protocol, 340..=760)
 }
 
 /// Сервер 1.17–1.19 (755–759): тела сначала переводятся в формат 1.19.2 (`from_1_19`).
 fn is_1_19() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 393..=759)
+    matches!(ezzmc_protocol::version::current().protocol, 340..=759)
 }
 
 /// Сервер 1.17–1.18.2 (755–758): тела сначала переводятся в формат 1.19 (`from_1_18_2`).
 fn is_1_18() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 393..=758)
+    matches!(ezzmc_protocol::version::current().protocol, 340..=758)
 }
 
 /// Сервер 1.17/1.17.1 (755/756): тела сначала переводятся в формат 1.18.2 (`from_1_17_1`).
 /// 1.15.2–1.16.5 (`v1165`).
 pub(crate) fn is_1_16() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 393..=754)
+    matches!(ezzmc_protocol::version::current().protocol, 340..=754)
 }
 
 /// 1.16/1.16.1: вход, респаун и чанк отличаются от 1.16.2.
 pub(crate) fn is_1_16_1() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 393..=736)
+    matches!(ezzmc_protocol::version::current().protocol, 340..=736)
 }
 
-/// 1.13.x: тела сначала переводятся в формат 1.14.4 (`v1132::from_1_13`).
+/// 1.12.2–1.13.x: тела сначала переводятся в формат 1.14.4 (`v1132::from_1_13`).
 pub(crate) fn is_1_13() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 393..=404)
+    matches!(ezzmc_protocol::version::current().protocol, 340..=404)
 }
 
 /// 1.14.x и старше: тела переводятся в формат 1.15.2 (`v1152::from_1_14_4`).
 pub(crate) fn is_1_14() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 393..=498)
+    matches!(ezzmc_protocol::version::current().protocol, 340..=498)
 }
 
 /// 1.14–1.15.2: тела сначала переводятся в формат 1.16.1 (`v1152`).
 pub(crate) fn is_1_15() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 393..=578)
+    matches!(ezzmc_protocol::version::current().protocol, 340..=578)
 }
 
 fn is_1_17() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 393..=756)
+    matches!(ezzmc_protocol::version::current().protocol, 340..=756)
 }
 
 /// Индекс версии для таблиц: 0 — 1.20.1, 1 — 1.19.4, 2 — 1.19.3, 3 — 1.19.2, 4 — 1.19, 5 — 1.18–1.18.2,
@@ -1470,7 +1470,7 @@ fn era() -> usize {
         735 | 736 => 8,
         573..=578 => 9,
         477..=498 => 10,
-        393..=404 => 11,
+        340..=404 => 11,
         _ => 0,
     }
 }
