@@ -194,6 +194,19 @@ pub const V1_19_4: Version = Version {
     particle_type: generated::r1_19_4::PARTICLE_TYPE,
 };
 
+/// 1.19.1/1.19.2 (протокол 760): подписанный чат v2, `player_info` одним пакетом; тела → 1.19.3
+/// (`v1201::from_1_19_2`) → 1.19.4 → 1.20.1.
+pub const V1_19_2: Version = Version {
+    name: "1.19.2",
+    protocol: 760,
+    packets: generated::v1_19_2::PACKETS,
+    item: generated::r1_19_2::ITEM,
+    block: generated::r1_19_2::BLOCK,
+    entity_type: generated::r1_19_2::ENTITY_TYPE,
+    sound_event: generated::r1_19_2::SOUND_EVENT,
+    particle_type: generated::r1_19_2::PARTICLE_TYPE,
+};
+
 /// 1.19.3 (протокол 761): без bundle/chunks_biomes/damage_event/hurt_animation; тела → 1.19.4 →
 /// 1.20.1 (`v1201::from_1_19_4`), дальше путём 1.20.1.
 pub const V1_19_3: Version = Version {
@@ -212,7 +225,7 @@ pub const CANON: Version = V26_3;
 
 pub const SUPPORTED: &[Version] = &[
     V26_3, V1_21_11, V1_21_10, V1_21_8, V1_21_6, V1_21_5, V1_21_4, V1_21_3, V1_21_1, V1_20_6,
-    V1_20_4, V1_20_2, V1_20_1, V1_19_4, V1_19_3,
+    V1_20_4, V1_20_2, V1_20_1, V1_19_4, V1_19_3, V1_19_2,
 ];
 
 /// Версия по protocol number из Status-ответа.
@@ -236,9 +249,9 @@ impl Version {
         self.protocol == CANON.protocol
     }
 
-    /// 1.19.3–1.20.1: без Configuration-фазы, реестры в Play `login`; один путь (`v1201`).
+    /// 1.19.1–1.20.1: без Configuration-фазы, реестры в Play `login`; один путь (`v1201`).
     pub fn is_pre_config(&self) -> bool {
-        matches!(self.protocol, 761..=763)
+        matches!(self.protocol, 760..=763)
     }
 
     /// 1.20.2–1.21.11: переводятся одним путём (`legacy::clientbound_1_21_11`).
