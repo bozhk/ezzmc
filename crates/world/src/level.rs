@@ -1430,6 +1430,15 @@ mod tests {
                 .unwrap(),
             LevelEvent::None
         );
+        // keep_far: чанк вне сетки ждёт своего центра
+        l.chunks.keep_far();
+        l.handle("level_chunk_with_light", &empty_chunk_packet(99, 99))
+            .unwrap();
+        assert!(l.chunks.get(99, 99).is_none());
+        assert_eq!(l.chunks.set_center(99, 99), vec![(99, 99)]);
+        assert!(l.chunks.get(99, 99).is_some());
+        assert!(l.chunks.drop_chunk(99, 99));
+        l.chunks.set_center(0, 0);
         let mut w = Writer::new();
         w.var_int(1);
         assert_eq!(

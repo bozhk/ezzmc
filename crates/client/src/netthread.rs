@@ -951,9 +951,10 @@ fn run(
                 ezzmc_net::v1152::ADD_MOB_ID => Some("add_mob"),
                 ezzmc_net::v1152::ADD_PLAYER_ID => Some("add_player"),
                 ezzmc_net::v1152::ENTITY_DATA_ID => Some("set_entity_data"),
-                id => ids
-                    .name_of(State::Play, Direction::Clientbound, id)
-                    .map(ezzmc_net::v1152::alias),
+                id => ezzmc_net::v1132::internal_name(id).or_else(|| {
+                    ids.name_of(State::Play, Direction::Clientbound, id)
+                        .map(ezzmc_net::v1152::alias)
+                }),
             };
             // Пакет старой версии без аналога в каноне → несколько пакетов той же версии.
             match ezzmc_net::legacy::expand(pname, &p.body) {
@@ -969,9 +970,10 @@ fn run(
                     continue;
                 }
             }
+            let pname = pname.map(ezzmc_net::v1132::after_expand);
             // Сервер старой версии: тело → формат канона (глава 18).
             let canon_pname = match ver.protocol {
-                477..=763 => pname.map(|n| ezzmc_net::v1201::canon_name(n, &p.body)),
+                393..=763 => pname.map(|n| ezzmc_net::v1201::canon_name(n, &p.body)),
                 764 => pname.map(|n| ezzmc_net::legacy::canon_name_1_20_2(n, &p.body)),
                 766 | 767 => pname.map(|n| ezzmc_net::legacy::canon_name_1_21_1(n, &p.body)),
                 _ => None,
@@ -1481,6 +1483,20 @@ fn run(
                         let waited = t_wait.elapsed();
                         let t_hold = std::time::Instant::now();
                         let Some(level) = g.as_mut() else { continue };
+                        // 1.13 не шлёт центр чанков, а клиент 1.13 держит всё присланное —
+                        // центр хранилища ставится по игроку перед приёмом чанка.
+                        if ver.protocol < ezzmc_protocol::version::V1_14.protocol {
+                            level.chunks.keep_far();
+                            let at = |v: f64| (v.floor() as i32) >> 4;
+                            let (x, z) = (at(h.player.pos.x), at(h.player.pos.z));
+                            let center = level.chunks.center();
+                            if (center.x, center.z) != (x, z) {
+                                for (x, z) in level.chunks.set_center(x, z) {
+                                    let _ =
+                                        tx.send(NetEvt::Level(LevelEvent::ChunkLoaded { x, z }));
+                                }
+                            }
+                        }
                         let r = level.handle(pname, &body);
                         if waited.as_millis() > 100 || t_hold.elapsed().as_millis() > 100 {
                             tracing::warn!(target: "stall", "DIAG-LOCK {pname}: ждали замок {} мс, держали {} мс", waited.as_millis(), t_hold.elapsed().as_millis());

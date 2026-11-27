@@ -1439,6 +1439,12 @@ fn hashed_to_stack_1_21_4(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> 
 /// Пакет сервера 1.21.4, которого нет в 1.21.5+, → пакеты 1.21.4 (id, тело), которые затем
 /// переводятся обычным путём. `None` — пакет не разворачивается.
 pub fn expand(name: Option<&str>, body: &[u8]) -> ProtocolResult<Option<Vec<Packet>>> {
+    if crate::v1201::is_1_13() {
+        let parts = crate::v1132::expand(name.unwrap_or_default(), body)?;
+        if parts.is_some() {
+            return Ok(parts);
+        }
+    }
     if crate::v1201::is_1_14() {
         let parts = crate::v1152::expand_1_14(name.unwrap_or_default(), body)?;
         if parts.is_some() {

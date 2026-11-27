@@ -105,6 +105,8 @@ fn storage_range(view_radius: i32) -> i32 {
     view_radius.max(2) + 3
 }
 
+type FarChunks = std::collections::HashMap<(i32, i32), (LevelChunkPacket, Vec<LightUpdate>)>;
+
 /// Кольцевая сетка (2r+1)² вокруг центра, индекс — floorMod, как в Storage.
 pub struct ChunkCache {
     chunks: Vec<Option<Arc<ClientChunk>>>,
@@ -113,6 +115,8 @@ pub struct ChunkCache {
     center: ChunkPos,
     count: usize,
     format: ChunkFormat,
+    /// Чанки вне сетки, ждущие своего центра (серверы без set_chunk_cache_center, см. [`Self::keep_far`]).
+    far: Option<FarChunks>,
     /// Секции (x, y, z), чей свет изменил клиентский светодвижок (для ремеша).
     pub light_dirty: std::collections::HashSet<(i32, i32, i32)>,
 }
@@ -128,6 +132,7 @@ impl ChunkCache {
             center: ChunkPos { x: 0, z: 0 },
             count: 0,
             format,
+            far: None,
             light_dirty: Default::default(),
         }
     }
@@ -159,8 +164,33 @@ impl ChunkCache {
     }
 
     /// VANILLA: updateViewCenter (ClientboundSetChunkCacheCenterPacket).
-    pub fn set_center(&mut self, x: i32, z: i32) {
+    /// Возвращает отложенные чанки, попавшие в сетку при новом центре.
+    pub fn set_center(&mut self, x: i32, z: i32) -> Vec<(i32, i32)> {
         self.center = ChunkPos { x, z };
+        let Some(far) = &mut self.far else {
+            return Vec::new();
+        };
+        let r = self.radius;
+        let ready: Vec<(i32, i32)> = far
+            .keys()
+            .copied()
+            .filter(|&(cx, cz)| (cx - x).abs() <= r && (cz - z).abs() <= r)
+            .collect();
+        let taken: Vec<_> = ready.iter().filter_map(|k| far.remove(k)).collect();
+        for (p, lights) in taken {
+            let (cx, cz) = (p.x, p.z);
+            self.apply_packet(p);
+            for u in &lights {
+                self.apply_light(cx, cz, u);
+            }
+        }
+        ready
+    }
+
+    /// Не терять чанки вне сетки: до 1.14 центр не присылается, и чанки нового места
+    /// могут прийти раньше пакета позиции (клиент тех версий принимает любые).
+    pub fn keep_far(&mut self) {
+        self.far.get_or_insert_with(Default::default);
     }
 
     /// Текущая дальность прорисовки (чанки), как её задал сервер.
@@ -199,6 +229,9 @@ impl ChunkCache {
 
     /// VANILLA: drop (ClientboundForgetLevelChunkPacket).
     pub fn drop_chunk(&mut self, x: i32, z: i32) -> bool {
+        if let Some(far) = &mut self.far {
+            far.remove(&(x, z));
+        }
         if !self.in_range(x, z) {
             return false;
         }
@@ -217,7 +250,13 @@ impl ChunkCache {
     /// VANILLA: replaceWithPacketData + queueLightUpdate. Вне радиуса — игнор (false).
     pub fn apply_packet(&mut self, p: LevelChunkPacket) -> bool {
         if !self.in_range(p.x, p.z) {
+            if let Some(far) = &mut self.far {
+                far.insert((p.x, p.z), (p, Vec::new()));
+            }
             return false;
+        }
+        if let Some(far) = &mut self.far {
+            far.remove(&(p.x, p.z));
         }
         let mut light = ChunkLight::new(self.format.section_count());
         light.apply(&p.light);
@@ -243,6 +282,10 @@ impl ChunkCache {
 
     /// Обновление света (ClientboundLightUpdatePacket). false, если чанка нет.
     pub fn apply_light(&mut self, x: i32, z: i32, u: &LightUpdate) -> bool {
+        if let Some((_, lights)) = self.far.as_mut().and_then(|f| f.get_mut(&(x, z))) {
+            lights.push(u.clone());
+            return false;
+        }
         if !self.in_range(x, z) {
             return false;
         }

@@ -12,6 +12,7 @@ pub mod replay;
 pub mod session;
 pub mod srv;
 pub mod status;
+pub mod v1132;
 pub mod v1152;
 pub mod v1165;
 pub mod v1201;
