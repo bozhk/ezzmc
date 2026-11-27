@@ -5,7 +5,7 @@ use crate::block::{decode_state, BlockInfo};
 use crate::generated::{
     b1_13, b1_13_2, b1_14_4, b1_15_2, b1_16_1, b1_16_5, b1_17_1, b1_18_2, b1_19, b1_19_2, b1_19_3,
     b1_19_4, b1_20_1, b1_20_2, b1_20_4, b1_21_1, b1_21_11, b1_21_3, b1_21_4, b1_21_5, b1_21_8,
-    b26_3,
+    b26_3, flattening,
 };
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -138,6 +138,18 @@ fn table_1_13_2() -> &'static [u32] {
     T.get_or_init(|| build_state_map(b1_13_2::BLOCKS, b26_3::BLOCKS))
 }
 
+/// ≤1.12.2: состояние — `id << 4 | meta`; через таблицу Flattening и состояния 1.13.2.
+fn table_1_12() -> &'static [u32] {
+    static T: OnceLock<Vec<u32>> = OnceLock::new();
+    T.get_or_init(|| {
+        let flat = table_1_13_2();
+        flattening::BLOCKS
+            .iter()
+            .map(|&s| flat.get(usize::from(s)).copied().unwrap_or(0))
+            .collect()
+    })
+}
+
 fn table_1_14_4() -> &'static [u32] {
     static T: OnceLock<Vec<u32>> = OnceLock::new();
     T.get_or_init(|| build_state_map(b1_14_4::BLOCKS, b26_3::BLOCKS))
@@ -217,6 +229,7 @@ pub fn state_to_canon(id: u32) -> u32 {
     // 1.21.5 — ещё и без dried_ghast.
     let t = match v.protocol {
         757 | 758 => table_1_18_2(),
+        335..=340 => table_1_12(),
         393 => table_1_13(),
         401 | 404 => table_1_13_2(),
         477..=498 => table_1_14_4(),
@@ -384,5 +397,19 @@ mod rename_tests {
                 assert_ne!(map_name(blocks, b.name), "air", "{}", b.name);
             }
         }
+    }
+
+    #[test]
+    fn flattening_table() {
+        use crate::block::BlockState;
+        let name = |old: usize| BlockState(super::table_1_12()[old]).name();
+        assert_eq!(name(0), "air");
+        assert_eq!(name(1 << 4 | 1), "granite");
+        assert_eq!(name(2 << 4), "grass_block");
+        // доски: мета 3 — тропические
+        assert_eq!(name(5 << 4 | 3), "jungle_planks");
+        assert_eq!(name(35 << 4 | 14), "red_wool");
+        // мета без записи берёт мету 0
+        assert_eq!(name(1 << 4 | 15), "stone");
     }
 }
