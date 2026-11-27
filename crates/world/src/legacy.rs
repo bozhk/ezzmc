@@ -3,8 +3,8 @@
 //! канонического блока, нет блока вовсе → воздух (VANILLA-UNSURE: ViaVersion подставляет замены).
 use crate::block::{decode_state, BlockInfo};
 use crate::generated::{
-    b1_15_2, b1_16_1, b1_16_5, b1_17_1, b1_18_2, b1_19, b1_19_2, b1_19_3, b1_19_4, b1_20_1,
-    b1_20_2, b1_20_4, b1_21_1, b1_21_11, b1_21_3, b1_21_4, b1_21_5, b1_21_8, b26_3,
+    b1_14_4, b1_15_2, b1_16_1, b1_16_5, b1_17_1, b1_18_2, b1_19, b1_19_2, b1_19_3, b1_19_4,
+    b1_20_1, b1_20_2, b1_20_4, b1_21_1, b1_21_11, b1_21_3, b1_21_4, b1_21_5, b1_21_8, b26_3,
 };
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -116,6 +116,11 @@ fn table_1_16_5() -> &'static [u32] {
     T.get_or_init(|| build_state_map(b1_16_5::BLOCKS, b26_3::BLOCKS))
 }
 
+fn table_1_14_4() -> &'static [u32] {
+    static T: OnceLock<Vec<u32>> = OnceLock::new();
+    T.get_or_init(|| build_state_map(b1_14_4::BLOCKS, b26_3::BLOCKS))
+}
+
 fn table_1_15_2() -> &'static [u32] {
     static T: OnceLock<Vec<u32>> = OnceLock::new();
     T.get_or_init(|| build_state_map(b1_15_2::BLOCKS, b26_3::BLOCKS))
@@ -190,6 +195,7 @@ pub fn state_to_canon(id: u32) -> u32 {
     // 1.21.5 — ещё и без dried_ghast.
     let t = match v.protocol {
         757 | 758 => table_1_18_2(),
+        477..=498 => table_1_14_4(),
         573..=578 => table_1_15_2(),
         735 | 736 => table_1_16_1(),
         751..=754 => table_1_16_5(),
@@ -230,9 +236,11 @@ pub fn state_from_canon(id: u32) -> u32 {
     static T1182: OnceLock<Vec<u32>> = OnceLock::new();
     static T1171: OnceLock<Vec<u32>> = OnceLock::new();
     static T1165: OnceLock<Vec<u32>> = OnceLock::new();
+    static T1144: OnceLock<Vec<u32>> = OnceLock::new();
     static T1152: OnceLock<Vec<u32>> = OnceLock::new();
     static T1161: OnceLock<Vec<u32>> = OnceLock::new();
     let t = match ezzmc_protocol::version::current().protocol {
+        477..=498 => T1144.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_14_4::BLOCKS)),
         573..=578 => T1152.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_15_2::BLOCKS)),
         735 | 736 => T1161.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_16_1::BLOCKS)),
         751..=754 => T1165.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_16_5::BLOCKS)),

@@ -288,6 +288,46 @@ pub const V1_15: Version = Version {
     ..V1_15_2
 };
 
+/// 1.14.4 (498): тела → 1.15.2 (`v1152::from_1_14_4`).
+pub const V1_14_4: Version = Version {
+    name: "1.14.4",
+    protocol: 498,
+    packets: generated::v1_14_4::PACKETS,
+    item: generated::r1_14_4::ITEM,
+    block: generated::r1_14_4::BLOCK,
+    entity_type: generated::r1_14_4::ENTITY_TYPE,
+    sound_event: generated::r1_14_4::SOUND_EVENT,
+    particle_type: generated::r1_14_4::PARTICLE_TYPE,
+};
+
+/// 1.14.3 (490): таблицы 1.14.4 (последний в них `block_break_ack` старые версии не шлют).
+pub const V1_14_3: Version = Version {
+    name: "1.14.3",
+    protocol: 490,
+    ..V1_14_4
+};
+
+/// 1.14.2 (485): таблицы 1.14.4 (последний в них `block_break_ack` старые версии не шлют).
+pub const V1_14_2: Version = Version {
+    name: "1.14.2",
+    protocol: 485,
+    ..V1_14_4
+};
+
+/// 1.14.1 (480): таблицы 1.14.4 (последний в них `block_break_ack` старые версии не шлют).
+pub const V1_14_1: Version = Version {
+    name: "1.14.1",
+    protocol: 480,
+    ..V1_14_4
+};
+
+/// 1.14 (477): таблицы 1.14.4 (последний в них `block_break_ack` старые версии не шлют).
+pub const V1_14: Version = Version {
+    name: "1.14",
+    protocol: 477,
+    ..V1_14_4
+};
+
 /// 1.17 (протокол 755): регистры и состояния блоков совпадают с 1.17.1.
 pub const V1_17: Version = Version {
     name: "1.17",
@@ -353,7 +393,8 @@ pub const CANON: Version = V26_3;
 pub const SUPPORTED: &[Version] = &[
     V26_3, V1_21_11, V1_21_10, V1_21_8, V1_21_6, V1_21_5, V1_21_4, V1_21_3, V1_21_1, V1_20_6,
     V1_20_4, V1_20_2, V1_20_1, V1_19_4, V1_19_3, V1_19_2, V1_19, V1_18_2, V1_18_1, V1_17_1, V1_17,
-    V1_16_5, V1_16_3, V1_16_2, V1_16_1, V1_16, V1_15_2, V1_15_1, V1_15,
+    V1_16_5, V1_16_3, V1_16_2, V1_16_1, V1_16, V1_15_2, V1_15_1, V1_15, V1_14_4, V1_14_3, V1_14_2,
+    V1_14_1, V1_14,
 ];
 
 /// Версия по protocol number из Status-ответа.
@@ -379,7 +420,7 @@ impl Version {
 
     /// 1.18–1.20.1: без Configuration-фазы, реестры в Play `login`; один путь (`v1201`).
     pub fn is_pre_config(&self) -> bool {
-        matches!(self.protocol, 573..=763)
+        matches!(self.protocol, 477..=763)
     }
 
     /// 1.20.2–1.21.11: переводятся одним путём (`legacy::clientbound_1_21_11`).

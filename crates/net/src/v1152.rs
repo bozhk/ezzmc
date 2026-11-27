@@ -1,4 +1,4 @@
-//! Отличия протоколов 1.15–1.15.2 (573–578) от 1.16.1: тела приводятся к формату 1.16.1, дальше идут общим
+//! Отличия протоколов 1.14–1.15.2 (477–578): 1.14.x → 1.15.2, 1.15.x → 1.16.1: тела приводятся к формату 1.16.1, дальше идут общим
 //! путём `v1165`/`v1201`.
 
 use ezzmc_protocol::nbt::{self, Tag};
@@ -268,6 +268,65 @@ pub fn from_1_15_2(name: &str, body: &[u8]) -> ProtocolResult<Option<(&'static s
     Ok(Some((out_name, w.into_vec())))
 }
 
+/// Биомы чанка 1.14 (256 int по столбцам) → 1024 int 1.15 (ячейки 4×4×4).
+/// VANILLA-UNSURE: ваниль 1.14 красит по столбцам блоков; берётся центр ячейки 4×4.
+fn biomes_3d(columns: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4096);
+    for _ in 0..64 {
+        for z in 0..4 {
+            for x in 0..4 {
+                let at = ((z * 4 + 2) * 16 + x * 4 + 2) * 4;
+                out.extend_from_slice(columns.get(at..at + 4).unwrap_or(&[0; 4]));
+            }
+        }
+    }
+    out
+}
+
+/// Тело клиентского пакета 1.14.x → формат 1.15.2 (`None` — тело не меняется).
+pub fn from_1_14_4(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
+    let mut r = Reader::new(body);
+    let mut w = Writer::with_capacity(body.len() + 4096);
+    match name {
+        // VANILLA: ClientboundLoginPacket (1.14.4): без seed и showDeathScreen. seed 0 — клиент
+        // старой версии его не знает.
+        "login" => {
+            w.bytes(r.bytes(9)?).i64(0).bytes(r.rest()).bool(true);
+        }
+        // VANILLA: ClientboundRespawnPacket (1.14.4): без seed.
+        "respawn" => {
+            w.bytes(r.bytes(4)?).i64(0).bytes(r.rest());
+        }
+        // VANILLA: ClientboundLevelChunkPacket (1.14.4): биомы — 256 int в конце данных секций.
+        "level_chunk" => {
+            w.bytes(r.bytes(8)?);
+            let full = r.bool()?;
+            w.bool(full).var_int(r.var_int()?);
+            let at = r.pos();
+            nbt::read_named(&mut r)?;
+            w.bytes(r.since(at));
+            let len = r.length("chunk data", 1 << 21)?;
+            let mut data = r.bytes(len)?;
+            if full {
+                let split = data.len().saturating_sub(1024);
+                w.bytes(&biomes_3d(&data[split..]));
+                data = &data[..split];
+            }
+            w.var_int(data.len() as i32).bytes(data).bytes(r.rest());
+        }
+        // VANILLA: ClientboundLevelParticlesPacket (1.14.4): позиция — float.
+        "level_particles" => {
+            w.bytes(r.bytes(5)?);
+            for _ in 0..3 {
+                w.f64(f64::from(r.f32()?));
+            }
+            w.bytes(r.rest());
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(w.into_vec()))
+}
+
 /// Тело serverbound-пакета формата 1.16 → 1.15.2.
 pub(crate) fn to_1_15_2(name: &str, body: &mut Vec<u8>) {
     match name {
@@ -297,6 +356,15 @@ mod tests {
         let new = repack(&old, 5, 4096);
         assert_eq!(new.len(), 342);
         assert_eq!(new[1] & 31, 0b1_0110);
+    }
+
+    #[test]
+    fn chunk_biomes() {
+        let columns: Vec<u8> = (0..256i32).flat_map(i32::to_be_bytes).collect();
+        let out = biomes_3d(&columns);
+        assert_eq!(out.len(), 4096);
+        // ячейка x=1 z=2 → столбец x=6 z=10
+        assert_eq!(out[(2 * 4 + 1) * 4 + 3], 10 * 16 + 6);
     }
 
     #[test]

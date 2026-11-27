@@ -60,9 +60,23 @@ def legacy_rows(ver, donor):
     for k, h in enumerate(heads):
         # конец последнего состояния: NOT_REGISTERED (1.20.2+) или закрытие enum `   );` (≤1.20.1)
         tail = re.search(r'NOT_REGISTERED|^   \);', src[h.end():], re.M)
-        end = heads[k + 1].start() if k + 1 < len(heads) else h.end() + tail.start()
+        last = h.end() + tail.start() if tail else len(src)
+        end = heads[k + 1].start() if k + 1 < len(heads) else last
         st = enum[h.group(1)]
         part = src[h.start():end]
+        if 'addPacket(PacketFlow.' in part:
+            # ≤1.14.4: по вызову `addPacket(PacketFlow.X, Cls.class)` на пакет, id — порядок в потоке
+            count = {}
+            for p in re.finditer(r'addPacket\(PacketFlow\.(\w+),\s*([\w.]+)\.class', part):
+                d = 'Clientbound' if p.group(1) == 'CLIENTBOUND' else 'Serverbound'
+                c = p.group(2)
+                n = by_cls.get((st, d, c)) or by_cls.get((None, d, c))
+                if n is None:
+                    n = snake(c)
+                    print(f'  {st} {d} {c} → {n} (нет у донора)')
+                rows.append((st, d, count.get(d, 0), n))
+                count[d] = count.get(d, 0) + 1
+            continue
         flows = list(re.finditer(r'PacketFlow\.(CLIENTBOUND|SERVERBOUND)', part))
         for j, f in enumerate(flows):
             d = 'Clientbound' if f.group(1) == 'CLIENTBOUND' else 'Serverbound'
