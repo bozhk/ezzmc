@@ -948,7 +948,9 @@ fn run(
             let pid = p.id;
             let pname = match p.id {
                 ezzmc_net::v1165::SECTION_UPDATE_ID => Some("section_blocks_update"),
-                id => ids.name_of(State::Play, Direction::Clientbound, id),
+                id => ids
+                    .name_of(State::Play, Direction::Clientbound, id)
+                    .map(ezzmc_net::v1152::alias),
             };
             // Пакет старой версии без аналога в каноне → несколько пакетов той же версии.
             match ezzmc_net::legacy::expand(pname, &p.body) {
@@ -966,7 +968,7 @@ fn run(
             }
             // Сервер старой версии: тело → формат канона (глава 18).
             let canon_pname = match ver.protocol {
-                735..=763 => pname.map(|n| ezzmc_net::v1201::canon_name(n, &p.body)),
+                578..=763 => pname.map(|n| ezzmc_net::v1201::canon_name(n, &p.body)),
                 764 => pname.map(|n| ezzmc_net::legacy::canon_name_1_20_2(n, &p.body)),
                 766 | 767 => pname.map(|n| ezzmc_net::legacy::canon_name_1_21_1(n, &p.body)),
                 _ => None,

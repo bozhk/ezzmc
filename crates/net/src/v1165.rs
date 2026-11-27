@@ -246,6 +246,29 @@ fn chunk_blocks_update(body: &[u8]) -> ProtocolResult<Vec<Vec<u8>>> {
         .collect())
 }
 
+/// Распаковка long[] секции: 1.16 — без переноса через границу long, до 1.16 — сплошным потоком.
+/// VANILLA: SimpleBitStorage (1.16.1), BitStorage (1.15.2).
+pub(crate) fn unpack(longs: &[u64], bits: u32, n: usize, spanning: bool) -> Vec<u64> {
+    let at = |i: usize| longs.get(i).copied().unwrap_or(0);
+    let per_long = (64 / bits) as usize;
+    (0..n)
+        .map(|i| {
+            let v = if spanning {
+                let bit = i * bits as usize;
+                let (k, off) = (bit / 64, (bit % 64) as u32);
+                let mut v = at(k) >> off;
+                if off + bits > 64 {
+                    v |= at(k + 1) << (64 - off);
+                }
+                v
+            } else {
+                at(i / per_long) >> ((i % per_long) as u32 * bits)
+            };
+            v & ((1 << bits) - 1)
+        })
+        .collect()
+}
+
 /// Секции частичного чанка → полные обновления секций.
 /// VANILLA: LevelChunk#replaceWithPacketData, LevelChunkSection#read, SimpleBitStorage (1.16.1):
 /// short, byte bits (минимум 4), палитра при bits < 9, long[] без переноса через границу long;
@@ -254,7 +277,11 @@ fn chunk_blocks_update(body: &[u8]) -> ProtocolResult<Vec<Vec<u8>>> {
 fn partial_chunk(body: &[u8]) -> ProtocolResult<Vec<Vec<u8>>> {
     let mut r = Reader::new(body);
     let (cx, cz) = (r.i32()?, r.i32()?);
-    r.bytes(2)?; // fullChunk, forgetOldData
+    r.bool()?; // fullChunk
+    let spanning = crate::v1201::is_1_15();
+    if !spanning {
+        r.bool()?; // forgetOldData
+    }
     let mask = r.var_int()?;
     nbt::read_named(&mut r)?;
     let len = r.length("chunk data", 1 << 21)?;
@@ -262,7 +289,7 @@ fn partial_chunk(body: &[u8]) -> ProtocolResult<Vec<Vec<u8>>> {
     let mut out = Vec::new();
     for sy in (0..16).filter(|i| mask & (1 << i) != 0) {
         data.bytes(2)?;
-        let bits = u32::from(data.u8()?).clamp(4, 32);
+        let bits = u32::from(data.u8()?).clamp(4, 31);
         let mut palette = Vec::new();
         if bits < 9 {
             for _ in 0..data.length("chunk palette", 256)? {
@@ -274,11 +301,8 @@ fn partial_chunk(body: &[u8]) -> ProtocolResult<Vec<Vec<u8>>> {
         for _ in 0..n {
             longs.push(data.i64()? as u64);
         }
-        let per_long = (64 / bits) as usize;
         let mut entries = Vec::with_capacity(4096);
-        for i in 0..4096u16 {
-            let long = longs.get(usize::from(i) / per_long).copied().unwrap_or(0);
-            let raw = (long >> ((usize::from(i) % per_long) as u32 * bits)) & ((1 << bits) - 1);
+        for (i, raw) in (0u16..).zip(unpack(&longs, bits, 4096, spanning)) {
             let state = if bits < 9 {
                 palette.get(raw as usize).copied().unwrap_or(0)
             } else {
