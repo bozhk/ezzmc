@@ -1693,7 +1693,7 @@ pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>>
         "update_mob_effect" => {
             let ent = r.var_int()?;
             let Some(id) = effect_map().get(r.var_int()? as usize).copied().flatten() else {
-                return Ok(Some(Vec::new()));
+                return Ok(None);
             };
             let amp = r.i8()?;
             let dur = r.var_int()?;
@@ -1711,7 +1711,7 @@ pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>>
         "remove_mob_effect" => {
             let ent = r.var_int()?;
             let Some(id) = effect_map().get(r.var_int()? as usize).copied().flatten() else {
-                return Ok(Some(Vec::new()));
+                return Ok(None);
             };
             w.var_int(ent).var_int(id as i32)
         }
