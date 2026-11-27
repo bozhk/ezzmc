@@ -1304,6 +1304,12 @@ impl Level {
 
     /// VANILLA: ClientLevel#setServerVerifiedBlockState-обход: локальная смена блока с запоминанием серверного.
     pub fn predict_block(&mut self, pos: BlockPos, state: BlockState) {
+        // VANILLA: до 1.19 (759) нет BlockStatePredictionHandler — блок ставится сразу, сервер
+        // присылает block_update (MultiPlayerGameMode 1.18.2).
+        if ezzmc_protocol::version::current().protocol < 759 {
+            self.chunks.set_block(pos.x, pos.y, pos.z, state);
+            return;
+        }
         let old = self.chunks.block(pos.x, pos.y, pos.z);
         let seq = self.pending_seq;
         self.predictions

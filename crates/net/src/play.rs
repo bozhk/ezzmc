@@ -1051,6 +1051,10 @@ impl PlayHandler {
         let mut w = Writer::new();
         w.string(cmd).i64(ms).i64(0).var_int(0);
         w.var_int(0).bytes(&[0, 0, 0]).u8(0);
+        // VANILLA: до 1.19 команд-пакета нет — ServerboundChatPacket с `/` (LocalPlayer#chat 1.18.2).
+        if self.sid("chat_command").is_err() && self.sid("chat_command_signed").is_err() {
+            return self.send_chat(conn, &format!("/{cmd}"), ms);
+        }
         // 1.20.1: единственный `chat_command` с подписями
         let id = self
             .sid("chat_command_signed")

@@ -152,7 +152,7 @@ pub fn login(conn: &mut Connection, ids: &PacketIds, name: &str) -> NetResult<Jo
     // 1.19.2: name, Optional<ProfilePublicKey.Data> (нет ключа чата), Optional<UUID>;
     // 1.19: name, Optional<ProfilePublicKey.Data>
     w.string(name);
-    if is_1_19_2() {
+    if is_1_19_2() && !is_1_18() {
         w.bool(false);
     }
     if !is_1_19() {
@@ -206,13 +206,19 @@ pub fn login(conn: &mut Connection, ids: &PacketIds, name: &str) -> NetResult<Jo
         }
         early.push(p);
     };
+    let pre18 = if is_1_18() {
+        from_1_18_2("login", &login_pkt.body)?
+    } else {
+        None
+    };
+    let raw = pre18.as_deref().unwrap_or(&login_pkt.body);
     let login_body = if is_1_19_4() {
-        from_1_19_4("login", &login_pkt.body)?
+        from_1_19_4("login", raw)?
     } else {
         None
     };
     let cfg = ServerConfig {
-        registries: parse_login_registries(login_body.as_deref().unwrap_or(&login_pkt.body))?,
+        registries: parse_login_registries(login_body.as_deref().unwrap_or(raw))?,
         ..ServerConfig::default()
     };
     conn.push_front(login_pkt);
@@ -270,6 +276,167 @@ pub fn from_1_19(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
 
 /// 1.19.2 `player_info` (одно действие на пакет) → имя пакета 1.19.3: REMOVE_PLAYER (4) →
 /// `player_info_remove`, остальное → `player_info_update`.
+fn rename_1_18(name: &str) -> &str {
+    match name {
+        "chat" => "system_chat",
+        "add_mob" | "add_painting" => "add_entity",
+        "block_break_ack" => "block_update",
+        n => n,
+    }
+}
+
+/// Элементы реестра dimension_type из `login` 1.18 — для перевода NBT типа в ключ в `respawn`.
+static DIM_ELEMENTS_1_18: std::sync::Mutex<Vec<(String, Tag)>> = std::sync::Mutex::new(Vec::new());
+
+/// NBT типа измерения (1.18) → ключ реестра: совпадение элемента, иначе ключ = имя измерения.
+fn dim_type_key_1_18(t: Option<Tag>, dimension: &str) -> String {
+    let Ok(g) = DIM_ELEMENTS_1_18.lock() else {
+        return dimension.to_owned();
+    };
+    t.and_then(|t| g.iter().find(|(_, e)| *e == t).map(|(n, _)| n.clone()))
+        .or_else(|| {
+            g.iter()
+                .find(|(n, _)| n == dimension)
+                .map(|(n, _)| n.clone())
+        })
+        .unwrap_or_else(|| dimension.to_owned())
+}
+
+/// Тело клиентского пакета 1.18.2 → формат 1.19 (`None` — тело не меняется).
+/// Имя — исходное (1.18.2), переименование — `rename_1_18`.
+pub fn from_1_18_2(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
+    let mut r = Reader::new(body);
+    let mut w = Writer::with_capacity(body.len() + 16);
+    match name {
+        // VANILLA: ClientboundLoginPacket (1.18.2): …, кодек реестров, DimensionType (NBT целиком),
+        // ResourceLocation измерения, …, isFlat → 1.19: ResourceKey типа, + Optional lastDeathLocation.
+        "login" => {
+            r.bytes(4 + 1 + 2)?;
+            for _ in 0..r.length("levels", 1024)? {
+                r.string(32767)?;
+            }
+            let codec = nbt::read_named(&mut r)?.map(|(_, t)| t);
+            let head = r.since(0).to_vec();
+            let dim_type = nbt::read_named(&mut r)?.map(|(_, t)| t);
+            let dimension = r.string(32767)?;
+            if let (Some(c), Ok(mut g)) = (codec, DIM_ELEMENTS_1_18.lock()) {
+                *g = c
+                    .get("minecraft:dimension_type")
+                    .and_then(|d| d.get("value"))
+                    .and_then(|v| match v {
+                        Tag::List(l) => Some(l.as_slice()),
+                        _ => None,
+                    })
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|e| {
+                        Some((
+                            e.get("name")?.as_str()?.to_owned(),
+                            e.get("element")?.clone(),
+                        ))
+                    })
+                    .collect();
+            }
+            let key = dim_type_key_1_18(dim_type, &dimension);
+            w.bytes(&head)
+                .string(&key)
+                .string(&dimension)
+                .bytes(r.rest())
+                .bool(false);
+        }
+        // VANILLA: ClientboundRespawnPacket (1.18.2): DimensionType (NBT), измерение, … →
+        // 1.19: ResourceKey типа, …, + Optional lastDeathLocation.
+        "respawn" => {
+            let dim_type = nbt::read_named(&mut r)?.map(|(_, t)| t);
+            let dimension = r.string(32767)?;
+            let key = dim_type_key_1_18(dim_type, &dimension);
+            w.string(&key)
+                .string(&dimension)
+                .bytes(r.rest())
+                .bool(false);
+        }
+        // VANILLA: ClientboundAddEntityPacket (1.18.2): id, uuid, тип, xyz, xRot, yRot, int data,
+        // скорость → 1.19: + byte yHeadRot после yRot, data — varint.
+        "add_entity" => {
+            w.var_int(r.var_int()?)
+                .bytes(r.bytes(16)?)
+                .var_int(r.var_int()?);
+            w.bytes(r.bytes(24)?);
+            let (x_rot, y_rot) = (r.u8()?, r.u8()?);
+            w.u8(x_rot)
+                .u8(y_rot)
+                .u8(y_rot)
+                .var_int(r.i32()?)
+                .bytes(r.bytes(6)?);
+        }
+        // VANILLA: ClientboundAddMobPacket (1.18.2): id, uuid, varint тип, xyz, yRot, xRot,
+        // yHeadRot, скорость → add_entity (1.19) с data 0.
+        "add_mob" => {
+            w.var_int(r.var_int()?)
+                .bytes(r.bytes(16)?)
+                .var_int(r.var_int()?);
+            w.bytes(r.bytes(24)?);
+            let (y_rot, x_rot, head) = (r.u8()?, r.u8()?, r.u8()?);
+            w.u8(x_rot).u8(y_rot).u8(head).var_int(0).bytes(r.bytes(6)?);
+        }
+        // VANILLA: ClientboundAddPaintingPacket (1.18.2): id, uuid, varint motive, BlockPos,
+        // byte направление (2D) → add_entity (1.19) painting, data = направление 3D.
+        // VANILLA-UNSURE: motive не переносится (в 1.19 — PAINTING_VARIANT в entity data).
+        "add_painting" => {
+            let Some(ty) = ezzmc_protocol::version::current()
+                .entity_type
+                .iter()
+                .position(|n| *n == "painting")
+            else {
+                return Ok(None);
+            };
+            let id = r.var_int()?;
+            let uuid = r.bytes(16)?;
+            r.var_int()?;
+            let (x, y, z) = r.block_pos()?;
+            // Direction#get2DDataValue: south 0, west 1, north 2, east 3 → 3D: north 2, south 3, west 4, east 5
+            let dir = match r.u8()? & 3 {
+                0 => 3,
+                1 => 4,
+                2 => 2,
+                _ => 5,
+            };
+            w.var_int(id).bytes(uuid).var_int(ty as i32);
+            w.f64(f64::from(x) + 0.5)
+                .f64(f64::from(y) + 0.5)
+                .f64(f64::from(z) + 0.5);
+            w.u8(0).u8(0).u8(0).var_int(dir).i16(0).i16(0).i16(0);
+        }
+        // VANILLA: ClientboundBlockBreakAckPacket (1.18.2): pos, state, action, allGood;
+        // MultiPlayerGameMode#handleBlockBreakAck ставит state сервера → block_update (pos, state).
+        // VANILLA-UNSURE: ваниль ставит state только при расхождении; итог тот же — state сервера.
+        "block_break_ack" => {
+            w.bytes(r.bytes(8)?).var_int(r.var_int()?);
+        }
+        // VANILLA: ClientboundChatPacket (1.18.2): Component, byte ChatType (0 chat, 1 system,
+        // 2 game_info), UUID → system_chat (1.19): Component, varint typeId (тот же порядок).
+        "chat" => {
+            w.string(&r.string(262144)?).var_int(i32::from(r.u8()?));
+        }
+        // VANILLA: Clientbound{Sound,SoundEntity,CustomSound}Packet (1.19): + long seed.
+        "sound" | "sound_entity" | "custom_sound" => {
+            w.bytes(body).i64(0);
+        }
+        // VANILLA: ClientboundUpdateMobEffectPacket (1.19): + Nullable FactorData.
+        "update_mob_effect" => {
+            w.bytes(body).bool(false);
+        }
+        // VANILLA: ClientboundLevelParticlesPacket (1.18.2): int id типа частицы → 1.19 varint.
+        // VANILLA-UNSURE: данные vibration (1.18 — BlockPos-источник) не переводятся.
+        "level_particles" => {
+            w.var_int(r.i32()?).bytes(r.rest());
+        }
+        "add_vibration_signal" => return Ok(Some(Vec::new())),
+        _ => return Ok(None),
+    }
+    Ok(Some(w.into_vec()))
+}
+
 fn rename_1_19_2<'a>(name: &'a str, body: &[u8]) -> &'a str {
     match name {
         "player_info" if Reader::new(body).var_int().is_ok_and(|a| a == 4) => "player_info_remove",
@@ -330,7 +497,8 @@ pub fn from_1_19_2(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
                     let (mode, latency) = (r.var_int()?, r.var_int()?);
                     let display = r.optional(|r| r.string(262144))?;
                     // ProfilePublicKey.Data: instant, byte[] ключ, byte[] подпись — отбрасываем
-                    if r.bool()? {
+                    // 1.18: ключа нет совсем
+                    if !is_1_18() && r.bool()? {
                         r.i64()?;
                         let k = r.length("chat key", 512)?;
                         r.bytes(k)?;
@@ -785,6 +953,7 @@ fn enchant_names() -> Vec<String> {
         ezzmc_protocol::generated::r1_19_3::ENCHANTMENT,
         ezzmc_protocol::generated::r1_19_2::ENCHANTMENT,
         ezzmc_protocol::generated::r1_19::ENCHANTMENT,
+        ezzmc_protocol::generated::r1_18_2::ENCHANTMENT,
     ][era()];
     names.iter().map(|n| enchant_canon_name(n)).collect()
 }
@@ -949,19 +1118,24 @@ fn nbt_to_components(t: &Tag, book: bool) -> Vec<(u32, Vec<u8>)> {
     out
 }
 
-/// Сервер 1.19–1.19.4 (759–762): тот же путь, тела сначала переводятся в формат 1.20.1.
+/// Сервер 1.18–1.19.4 (757–762): тот же путь, тела сначала переводятся в формат 1.20.1.
 fn is_1_19_4() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 759..=762)
+    matches!(ezzmc_protocol::version::current().protocol, 757..=762)
 }
 
-/// Сервер 1.19–1.19.2 (759–760): тела сначала переводятся в формат 1.19.3 (`from_1_19_2`).
+/// Сервер 1.18–1.19.2 (757–760): тела сначала переводятся в формат 1.19.3 (`from_1_19_2`).
 fn is_1_19_2() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 759 | 760)
+    matches!(ezzmc_protocol::version::current().protocol, 757..=760)
 }
 
-/// Сервер 1.19 (759): тела сначала переводятся в формат 1.19.2 (`from_1_19`).
+/// Сервер 1.18–1.19 (757–759): тела сначала переводятся в формат 1.19.2 (`from_1_19`).
 fn is_1_19() -> bool {
-    ezzmc_protocol::version::current().protocol == 759
+    matches!(ezzmc_protocol::version::current().protocol, 757..=759)
+}
+
+/// Сервер 1.18–1.18.2 (757–758): тела сначала переводятся в формат 1.19 (`from_1_18_2`).
+fn is_1_18() -> bool {
+    matches!(ezzmc_protocol::version::current().protocol, 757 | 758)
 }
 
 /// Индекс версии для таблиц: 0 — 1.20.1, 1 — 1.19.4, 2 — 1.19.3, 3 — 1.19.2.
@@ -971,12 +1145,13 @@ fn era() -> usize {
         761 => 2,
         760 => 3,
         759 => 4,
+        758 => 5,
         _ => 0,
     }
 }
 
 type Remap = std::sync::OnceLock<Vec<Option<u32>>>;
-const ERAS: usize = 5;
+const ERAS: usize = 6;
 
 /// Таблица перевода id для версии `era()`, строится лениво.
 fn remap_for<'a>(
@@ -998,6 +1173,7 @@ fn item_map() -> &'static [Option<u32>] {
             ezzmc_protocol::version::V1_19_3.item,
             ezzmc_protocol::version::V1_19_2.item,
             ezzmc_protocol::version::V1_19.item,
+            ezzmc_protocol::version::V1_18_2.item,
         ],
         ezzmc_protocol::version::CANON.item,
     )
@@ -1013,6 +1189,7 @@ fn menu_map() -> &'static [Option<u32>] {
             ezzmc_protocol::generated::r1_19_3::MENU,
             ezzmc_protocol::generated::r1_19_2::MENU,
             ezzmc_protocol::generated::r1_19::MENU,
+            ezzmc_protocol::generated::r1_18_2::MENU,
         ],
         ezzmc_protocol::generated::r26_3::MENU,
     )
@@ -1051,6 +1228,7 @@ fn is_fml_open_container(body: &[u8]) -> bool {
 
 /// Имя пакета в каноне после перевода тела (клиент разбирает по имени).
 pub fn canon_name<'a>(name: &'a str, body: &[u8]) -> &'a str {
+    let name = if is_1_18() { rename_1_18(name) } else { name };
     let name = if is_1_19_2() {
         rename_1_19_2(name, body)
     } else {
@@ -1138,6 +1316,7 @@ fn hashed_to_nbt_stack(r: &mut Reader, w: &mut Writer, v1204: bool) -> ProtocolR
             ezzmc_protocol::version::V1_19_3.item,
             ezzmc_protocol::version::V1_19_2.item,
             ezzmc_protocol::version::V1_19.item,
+            ezzmc_protocol::version::V1_18_2.item,
         ];
         ezzmc_protocol::version::build_remap(ezzmc_protocol::version::CANON.item, to[k])
     });
@@ -1179,6 +1358,7 @@ fn entity_type_map() -> &'static [Option<u32>] {
             ezzmc_protocol::version::V1_19_3.entity_type,
             ezzmc_protocol::version::V1_19_2.entity_type,
             ezzmc_protocol::version::V1_19.entity_type,
+            ezzmc_protocol::version::V1_18_2.entity_type,
         ],
         ezzmc_protocol::version::CANON.entity_type,
     )
@@ -1240,6 +1420,10 @@ pub fn play_from_canon(id: i32, body: &[u8]) -> ProtocolResult<Vec<(i32, Vec<u8>
             r.bool()?;
             w.bytes(r.rest());
         }
+        // VANILLA: ServerboundPlayerActionPacket (1.18.2): без varint sequence.
+        "player_action" if is_1_18() => {
+            w.var_int(r.var_int()?).bytes(r.bytes(8 + 1)?);
+        }
         // flags (бит0 onGround, бит1 horizontalCollision) → bool onGround
         "move_player_pos"
         | "move_player_pos_rot"
@@ -1285,6 +1469,10 @@ pub fn play_from_canon(id: i32, body: &[u8]) -> ProtocolResult<Vec<(i32, Vec<u8>
         "chat" | "chat_command" if is_1_19_2() && !is_1_19() => {
             w.string(&r.string(256)?).i64(r.i64()?).i64(r.i64()?);
             w.var_int(0).bool(false).var_int(0).bool(false);
+        }
+        // VANILLA: ServerboundChatPacket (1.18.2): только строка (команда — с `/`).
+        "chat" if is_1_18() => {
+            w.string(&r.string(256)?);
         }
         // VANILLA: ServerboundChatPacket/ServerboundChatCommandPacket (1.19): строка, instant,
         // SaltSignaturePair | ArgumentSignatures (оба: long salt, затем byte[] / map), bool preview.
@@ -1347,15 +1535,20 @@ pub fn play_from_canon(id: i32, body: &[u8]) -> ProtocolResult<Vec<(i32, Vec<u8>
             w.u8(r.var_int()? as u8).u8(r.var_int()? as u8);
         }
         "use_item" => {
-            // hand, sequence, yRot, xRot → hand, sequence
-            w.var_int(r.var_int()?).var_int(r.var_int()?);
+            // hand, sequence, yRot, xRot → hand, sequence (1.18.2: только hand)
+            w.var_int(r.var_int()?);
+            if !is_1_18() {
+                w.var_int(r.var_int()?);
+            }
         }
         "use_item_on" => {
             w.var_int(r.var_int()?);
             w.bytes(r.bytes(8)?).var_int(r.var_int()?);
             w.bytes(r.bytes(12)?).bool(r.bool()?);
             r.bool()?; // worldBorderHit — в 1.20.1 нет
-            w.var_int(r.var_int()?);
+            if !is_1_18() {
+                w.var_int(r.var_int()?); // sequence (с 1.19)
+            }
         }
         _ => return Ok(Vec::new()),
     }
@@ -1442,7 +1635,16 @@ pub(crate) fn heightmap_id(name: &str) -> Option<i32> {
 
 /// Белый список clientbound-пакетов Play 1.20.1 → тело канона (`None` — отбросить).
 pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
-    let (conv00, conv0, conv);
+    let (conv18, conv00, conv0, conv);
+    let (name, body) = if is_1_18() {
+        if name == "add_vibration_signal" {
+            return Ok(None);
+        }
+        conv18 = from_1_18_2(name, body)?;
+        (rename_1_18(name), conv18.as_deref().unwrap_or(body))
+    } else {
+        (name, body)
+    };
     let body = if is_1_19() {
         conv00 = from_1_19(name, body)?;
         conv00.as_deref().unwrap_or(body)
