@@ -4,10 +4,10 @@
 //! блоков) переводятся по именам. Несовместимое значение (`Ok(false)`) вызывающий отбрасывает:
 //! компонент выпадает из патча, стек становится пустым.
 use crate::error::{ProtocolError, ProtocolResult};
-use crate::generated::{r1_21_10, r1_21_11, r1_21_5, r1_21_6, r1_21_8, r26_3 as canon};
+use crate::generated::{r1_21_10, r1_21_11, r1_21_4, r1_21_5, r1_21_6, r1_21_8, r26_3 as canon};
 use crate::item::{
-    components, components_1_21_10, components_1_21_11, components_1_21_5, components_1_21_8,
-    ClientRegistry, Shape, MAX_DEPTH,
+    components, components_1_21_10, components_1_21_11, components_1_21_4, components_1_21_5,
+    components_1_21_8, ClientRegistry, Shape, MAX_DEPTH,
 };
 use crate::version::build_remap;
 use crate::wire::{Reader, Writer};
@@ -56,6 +56,7 @@ src_names!(names_1_21_10, r1_21_10);
 src_names!(names_1_21_8, r1_21_8);
 src_names!(names_1_21_6, r1_21_6);
 src_names!(names_1_21_5, r1_21_5);
+src_names!(names_1_21_4, r1_21_4);
 
 type Names = fn(ClientRegistry) -> &'static [&'static str];
 type Comps = fn() -> &'static [&'static Shape];
@@ -92,10 +93,17 @@ const SRC_1_21_5: Source = Source {
     components: components_1_21_5,
 };
 
-/// Источник перевода для версии соединения: 770 — 1.21.5, 771 — 1.21.6, 772 — 1.21.7/1.21.8,
+/// 1.21.4: флаги showInTooltip, предикаты блоков без компонентов, Tool/Equippable короче.
+const SRC_1_21_4: Source = Source {
+    names: names_1_21_4,
+    components: components_1_21_4,
+};
+
+/// Источник перевода для версии соединения: 769 — 1.21.4, 770 — 1.21.5, 771 — 1.21.6, 772 — 1.21.7/1.21.8,
 /// 773 — 1.21.9/1.21.10, остальное — 1.21.11.
 fn source_index(protocol: i32) -> usize {
     match protocol {
+        769 => 5,
         770 => 4,
         771 => 3,
         772 => 0,
@@ -103,7 +111,14 @@ fn source_index(protocol: i32) -> usize {
         _ => 2,
     }
 }
-const SOURCES: [Source; 5] = [SRC_1_21_8, SRC_1_21_10, SRC_1_21_11, SRC_1_21_6, SRC_1_21_5];
+const SOURCES: [Source; 6] = [
+    SRC_1_21_8,
+    SRC_1_21_10,
+    SRC_1_21_11,
+    SRC_1_21_6,
+    SRC_1_21_5,
+    SRC_1_21_4,
+];
 
 fn canon_names(reg: ClientRegistry) -> &'static [&'static str] {
     match reg {
@@ -437,6 +452,13 @@ impl Translator {
                 Ok(false)
             };
         }
+        // Канон → версия со снятым позже хвостовым полем (Shape::Trailing):
+        // значение переводится, поле пишется по умолчанию.
+        if let Some(Trailing(inner, _, extra)) = d {
+            let ok = self.tr(r, w, s, Some(inner), depth)?;
+            w.bytes(extra);
+            return Ok(ok);
+        }
         // Канон → версия без поздних полей структуры (Shape::Extend): общие поля
         // переводятся, добавленные позже — пропускаются.
         if let (Struct(xs), Some(Extend(ys, _))) = (s, d) {
@@ -677,6 +699,12 @@ impl Translator {
                 w.bytes(extra);
                 Ok(ok)
             }
+            Trailing(inner, skipped, _) => {
+                // Поле старой версии, снятое позже: значение переводится, поле пропускается.
+                let ok = self.tr(r, w, inner, d, depth)?;
+                crate::item::walk(r, skipped, depth)?;
+                Ok(ok)
+            }
             Append(inner, extra) => {
                 // Поле, добавленное в каноне: исходное значение + значение по умолчанию.
                 let df = match d {
@@ -828,7 +856,7 @@ fn len(r: &mut Reader, max: usize) -> ProtocolResult<usize> {
 
 /// Пропуск патча компонентов версии соединения (для [`Shape::Stack`] в `walk`).
 pub(crate) fn skip_patch_legacy(r: &mut Reader, depth: u32) -> ProtocolResult<()> {
-    static T: [OnceLock<Translator>; 5] = [const { OnceLock::new() }; 5];
+    static T: [OnceLock<Translator>; 6] = [const { OnceLock::new() }; 6];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::new(SOURCES[k], |s| s))
         .patch(r, &mut Writer::new(), depth)?;
@@ -838,14 +866,14 @@ pub(crate) fn skip_patch_legacy(r: &mut Reader, depth: u32) -> ProtocolResult<()
 /// Переводчик версии соединения (1.21.7–1.21.11) → канон; `block_state` — перевод id
 /// состояний (ezzmc-world). Таблицы строятся один раз на версию.
 pub fn from_server(block_state: fn(u32) -> u32) -> &'static Translator {
-    static T: [OnceLock<Translator>; 5] = [const { OnceLock::new() }; 5];
+    static T: [OnceLock<Translator>; 6] = [const { OnceLock::new() }; 6];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::new(SOURCES[k], block_state))
 }
 
 /// Переводчик канон → версия соединения (пакеты клиента); `block_state` — канон → версия.
 pub fn to_server(block_state: fn(u32) -> u32) -> &'static Translator {
-    static T: [OnceLock<Translator>; 5] = [const { OnceLock::new() }; 5];
+    static T: [OnceLock<Translator>; 6] = [const { OnceLock::new() }; 6];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::build(SOURCES[k], block_state, true))
 }
@@ -1156,6 +1184,51 @@ mod tests {
                 e.into_vec().into()
             )
         );
+    }
+
+    /// 1.21.4: хвостовой showInTooltip (Shape::Trailing) пропускается, обратно — true;
+    /// Tool без canDestroyBlocksInCreative (Extend, true).
+    #[test]
+    fn show_in_tooltip_1_21_4_trailing() {
+        use crate::generated::r1_21_4 as old;
+        let back = Translator::build(SRC_1_21_4, |s| s, true);
+        let t = Translator::new(SRC_1_21_4, |s| s);
+        let check = |name: &str, old_val: Vec<u8>, canon_val: Vec<u8>, back_val: Vec<u8>| {
+            let shape = components_1_21_4()[src_id(old::DATA_COMPONENT_TYPE, name) as usize];
+            let dst = &crate::item::components()[src_id(canon::DATA_COMPONENT_TYPE, name) as usize];
+            let mut r = Reader::new(&old_val);
+            let mut o = Writer::new();
+            assert!(t.tr(&mut r, &mut o, shape, Some(dst), 0).unwrap(), "{name}");
+            assert_eq!(r.remaining(), 0);
+            assert_eq!(o.into_vec(), canon_val, "{name}");
+            let mut r = Reader::new(&canon_val);
+            let mut o = Writer::new();
+            assert!(
+                back.tr(&mut r, &mut o, dst, Some(shape), 0).unwrap(),
+                "{name}"
+            );
+            assert_eq!(r.remaining(), 0);
+            assert_eq!(o.into_vec(), back_val, "{name}");
+        };
+        // enchantments: {5: 3}, showInTooltip = false.
+        check(
+            "enchantments",
+            vec![1, 5, 3, 0],
+            vec![1, 5, 3],
+            vec![1, 5, 3, 1],
+        );
+        check("unbreakable", vec![0], vec![], vec![1]);
+        check(
+            "dyed_color",
+            vec![0, 0, 0, 7, 0],
+            vec![0, 0, 0, 7],
+            vec![0, 0, 0, 7, 1],
+        );
+        // tool: no rules, speed 1.0, damage 1.
+        let tool = vec![0, 0x3f, 0x80, 0, 0, 1];
+        let mut canon_tool = tool.clone();
+        canon_tool.push(1);
+        check("tool", tool.clone(), canon_tool, tool);
     }
 
     /// 1.21.10: частичный предикат компонента — голый id типа предиката (`Shape::Left`),

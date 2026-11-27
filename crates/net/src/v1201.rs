@@ -975,7 +975,7 @@ fn light_to_canon(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
     Ok(())
 }
 
-fn heightmap_id(name: &str) -> Option<i32> {
+pub(crate) fn heightmap_id(name: &str) -> Option<i32> {
     Some(match name {
         "WORLD_SURFACE_WG" => 0,
         "WORLD_SURFACE" => 1,

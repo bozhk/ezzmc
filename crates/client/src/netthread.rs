@@ -930,19 +930,33 @@ fn run(
         }
         // Все уже буферизованные входящие пакеты за итерацию, а не один: иначе пейсинг движения
         // (sleep до 50 мс на пакет движения) растягивает приём чанков и чата на секунды.
-        let mut inbox = vec![polled];
-        while matches!(inbox.last(), Some(Ok(Some(_)))) {
+        let mut inbox = std::collections::VecDeque::from([polled]);
+        while matches!(inbox.back(), Some(Ok(Some(_)))) {
             match c.poll(std::time::Duration::ZERO) {
                 Ok(None) => break,
-                r => inbox.push(r),
+                r => inbox.push_back(r),
             }
         }
-        for polled in inbox {
+        while let Some(polled) = inbox.pop_front() {
             let Some(p) = polled.map_err(|x| e(&x))? else {
                 continue;
             };
             let pid = p.id;
             let pname = ids.name_of(State::Play, Direction::Clientbound, p.id);
+            // Пакет старой версии без аналога в каноне → несколько пакетов той же версии.
+            match ezzmc_net::legacy::expand(pname, &p.body) {
+                Ok(None) => {}
+                Ok(Some(more)) => {
+                    for (id, body) in more.into_iter().rev() {
+                        inbox.push_front(Ok(Some(ezzmc_net::frame::Packet { id, body })));
+                    }
+                    continue;
+                }
+                Err(err) => {
+                    tracing::warn!("{pname:?}: разворот пакета версии: {err}");
+                    continue;
+                }
+            }
             // Сервер старой версии: тело → формат канона (глава 18).
             let canon_pname = (ver.protocol == 763)
                 .then(|| pname.map(|n| ezzmc_net::v1201::canon_name(n, &p.body)))

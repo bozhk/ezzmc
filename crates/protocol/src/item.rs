@@ -129,6 +129,10 @@ pub enum Shape {
     /// `TypedEntityData` (registry id, compound without `id`). Source-version
     /// shapes only.
     IdInNbt(ClientRegistry),
+    /// The inner value followed by a field that newer versions removed
+    /// (e.g. pre-1.21.5 `showInTooltip`): skipped on translation, written as
+    /// these bytes (its default) on the way back. Source-version shapes only.
+    Trailing(&'static Shape, &'static Shape, &'static [u8]),
 }
 
 use Shape::*;
@@ -243,6 +247,17 @@ static BLOCK_PREDICATE_1_21_10: Shape = Struct(&[
     Optional(&Compound),
     Ref(&COMPONENT_MATCHERS_1_21_10),
 ]);
+
+/// `BlockPredicate.STREAM_CODEC` (1.21.4): no component matchers (1.21.5
+/// appended them; default: both lists empty).
+static BLOCK_PREDICATE_1_21_4: Shape = Extend(
+    &[
+        Optional(&RegistrySet(ClientRegistry::Block)),
+        Optional(&List(UNBOUNDED, &PROPERTY_MATCHER)),
+        Optional(&Compound),
+    ],
+    &[0, 0],
+);
 
 /// `ByteBufCodecs.GAME_PROFILE_PROPERTIES`.
 static PROFILE_PROPERTIES: Shape = List(16, &Struct(&[Utf(64), Utf(32767), Optional(&Utf(1024))]));
@@ -809,20 +824,7 @@ static COMPONENTS_1_21_8: &[(&str, Shape)] = &[
 static COMPONENTS_1_21_5: &[(&str, Shape)] = &[
     // ItemAttributeModifiers.Entry (1.21.5): attribute, modifier, slot group; 1.21.6
     // appended Display (Default = id 0).
-    (
-        "attribute_modifiers",
-        List(
-            UNBOUNDED,
-            &Extend(
-                &[
-                    RegistryId(ClientRegistry::Attribute),
-                    Struct(&[IDENTIFIER, Double, VarInt]),
-                    VarInt,
-                ],
-                &[0],
-            ),
-        ),
-    ),
+    ("attribute_modifiers", Ref(&ATTRIBUTE_MODIFIERS_1_21_5)),
     // Equippable (1.21.5): no canBeSheared (default false) / shearingSound (default
     // SoundEvents.SHEARS_SNIP, appended as a direct holder by location).
     (
@@ -843,6 +845,154 @@ static COMPONENTS_1_21_5: &[(&str, Shape)] = &[
         ),
     ),
 ];
+
+static ATTRIBUTE_MODIFIERS_1_21_5: Shape = List(
+    UNBOUNDED,
+    &Extend(
+        &[
+            RegistryId(ClientRegistry::Attribute),
+            Struct(&[IDENTIFIER, Double, VarInt]),
+            VarInt,
+        ],
+        &[0],
+    ),
+);
+
+/// `TrimMaterial.STREAM_CODEC` (1.21.4): asset name, ingredient item, asset
+/// overrides, description. 1.21.5 dropped the ingredient, so an inline material
+/// does not translate (registry references do).
+static TRIM_MATERIAL_1_21_4: Shape = Holder(&Struct(&[
+    STRING,
+    RegistryId(ClientRegistry::Item),
+    Map(&IDENTIFIER, &STRING),
+    TEXT,
+]));
+
+/// `TrimPattern.STREAM_CODEC` (1.21.4): asset id, template item, description, decal.
+static TRIM_PATTERN_1_21_4: Shape = Holder(&Struct(&[
+    IDENTIFIER,
+    RegistryId(ClientRegistry::Item),
+    TEXT,
+    Bool,
+]));
+
+/// 1.21.4 → 1.21.5: `showInTooltip` booleans moved into `tooltip_display`
+/// (dropped here, default true on the way back), `hide_tooltip` /
+/// `hide_additional_tooltip` have no 1.21.5 counterpart (not translated).
+// VANILLA: ItemEnchantments, ItemAttributeModifiers, AdventureModePredicate,
+// ArmorTrim, DyedItemColor, JukeboxPlayable, Unbreakable, Tool, Equippable,
+// DataComponents.INSTRUMENT (1.21.4).
+// VANILLA-UNSURE: hidden-in-tooltip flags are not mapped to tooltip_display.
+static COMPONENTS_1_21_4: &[(&str, Shape)] = &[
+    (
+        "enchantments",
+        Trailing(&Map(&VarInt, &VarInt), &Bool, &[1]),
+    ),
+    (
+        "stored_enchantments",
+        Trailing(&Map(&VarInt, &VarInt), &Bool, &[1]),
+    ),
+    (
+        "attribute_modifiers",
+        Trailing(&ATTRIBUTE_MODIFIERS_1_21_5, &Bool, &[1]),
+    ),
+    (
+        "can_place_on",
+        Trailing(&List(UNBOUNDED, &BLOCK_PREDICATE_1_21_4), &Bool, &[1]),
+    ),
+    (
+        "can_break",
+        Trailing(&List(UNBOUNDED, &BLOCK_PREDICATE_1_21_4), &Bool, &[1]),
+    ),
+    (
+        "trim",
+        Trailing(
+            &Struct(&[Ref(&TRIM_MATERIAL_1_21_4), Ref(&TRIM_PATTERN_1_21_4)]),
+            &Bool,
+            &[1],
+        ),
+    ),
+    ("dyed_color", Trailing(&Int, &Bool, &[1])),
+    (
+        "jukebox_playable",
+        Trailing(
+            &Either(
+                &Holder(&Struct(&[Ref(&SOUND), TEXT, Float, VarInt])),
+                &IDENTIFIER,
+            ),
+            &Bool,
+            &[1],
+        ),
+    ),
+    ("unbreakable", Trailing(&Unit, &Bool, &[1])),
+    ("hide_tooltip", Unit),
+    ("hide_additional_tooltip", Unit),
+    // Tool (1.21.4): no canDestroyBlocksInCreative (default true).
+    (
+        "tool",
+        Extend(
+            &[
+                List(
+                    UNBOUNDED,
+                    &Struct(&[
+                        RegistrySet(ClientRegistry::Block),
+                        Optional(&Float),
+                        Optional(&Bool),
+                    ]),
+                ),
+                Float,
+                VarInt,
+            ],
+            &[1],
+        ),
+    ),
+    // Holder<Instrument> without EitherHolder.
+    (
+        "instrument",
+        Holder(&Struct(&[Ref(&SOUND), Float, Float, TEXT])),
+    ),
+    // Equippable (1.21.4): also no equipOnInteract (default false).
+    (
+        "equippable",
+        Extend(
+            &[
+                VarInt,
+                Ref(&SOUND),
+                Optional(&IDENTIFIER),
+                Optional(&IDENTIFIER),
+                Optional(&RegistrySet(ClientRegistry::EntityType)),
+                Bool,
+                Bool,
+                Bool,
+            ],
+            b"\x00\x00\x00\x1aminecraft:item.shears.snip\x00",
+        ),
+    ),
+];
+
+/// Component shapes of 1.21.4 by its own component type id.
+pub(crate) fn components_1_21_4() -> &'static [&'static Shape] {
+    static T: std::sync::LazyLock<Vec<&'static Shape>> = std::sync::LazyLock::new(|| {
+        crate::generated::r1_21_4::DATA_COMPONENT_TYPE
+            .iter()
+            .map(|name| {
+                [
+                    COMPONENTS_1_21_4,
+                    COMPONENTS_1_21_5,
+                    COMPONENTS_1_21_8,
+                    COMPONENTS_1_21_10,
+                    COMPONENTS_1_21_11,
+                    COMPONENTS_26_2,
+                ]
+                .iter()
+                .find_map(|layer| layer.iter().find(|(n, _)| n == name))
+                .map(|(_, s)| s)
+                .unwrap_or(&Shape::Nbt)
+            })
+            .collect()
+    });
+    &T
+}
 
 /// Component shapes of 1.21.5 by its own component type id.
 pub(crate) fn components_1_21_5() -> &'static [&'static Shape] {
@@ -1166,6 +1316,10 @@ pub fn walk(r: &mut Reader, shape: &'static Shape, depth: u32) -> ProtocolResult
             r.string(MAX_STRING_LENGTH)?;
         }
         Append(inner, _) | Left(inner) | Right(inner) => walk(r, inner, depth)?,
+        Trailing(inner, skipped, _) => {
+            walk(r, inner, depth)?;
+            walk(r, skipped, depth)?;
+        }
         Extend(fields, _) => {
             for f in *fields {
                 walk(r, f, depth)?;
