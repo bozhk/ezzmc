@@ -206,12 +206,21 @@ pub fn login(conn: &mut Connection, ids: &PacketIds, name: &str) -> NetResult<Jo
         }
         early.push(p);
     };
+    let pre17 = if is_1_17() {
+        from_1_17_1("login", &login_pkt.body)?
+    } else {
+        Pre18::Keep
+    };
+    let raw17 = match &pre17 {
+        Pre18::Replace(b) => b.as_slice(),
+        _ => &login_pkt.body,
+    };
     let pre18 = if is_1_18() {
-        from_1_18_2("login", &login_pkt.body)?
+        from_1_18_2("login", raw17)?
     } else {
         None
     };
-    let raw = pre18.as_deref().unwrap_or(&login_pkt.body);
+    let raw = pre18.as_deref().unwrap_or(raw17);
     let login_body = if is_1_19_4() {
         from_1_19_4("login", raw)?
     } else {
@@ -226,6 +235,180 @@ pub fn login(conn: &mut Connection, ids: &PacketIds, name: &str) -> NetResult<Jo
         conn.push_front(p);
     }
     Ok(Joined { profile, cfg })
+}
+
+/// Что сделать с клиентским пакетом 1.17.1.
+#[derive(Debug)]
+pub enum Pre18 {
+    /// Тело не меняется.
+    Keep,
+    /// Тело в формате 1.18.2 (имя `level_chunk` → `level_chunk_with_light`).
+    Replace(Vec<u8>),
+    /// Пакет не передаётся дальше.
+    Drop,
+}
+
+/// 1.17.x шлёт свет чанка отдельным `light_update` перед `level_chunk`.
+#[derive(Default)]
+struct Light17 {
+    /// Свет (тело после координат) ещё не пришедших чанков.
+    pending: std::collections::HashMap<(i32, i32), Vec<u8>>,
+    loaded: std::collections::HashSet<(i32, i32)>,
+}
+
+static LIGHT_17: std::sync::LazyLock<std::sync::Mutex<Light17>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Верхняя граница числа секций в `level_chunk` (высота мира ≤ 4064).
+const MAX_SECTIONS_17: usize = 254;
+
+/// Тело клиентского пакета 1.17.1 → формат 1.18.2.
+pub fn from_1_17_1(name: &str, body: &[u8]) -> ProtocolResult<Pre18> {
+    let mut r = Reader::new(body);
+    let mut w = Writer::with_capacity(body.len() + 16);
+    let mut light = LIGHT_17
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match name {
+        // VANILLA: ClientboundLoginPacket (1.17.1): после chunkRadius нет simulationDistance.
+        "login" => {
+            *light = Light17::default();
+            r.bytes(4 + 1 + 2)?;
+            for _ in 0..r.length("levels", 1024)? {
+                r.string(32767)?;
+            }
+            nbt::read_named(&mut r)?;
+            nbt::read_named(&mut r)?;
+            r.string(32767)?;
+            r.bytes(8)?;
+            r.var_int()?;
+            let radius = r.var_int()?;
+            w.bytes(r.since(0));
+            w.var_int(radius).bytes(r.rest());
+        }
+        "respawn" => {
+            *light = Light17::default();
+            return Ok(Pre18::Keep);
+        }
+        "forget_level_chunk" => {
+            let key = (r.i32()?, r.i32()?);
+            light.pending.remove(&key);
+            light.loaded.remove(&key);
+            return Ok(Pre18::Keep);
+        }
+        // VANILLA: ChunkMap#playerLoadedChunk (1.17.1) — сначала ClientboundLightUpdatePacket,
+        // затем ClientboundLevelChunkPacket; свет загруженного чанка передаётся как есть.
+        "light_update" => {
+            let key = (r.var_int()?, r.var_int()?);
+            if light.loaded.contains(&key) {
+                return Ok(Pre18::Keep);
+            }
+            light.pending.insert(key, r.rest().to_vec());
+            return Ok(Pre18::Drop);
+        }
+        "level_chunk" => {
+            let key = (r.i32()?, r.i32()?);
+            w.i32(key.0).i32(key.1);
+            chunk_1_17_to_1_18(&mut r, &mut w)?;
+            match light.pending.remove(&key) {
+                Some(l) => {
+                    w.bytes(&l);
+                }
+                // trustEdges, 4 пустых BitSet, 2 пустых списка
+                None => {
+                    w.bool(true).bytes(&[0; 6]);
+                }
+            }
+            light.loaded.insert(key);
+        }
+        _ => return Ok(Pre18::Keep),
+    }
+    Ok(Pre18::Replace(w.into_vec()))
+}
+
+/// VANILLA: ClientboundLevelChunkPacket (1.17.1): BitSet секций, NBT heightmaps, varint[] биомы
+/// (64 на секцию, индекс y<<4|z<<2|x), byte[] секции (только отмеченные), список NBT блок-энтити
+/// → 1.18: heightmaps, byte[] всех секций (блоки + биомы), список блок-энтити.
+/// VANILLA-UNSURE: блок-энтити не переносятся (путь 1.20.1 их всё равно отбрасывает).
+fn chunk_1_17_to_1_18(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    let mask = r.bitset()?;
+    let start = r.pos();
+    nbt::read_named(r)?;
+    w.bytes(r.since(start));
+    let n = r.length("chunk biomes", MAX_SECTIONS_17 * 64)?;
+    let mut biomes = Vec::with_capacity(n);
+    for _ in 0..n {
+        biomes.push(r.var_int()?);
+    }
+    let len = r.length("chunk data", 1 << 21)?;
+    let mut data = Reader::new(r.bytes(len)?);
+    let mut out = Writer::with_capacity(len + n);
+    for (i, cells) in biomes.chunks_exact(64).enumerate() {
+        let present = mask.get(i / 64).is_some_and(|l| l & (1 << (i % 64)) != 0);
+        if present {
+            // VANILLA: LevelChunkSection#write — short, byte bits, палитра (bits < 9), long[].
+            let from = data.pos();
+            data.bytes(2)?;
+            if data.u8()? < 9 {
+                for _ in 0..data.length("chunk palette", 256)? {
+                    data.var_int()?;
+                }
+            }
+            let longs = data.length("chunk longs", 4096)?;
+            data.bytes(longs * 8)?;
+            out.bytes(data.since(from));
+        } else {
+            // пустая секция: 0 блоков, палитра из одного air, без long
+            out.i16(0).u8(0).var_int(0).var_int(0);
+        }
+        biome_container(cells, &mut out);
+    }
+    let out = out.into_vec();
+    w.var_int(out.len() as i32).bytes(&out).var_int(0);
+    Ok(())
+}
+
+/// VANILLA: PalettedContainer#write (1.18) для биомов секции: одно значение / палитра ≤ 3 бит /
+/// прямые id.
+fn biome_container(cells: &[i32], w: &mut Writer) {
+    let mut palette: Vec<i32> = Vec::new();
+    for &c in cells {
+        if !palette.contains(&c) {
+            palette.push(c);
+        }
+    }
+    if let [only] = palette[..] {
+        w.u8(0).var_int(only).var_int(0);
+        return;
+    }
+    let bit_len = |v: u32| u32::BITS - v.leading_zeros();
+    let mut bits = bit_len(palette.len() as u32 - 1);
+    let direct = bits > 3;
+    if direct {
+        let max = palette.iter().map(|&v| v as u32).max().unwrap_or(0);
+        bits = bit_len(max).max(4);
+    }
+    w.u8(bits as u8);
+    if !direct {
+        w.var_int(palette.len() as i32);
+        for &p in &palette {
+            w.var_int(p);
+        }
+    }
+    let per_long = (64 / bits) as usize;
+    w.var_int(cells.len().div_ceil(per_long) as i32);
+    for chunk in cells.chunks(per_long) {
+        let mut long = 0u64;
+        for (i, &c) in chunk.iter().enumerate() {
+            let v = if direct {
+                c as u64
+            } else {
+                palette.iter().position(|&p| p == c).unwrap_or(0) as u64
+            };
+            long |= v << (i as u32 * bits);
+        }
+        w.i64(long as i64);
+    }
 }
 
 /// Тело клиентского пакета 1.19 → формат 1.19.2 (`None` — тело не меняется).
@@ -276,6 +459,13 @@ pub fn from_1_19(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
 
 /// 1.19.2 `player_info` (одно действие на пакет) → имя пакета 1.19.3: REMOVE_PLAYER (4) →
 /// `player_info_remove`, остальное → `player_info_update`.
+fn rename_1_17(name: &str) -> &str {
+    match name {
+        "level_chunk" => "level_chunk_with_light",
+        n => n,
+    }
+}
+
 fn rename_1_18(name: &str) -> &str {
     match name {
         "chat" => "system_chat",
@@ -954,6 +1144,7 @@ fn enchant_names() -> Vec<String> {
         ezzmc_protocol::generated::r1_19_2::ENCHANTMENT,
         ezzmc_protocol::generated::r1_19::ENCHANTMENT,
         ezzmc_protocol::generated::r1_18_2::ENCHANTMENT,
+        ezzmc_protocol::generated::r1_17_1::ENCHANTMENT,
     ][era()];
     names.iter().map(|n| enchant_canon_name(n)).collect()
 }
@@ -1118,27 +1309,33 @@ fn nbt_to_components(t: &Tag, book: bool) -> Vec<(u32, Vec<u8>)> {
     out
 }
 
-/// Сервер 1.18–1.19.4 (757–762): тот же путь, тела сначала переводятся в формат 1.20.1.
+/// Сервер 1.17.1–1.19.4 (756–762): тот же путь, тела сначала переводятся в формат 1.20.1.
 fn is_1_19_4() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 757..=762)
+    matches!(ezzmc_protocol::version::current().protocol, 756..=762)
 }
 
-/// Сервер 1.18–1.19.2 (757–760): тела сначала переводятся в формат 1.19.3 (`from_1_19_2`).
+/// Сервер 1.17.1–1.19.2 (756–760): тела сначала переводятся в формат 1.19.3 (`from_1_19_2`).
 fn is_1_19_2() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 757..=760)
+    matches!(ezzmc_protocol::version::current().protocol, 756..=760)
 }
 
-/// Сервер 1.18–1.19 (757–759): тела сначала переводятся в формат 1.19.2 (`from_1_19`).
+/// Сервер 1.17.1–1.19 (756–759): тела сначала переводятся в формат 1.19.2 (`from_1_19`).
 fn is_1_19() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 757..=759)
+    matches!(ezzmc_protocol::version::current().protocol, 756..=759)
 }
 
-/// Сервер 1.18–1.18.2 (757–758): тела сначала переводятся в формат 1.19 (`from_1_18_2`).
+/// Сервер 1.17.1–1.18.2 (756–758): тела сначала переводятся в формат 1.19 (`from_1_18_2`).
 fn is_1_18() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 757 | 758)
+    matches!(ezzmc_protocol::version::current().protocol, 756..=758)
 }
 
-/// Индекс версии для таблиц: 0 — 1.20.1, 1 — 1.19.4, 2 — 1.19.3, 3 — 1.19.2, 4 — 1.19, 5 — 1.18–1.18.2.
+/// Сервер 1.17.1 (756): тела сначала переводятся в формат 1.18.2 (`from_1_17_1`).
+fn is_1_17() -> bool {
+    ezzmc_protocol::version::current().protocol == 756
+}
+
+/// Индекс версии для таблиц: 0 — 1.20.1, 1 — 1.19.4, 2 — 1.19.3, 3 — 1.19.2, 4 — 1.19, 5 — 1.18–1.18.2,
+/// 6 — 1.17.1.
 fn era() -> usize {
     match ezzmc_protocol::version::current().protocol {
         762 => 1,
@@ -1147,12 +1344,13 @@ fn era() -> usize {
         759 => 4,
         // 1.18/1.18.1 (757): те же регистры item/menu/entity/enchant, что у 1.18.2
         757 | 758 => 5,
+        756 => 6,
         _ => 0,
     }
 }
 
 type Remap = std::sync::OnceLock<Vec<Option<u32>>>;
-const ERAS: usize = 6;
+const ERAS: usize = 7;
 
 /// Таблица перевода id для версии `era()`, строится лениво.
 fn remap_for<'a>(
@@ -1175,6 +1373,7 @@ fn item_map() -> &'static [Option<u32>] {
             ezzmc_protocol::version::V1_19_2.item,
             ezzmc_protocol::version::V1_19.item,
             ezzmc_protocol::version::V1_18_2.item,
+            ezzmc_protocol::version::V1_17_1.item,
         ],
         ezzmc_protocol::version::CANON.item,
     )
@@ -1192,6 +1391,7 @@ fn effect_map() -> &'static [Option<u32>] {
             ezzmc_protocol::generated::r1_19_2::MOB_EFFECT,
             ezzmc_protocol::generated::r1_19::MOB_EFFECT,
             ezzmc_protocol::generated::r1_18_2::MOB_EFFECT,
+            ezzmc_protocol::generated::r1_17_1::MOB_EFFECT,
         ],
         ezzmc_protocol::generated::r26_3::MOB_EFFECT,
     )
@@ -1208,6 +1408,7 @@ fn menu_map() -> &'static [Option<u32>] {
             ezzmc_protocol::generated::r1_19_2::MENU,
             ezzmc_protocol::generated::r1_19::MENU,
             ezzmc_protocol::generated::r1_18_2::MENU,
+            ezzmc_protocol::generated::r1_17_1::MENU,
         ],
         ezzmc_protocol::generated::r26_3::MENU,
     )
@@ -1246,6 +1447,7 @@ fn is_fml_open_container(body: &[u8]) -> bool {
 
 /// Имя пакета в каноне после перевода тела (клиент разбирает по имени).
 pub fn canon_name<'a>(name: &'a str, body: &[u8]) -> &'a str {
+    let name = if is_1_17() { rename_1_17(name) } else { name };
     let name = if is_1_18() { rename_1_18(name) } else { name };
     let name = if is_1_19_2() {
         rename_1_19_2(name, body)
@@ -1335,6 +1537,7 @@ fn hashed_to_nbt_stack(r: &mut Reader, w: &mut Writer, v1204: bool) -> ProtocolR
             ezzmc_protocol::version::V1_19_2.item,
             ezzmc_protocol::version::V1_19.item,
             ezzmc_protocol::version::V1_18_2.item,
+            ezzmc_protocol::version::V1_17_1.item,
         ];
         ezzmc_protocol::version::build_remap(ezzmc_protocol::version::CANON.item, to[k])
     });
@@ -1377,6 +1580,7 @@ fn entity_type_map() -> &'static [Option<u32>] {
             ezzmc_protocol::version::V1_19_2.entity_type,
             ezzmc_protocol::version::V1_19.entity_type,
             ezzmc_protocol::version::V1_18_2.entity_type,
+            ezzmc_protocol::version::V1_17_1.entity_type,
         ],
         ezzmc_protocol::version::CANON.entity_type,
     )
@@ -1512,8 +1716,11 @@ pub fn play_from_canon(id: i32, body: &[u8]) -> ProtocolResult<Vec<(i32, Vec<u8>
                 .bool(r.bool()?)
                 .u8(r.u8()?)
                 .var_int(r.var_int()?)
-                .bool(r.bool()?)
                 .bool(r.bool()?);
+            // VANILLA: ServerboundClientInformationPacket (1.17.1): без allowsListing.
+            if !is_1_17() {
+                w.bool(r.bool()?);
+            }
         }
         "player_command" => {
             let (eid, action, data) = (r.var_int()?, r.var_int()?, r.var_int()?);
@@ -1653,7 +1860,17 @@ pub(crate) fn heightmap_id(name: &str) -> Option<i32> {
 
 /// Белый список clientbound-пакетов Play 1.20.1 → тело канона (`None` — отбросить).
 pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
-    let (conv18, conv00, conv0, conv);
+    let (conv17, conv18, conv00, conv0, conv);
+    let (name, body) = if is_1_17() {
+        conv17 = from_1_17_1(name, body)?;
+        match &conv17 {
+            Pre18::Keep => (name, body),
+            Pre18::Replace(b) => (rename_1_17(name), b.as_slice()),
+            Pre18::Drop => return Ok(None),
+        }
+    } else {
+        (name, body)
+    };
     let (name, body) = if is_1_18() {
         if name == "add_vibration_signal" {
             return Ok(None);

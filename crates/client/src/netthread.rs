@@ -963,7 +963,7 @@ fn run(
             }
             // Сервер старой версии: тело → формат канона (глава 18).
             let canon_pname = match ver.protocol {
-                757..=763 => pname.map(|n| ezzmc_net::v1201::canon_name(n, &p.body)),
+                756..=763 => pname.map(|n| ezzmc_net::v1201::canon_name(n, &p.body)),
                 764 => pname.map(|n| ezzmc_net::legacy::canon_name_1_20_2(n, &p.body)),
                 766 | 767 => pname.map(|n| ezzmc_net::legacy::canon_name_1_21_1(n, &p.body)),
                 _ => None,
