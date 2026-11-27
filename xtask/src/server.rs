@@ -2,7 +2,8 @@
 //! Каталог `reference/_server/<ver>/` (вне git): offline-режим (`online-mode=false`), стабильный seed (обычный мир),
 //! творческий режим, мир без мобов/погоды, стабильный seed, spawn-protection=0. Запуск — на переднем плане
 //! (Ctrl+C / `stop` в консоли). Порт по умолчанию 25565. `--reset` удаляет мир (но не jar и не настройки).
-//! `--animals` — `spawn-animals=true`: до 1.21.2 сервер с `false` сразу удаляет и призванных животных.
+//! `--animals` — `spawn-animals=true` и `spawn-npcs=true`: до 1.21.2 сервер с `false` сразу удаляет
+//! и призванных животных/жителей.
 //! Принятие EULA Mojang для локального отладочного сервера записывается автоматически (`eula=true`).
 use crate::fetch_reference::Res;
 use crate::gen_reports::server_jar;
@@ -52,7 +53,9 @@ pub fn run_cmd(ver: &str, rest: &[String]) -> Res<()> {
         format!(
             "{}server-port={port}\n",
             if animals {
-                PROPERTIES.replace("spawn-animals=false", "spawn-animals=true")
+                PROPERTIES
+                    .replace("spawn-animals=false", "spawn-animals=true")
+                    .replace("spawn-npcs=false", "spawn-npcs=true")
             } else {
                 PROPERTIES.to_owned()
             }

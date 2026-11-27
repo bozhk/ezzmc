@@ -80,6 +80,112 @@ fn stack(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
 }
 
 /// Форма частиц версии соединения: 1.21–1.21.3 — `trail` без длительности (в 1.21.1 его нет).
+/// ParticleOptions версии сервера → канон. `ty` — уже прочитанный тип (1.20.4 level_particles),
+/// `spell` — цвет для entity_effect 1.20.4 (там у частицы нет данных).
+fn particle(
+    r: &mut Reader,
+    w: &mut Writer,
+    ty: Option<i32>,
+    spell: Option<u32>,
+) -> ProtocolResult<bool> {
+    if !matches!(ver(), 6..=8) {
+        return tr().value(r, w, particle_src(), &PARTICLE);
+    }
+    let ty = match ty {
+        Some(t) => t,
+        None => r.var_int()?,
+    };
+    let types = VERSIONS[ver()].particle_type;
+    let name = usize::try_from(ty).ok().and_then(|i| types.get(i)).copied();
+    let id_of = |n: &str| types.iter().position(|t| *t == n).map(|i| i as i32);
+    let v3 = |r: &mut Reader| -> ProtocolResult<i32> {
+        // VANILLA: DustParticleOptions (1.21.2) — цвет int RGB вместо Vector3f (ARGB.colorFromFloat).
+        let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as i32;
+        let (x, y, z) = (r.f32()?, r.f32()?, r.f32()?);
+        Ok(c(x) << 16 | c(y) << 8 | c(z))
+    };
+    let old = pre_1_20_5(ver());
+    let mut t = Writer::new();
+    match name {
+        Some("dust") => {
+            t.var_int(ty).i32(v3(r)?).f32(r.f32()?);
+        }
+        // 1.20.4: from, scale, to; 1.20.5–1.21.1: from, to, scale.
+        Some("dust_color_transition") if old => {
+            let (from, scale, to) = (v3(r)?, r.f32()?, v3(r)?);
+            t.var_int(ty).i32(from).i32(to).f32(scale);
+        }
+        Some("dust_color_transition") => {
+            let (from, to) = (v3(r)?, v3(r)?);
+            t.var_int(ty).i32(from).i32(to).f32(r.f32()?);
+        }
+        // VANILLA: 1.20.5 — ambient_entity_effect удалён (датафикс: entity_effect с альфой 0x26).
+        Some(n @ ("entity_effect" | "ambient_entity_effect")) if old => {
+            let Some(id) = id_of("entity_effect") else {
+                return Ok(false);
+            };
+            let c = spell.unwrap_or(0xFFFF_FFFF);
+            let c = if n == "ambient_entity_effect" {
+                (c & 0x00FF_FFFF) | 0x2600_0000
+            } else {
+                c
+            };
+            t.var_int(id).i32(c as i32);
+        }
+        // VANILLA: ItemParticleOption (1.20.4) — writeItem (NBT); сразу в канон (ItemTemplate).
+        Some("item") if old => {
+            let Some(canon) = ezzmc_protocol::generated::r26_3::PARTICLE_TYPE
+                .iter()
+                .position(|t| *t == "item")
+            else {
+                return Ok(false);
+            };
+            let mut st = Writer::new();
+            stack(r, &mut st)?;
+            let st = st.into_vec();
+            let mut sr = Reader::new(&st);
+            let count = sr.var_int()?;
+            if count <= 0 {
+                return Ok(false);
+            }
+            w.var_int(canon as i32)
+                .var_int(sr.var_int()?)
+                .var_int(count)
+                .bytes(sr.rest());
+            return Ok(true);
+        }
+        // VANILLA: PositionSourceType.toNetwork (1.20.4) — тип ResourceLocation, не id реестра.
+        Some("vibration") if old => {
+            let kind = r.string(32767)?;
+            t.var_int(ty);
+            match kind.strip_prefix("minecraft:").unwrap_or(&kind) {
+                "block" => {
+                    t.var_int(0).i64(r.i64()?);
+                }
+                "entity" => {
+                    t.var_int(1).var_int(r.var_int()?).f32(r.f32()?);
+                }
+                _ => return Ok(false),
+            }
+            t.var_int(r.var_int()?);
+        }
+        _ => {
+            // Остальные данные совпадают с 1.21.3 — дочитывает общий путь.
+            let mut t = Writer::new();
+            t.var_int(ty);
+            let head = t.into_vec();
+            let mut buf = head.clone();
+            buf.extend_from_slice(r.clone().rest());
+            let mut br = Reader::new(&buf);
+            let ok = tr().value(&mut br, w, particle_src(), &PARTICLE)?;
+            r.bytes(br.pos() - head.len())?;
+            return Ok(ok);
+        }
+    }
+    let buf = t.into_vec();
+    tr().value(&mut Reader::new(&buf), w, particle_src(), &PARTICLE)
+}
+
 fn particle_src() -> &'static Shape {
     if matches!(ver(), 5..=8) {
         &PARTICLE_1_21_3
@@ -624,13 +730,13 @@ fn entity_data_value(r: &mut Reader, w: &mut Writer, ser: &str) -> ProtocolResul
             let empty = ser == "OPTIONAL_BLOCK_STATE" && v == 0;
             w.var_int(if empty { 0 } else { state(v as u32) as i32 });
         }
-        "PARTICLE" => return tr().value(r, w, particle_src(), &PARTICLE),
+        "PARTICLE" => return particle(r, w, None, None),
         "PARTICLES" => {
             let n = r.length("particles", 1 << 12)?;
             let mut list = Writer::new();
             let mut kept = 0;
             for _ in 0..n {
-                if tr().value(r, &mut list, particle_src(), &PARTICLE)? {
+                if particle(r, &mut list, None, None)? {
                     kept += 1;
                 }
             }
@@ -922,6 +1028,46 @@ fn set_entity_data(r: &mut Reader, w: &mut Writer, k: usize) -> ProtocolResult<(
                 value: src.into(),
             },
         )?;
+        if pre_1_20_5(k) {
+            // VANILLA: 1.20.4 → 1.20.5 — у LivingEntity DATA_EFFECT_COLOR_ID (#10, INT) стал
+            // DATA_EFFECT_PARTICLES (список ColorParticleOption entity_effect); у AreaEffectCloud
+            // убран DATA_COLOR (#9); у Llama убран DATA_SWAG_ID (#20, ковёр ушёл в снаряжение).
+            // VANILLA-UNSURE: цвет облака и ковёр ламы не переносятся.
+            let living_color = idx == 10
+                && *ser == "INT"
+                && ty != "arrow"
+                && ty != "area_effect_cloud"
+                && !ty.ends_with("_display");
+            if living_color {
+                let c = r.var_int()?;
+                w.u8(layout.index(idx))
+                    .var_int(canon_of("PARTICLES") as i32);
+                let effect = ezzmc_protocol::generated::r26_3::PARTICLE_TYPE
+                    .iter()
+                    .position(|t| *t == "entity_effect");
+                match effect {
+                    Some(e) if c != 0 => {
+                        w.var_int(1)
+                            .var_int(e as i32)
+                            .i32(c | 0xFF00_0000_u32 as i32);
+                    }
+                    _ => {
+                        w.var_int(0);
+                    }
+                }
+                continue;
+            }
+            let i = match (ty, idx) {
+                ("area_effect_cloud", 9) | ("llama" | "trader_llama", 20) => None,
+                ("area_effect_cloud", 10 | 11) | ("llama" | "trader_llama", 21) => Some(idx - 1),
+                _ => Some(idx),
+            };
+            let Some(i) = i else {
+                entity_data_value(r, &mut Writer::new(), ser)?;
+                continue;
+            };
+            idx = i;
+        }
         if pre_1_21_5(k) {
             let i = if pre_1_21_2(k) {
                 index_1_21_1(ty, idx)
@@ -1316,6 +1462,34 @@ fn clientbound_id(name: &str) -> Option<i32> {
 }
 
 /// VANILLA: ItemCost.STREAM_CODEC — предмет, количество, DataComponentExactPredicate.
+/// Стек версии сервера → канонический ItemStack (байты).
+fn stack_vec(r: &mut Reader) -> ProtocolResult<Vec<u8>> {
+    let mut st = Writer::new();
+    stack(r, &mut st)?;
+    Ok(st.into_vec())
+}
+
+/// Канонический ItemStack → ItemCost (item, count, DataComponentExactPredicate = добавленные
+/// компоненты патча). `false` — пустой стек.
+// VANILLA-UNSURE: удалённые компоненты патча в предикат не попадают (в NBT 1.20.4 их нет).
+fn item_cost_from_canon(stack: &[u8], w: &mut Writer) -> ProtocolResult<bool> {
+    let mut r = Reader::new(stack);
+    let count = r.var_int()?;
+    if count <= 0 {
+        return Ok(false);
+    }
+    let item = r.var_int()?;
+    let added = r.var_int()?;
+    let removed = r.var_int()?;
+    w.var_int(item).var_int(count);
+    if removed == 0 {
+        w.var_int(added).bytes(r.rest());
+    } else {
+        w.var_int(0);
+    }
+    Ok(true)
+}
+
 static ITEM_COST: Shape = Shape::Struct(&[
     Shape::RegistryId(ClientRegistry::Item),
     Shape::VarInt,
@@ -1640,24 +1814,44 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
         }
         // VANILLA: ClientboundSetPlayerTeamPacket.Parameters (1.21.4): nametagVisibility и
         // collisionRule — строки (readUtf(40)); 1.21.5 — Team.Visibility/CollisionRule по id.
-        "set_player_team" if pre_1_21_5(ver()) => {
+        // VANILLA: ClientboundSetPlayerTeamPacket.Parameters — до 26.x: displayName, options,
+        // nametagVisibility, collisionRule (до 1.21.5 строки, затем id), color (ChatFormatting),
+        // prefix, suffix; 26.3: displayName, prefix, suffix, visibility, collision,
+        // Optional<TeamColor> (id 0..15 = цвета ChatFormatting; RESET и форматы → пусто), options.
+        "set_player_team" => {
             w.string(&r.string(32767)?);
             let method = r.u8()?;
             w.u8(method);
             if matches!(method, 0 | 2) {
                 let text = r.pos();
                 ezzmc_protocol::nbt::read_network(&mut r)?;
-                w.bytes(r.since(text)).u8(r.u8()?);
-                let vis = r.string(40)?;
-                let col = r.string(40)?;
-                let vis = ["always", "never", "hideForOtherTeams", "hideForOwnTeam"]
-                    .iter()
-                    .position(|n| *n == vis);
-                let col = ["always", "never", "pushOtherTeams", "pushOwnTeam"]
-                    .iter()
-                    .position(|n| *n == col);
-                w.var_int(vis.unwrap_or(0) as i32)
-                    .var_int(col.unwrap_or(0) as i32);
+                let display = r.since(text).to_vec();
+                let options = r.u8()?;
+                let (vis, col) = if pre_1_21_5(ver()) {
+                    let vis = r.string(40)?;
+                    let col = r.string(40)?;
+                    let vis = ["always", "never", "hideForOtherTeams", "hideForOwnTeam"]
+                        .iter()
+                        .position(|n| *n == vis);
+                    let col = ["always", "never", "pushOtherTeams", "pushOwnTeam"]
+                        .iter()
+                        .position(|n| *n == col);
+                    (vis.unwrap_or(0) as i32, col.unwrap_or(0) as i32)
+                } else {
+                    (r.var_int()?, r.var_int()?)
+                };
+                let color = r.var_int()?;
+                let text = r.pos();
+                ezzmc_protocol::nbt::read_network(&mut r)?;
+                ezzmc_protocol::nbt::read_network(&mut r)?;
+                w.bytes(&display).bytes(r.since(text));
+                w.var_int(vis).var_int(col);
+                if (0..16).contains(&color) {
+                    w.bool(true).var_int(color);
+                } else {
+                    w.bool(false);
+                }
+                w.u8(options);
             }
             w.bytes(r.rest());
         }
@@ -1839,6 +2033,22 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
             let n = r.length("merchant offers", 1 << 10)?;
             w.var_int(n as i32);
             for _ in 0..n {
+                // VANILLA: MerchantOffers#writeToStream (1.20.4) — writeItem costA, result, costB
+                // (пустой стек = нет второй цены), затем те же поля, что и в 1.20.5+.
+                if pre_1_20_5(ver()) {
+                    let (a, res, b) = (stack_vec(&mut r)?, stack_vec(&mut r)?, stack_vec(&mut r)?);
+                    if !item_cost_from_canon(&a, &mut w)? {
+                        return Ok(Some(Vec::new()));
+                    }
+                    w.bytes(&res);
+                    let has_b = b.first().is_some_and(|c| *c != 0);
+                    w.bool(has_b);
+                    if has_b && !item_cost_from_canon(&b, &mut w)? {
+                        return Ok(Some(Vec::new()));
+                    }
+                    w.bytes(r.bytes(1 + 4 * 6)?);
+                    continue;
+                }
                 if !tr().value(&mut r, &mut w, &ITEM_COST, &ITEM_COST)? {
                     return Ok(Some(Vec::new()));
                 }
@@ -1859,6 +2069,12 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
         "level_particles" => {
             // VANILLA: ClientboundLevelParticlesPacket (1.21.4) — overrideLimiter, alwaysShow;
             // в 1.21.3 только overrideLimiter (LevelRenderer#addParticle с alwaysShow = false).
+            // VANILLA: ClientboundLevelParticlesPacket#write (1.20.4) — тип частицы первым полем.
+            let ty = if pre_1_20_5(ver()) {
+                Some(r.var_int()?)
+            } else {
+                None
+            };
             let flags: &[u8] = if matches!(ver(), 5..=8) {
                 &[r.u8()?, 0]
             } else {
@@ -1868,7 +2084,19 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
             let dist = r.bytes(12)?;
             let speed = r.f32()?;
             let count = r.i32()?;
-            if !tr().value(&mut r, &mut w, particle_src(), &PARTICLE)? {
+            // VANILLA: ClientPacketListener#handleParticleEvent (1.20.4) — при count == 0
+            // скорость = dist * speed; MobEffect-частицы берут её как цвет (SpellParticle.MobProvider).
+            let spell = {
+                let mut d = Reader::new(dist);
+                let (x, y, z) = (d.f32()?, d.f32()?, d.f32()?);
+                let c = |v: f32| (v * speed * 255.0).clamp(0.0, 255.0) as u32;
+                if count == 0 {
+                    0xFF00_0000 | c(x) << 16 | c(y) << 8 | c(z)
+                } else {
+                    0xFFFF_FFFF
+                }
+            };
+            if !particle(&mut r, &mut w, ty, Some(spell))? {
                 return Ok(Some(Vec::new()));
             }
             w.bytes(flags).bytes(pos).bytes(dist);
@@ -1900,9 +2128,9 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
                 });
             }
             let mut small = Writer::new();
-            let small_ok = tr().value(&mut r, &mut small, particle_src(), &PARTICLE)?;
+            let small_ok = particle(&mut r, &mut small, None, None)?;
             let mut large = Writer::new();
-            let large_ok = tr().value(&mut r, &mut large, particle_src(), &PARTICLE)?;
+            let large_ok = particle(&mut r, &mut large, None, None)?;
             let (ok, part) = if power >= 2.0 && interacts {
                 (large_ok, large)
             } else {
@@ -1947,7 +2175,7 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
             let mut kept = 0;
             for _ in 0..n {
                 let mut one = Writer::new();
-                let ok = tr().value(&mut r, &mut one, particle_src(), &PARTICLE)?;
+                let ok = particle(&mut r, &mut one, None, None)?;
                 one.bytes(r.bytes(8)?).var_int(r.var_int()?);
                 if ok {
                     list.bytes(&one.into_vec());
