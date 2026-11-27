@@ -192,6 +192,7 @@ impl Connection {
         let deadline = Instant::now() + READ_TIMEOUT;
         loop {
             if let Some(p) = self.codec.next_packet()? {
+                self.auto_reply(&p)?;
                 return Ok(p);
             }
             let left = deadline.saturating_duration_since(Instant::now());
@@ -230,6 +231,7 @@ impl Connection {
         let deadline = Instant::now() + wait;
         loop {
             if let Some(p) = self.codec.next_packet()? {
+                self.auto_reply(&p)?;
                 return Ok(Some(p));
             }
             let left = deadline
@@ -256,9 +258,23 @@ impl Connection {
                 Err(e) => return Err(e.into()),
             }
             if Instant::now() >= deadline {
-                return self.codec.next_packet();
+                let p = self.codec.next_packet()?;
+                if let Some(p) = &p {
+                    self.auto_reply(p)?;
+                }
+                return Ok(p);
             }
         }
+    }
+
+    /// 1.16.5: подтверждение отклонённой транзакции окна (нужно и античитам).
+    fn auto_reply(&mut self, p: &Packet) -> NetResult<()> {
+        if self.state == State::Play && ezzmc_protocol::version::current().protocol == 754 {
+            if let Some((id, body)) = crate::v1165::ack_reply(p.id, &p.body) {
+                self.send_raw(id, &body)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn close(&self) {

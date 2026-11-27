@@ -938,6 +938,11 @@ pub(crate) fn dimension_to_canon(t: Tag) -> Tag {
         .find(|(k, _)| k == "effects")
         .and_then(|(_, t)| t.as_str().map(str::to_owned))
         .unwrap_or_default();
+    // 1.16.5: в типе измерения нет высоты мира — всегда 0..256.
+    if !v.iter().any(|(k, _)| k == "min_y") {
+        put(&mut v, "min_y", Tag::Int(0));
+        put(&mut v, "height", Tag::Int(256));
+    }
     put(&mut v, "has_fixed_time", Tag::Byte(i8::from(fixed)));
     let (sky, card) = match fx.trim_start_matches("minecraft:") {
         "the_end" => ("end", "default"),
@@ -1174,6 +1179,7 @@ fn enchant_names() -> Vec<String> {
         ezzmc_protocol::generated::r1_19::ENCHANTMENT,
         ezzmc_protocol::generated::r1_18_2::ENCHANTMENT,
         ezzmc_protocol::generated::r1_17_1::ENCHANTMENT,
+        ezzmc_protocol::generated::r1_16_5::ENCHANTMENT,
     ][era()];
     names.iter().map(|n| enchant_canon_name(n)).collect()
 }
@@ -1340,31 +1346,31 @@ fn nbt_to_components(t: &Tag, book: bool) -> Vec<(u32, Vec<u8>)> {
 
 /// Сервер 1.17–1.19.4 (755–762): тот же путь, тела сначала переводятся в формат 1.20.1.
 fn is_1_19_4() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 755..=762)
+    matches!(ezzmc_protocol::version::current().protocol, 754..=762)
 }
 
 /// Сервер 1.17–1.19.2 (755–760): тела сначала переводятся в формат 1.19.3 (`from_1_19_2`).
 fn is_1_19_2() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 755..=760)
+    matches!(ezzmc_protocol::version::current().protocol, 754..=760)
 }
 
 /// Сервер 1.17–1.19 (755–759): тела сначала переводятся в формат 1.19.2 (`from_1_19`).
 fn is_1_19() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 755..=759)
+    matches!(ezzmc_protocol::version::current().protocol, 754..=759)
 }
 
 /// Сервер 1.17–1.18.2 (755–758): тела сначала переводятся в формат 1.19 (`from_1_18_2`).
 fn is_1_18() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 755..=758)
+    matches!(ezzmc_protocol::version::current().protocol, 754..=758)
 }
 
 /// Сервер 1.17/1.17.1 (755/756): тела сначала переводятся в формат 1.18.2 (`from_1_17_1`).
 fn is_1_17() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 755 | 756)
+    matches!(ezzmc_protocol::version::current().protocol, 754..=756)
 }
 
 /// Индекс версии для таблиц: 0 — 1.20.1, 1 — 1.19.4, 2 — 1.19.3, 3 — 1.19.2, 4 — 1.19, 5 — 1.18–1.18.2,
-/// 6 — 1.17–1.17.1.
+/// 6 — 1.17–1.17.1, 7 — 1.16.5.
 fn era() -> usize {
     match ezzmc_protocol::version::current().protocol {
         762 => 1,
@@ -1375,12 +1381,13 @@ fn era() -> usize {
         757 | 758 => 5,
         // 1.17 (755): регистры совпадают с 1.17.1
         755 | 756 => 6,
+        754 => 7,
         _ => 0,
     }
 }
 
 type Remap = std::sync::OnceLock<Vec<Option<u32>>>;
-const ERAS: usize = 7;
+const ERAS: usize = 8;
 
 /// Таблица перевода id для версии `era()`, строится лениво.
 fn remap_for<'a>(
@@ -1404,6 +1411,7 @@ fn item_map() -> &'static [Option<u32>] {
             ezzmc_protocol::version::V1_19.item,
             ezzmc_protocol::version::V1_18_2.item,
             ezzmc_protocol::version::V1_17_1.item,
+            ezzmc_protocol::version::V1_16_5.item,
         ],
         ezzmc_protocol::version::CANON.item,
     )
@@ -1422,6 +1430,7 @@ fn effect_map() -> &'static [Option<u32>] {
             ezzmc_protocol::generated::r1_19::MOB_EFFECT,
             ezzmc_protocol::generated::r1_18_2::MOB_EFFECT,
             ezzmc_protocol::generated::r1_17_1::MOB_EFFECT,
+            ezzmc_protocol::generated::r1_16_5::MOB_EFFECT,
         ],
         ezzmc_protocol::generated::r26_3::MOB_EFFECT,
     )
@@ -1439,6 +1448,7 @@ fn menu_map() -> &'static [Option<u32>] {
             ezzmc_protocol::generated::r1_19::MENU,
             ezzmc_protocol::generated::r1_18_2::MENU,
             ezzmc_protocol::generated::r1_17_1::MENU,
+            ezzmc_protocol::generated::r1_16_5::MENU,
         ],
         ezzmc_protocol::generated::r26_3::MENU,
     )
@@ -1568,6 +1578,7 @@ fn hashed_to_nbt_stack(r: &mut Reader, w: &mut Writer, v1204: bool) -> ProtocolR
             ezzmc_protocol::version::V1_19.item,
             ezzmc_protocol::version::V1_18_2.item,
             ezzmc_protocol::version::V1_17_1.item,
+            ezzmc_protocol::version::V1_16_5.item,
         ];
         ezzmc_protocol::version::build_remap(ezzmc_protocol::version::CANON.item, to[k])
     });
@@ -1611,6 +1622,7 @@ fn entity_type_map() -> &'static [Option<u32>] {
             ezzmc_protocol::version::V1_19.entity_type,
             ezzmc_protocol::version::V1_18_2.entity_type,
             ezzmc_protocol::version::V1_17_1.entity_type,
+            ezzmc_protocol::version::V1_16_5.entity_type,
         ],
         ezzmc_protocol::version::CANON.entity_type,
     )
@@ -1653,7 +1665,11 @@ fn name_of_id(id: i32) -> Option<&'static str> {
         .packets
         .iter()
         .find(|p| p.state == State::Play && p.dir == Direction::Serverbound && p.id as i32 == id)
-        .map(|p| p.name)
+        .map(|p| match p.name {
+            // 1.16.5: ServerboundMovePlayerPacket (только onGround) называется без суффикса.
+            "move_player" => "move_player_status_only",
+            n => n,
+        })
 }
 
 /// Пакет Play, собранный клиентом в формате канона (id уже из таблицы 1.20.1) → список
@@ -1747,9 +1763,14 @@ pub fn play_from_canon(id: i32, body: &[u8]) -> ProtocolResult<Vec<(i32, Vec<u8>
                 .u8(r.u8()?)
                 .var_int(r.var_int()?)
                 .bool(r.bool()?);
-            // VANILLA: ServerboundClientInformationPacket (1.17.1): без allowsListing.
+            // VANILLA: ServerboundClientInformationPacket (1.17.1): без allowsListing;
+            // 1.16.5 — ещё и без textFiltering.
             if !is_1_17() {
                 w.bool(r.bool()?);
+            } else if ezzmc_protocol::version::current().protocol == 754 {
+                let mut out = w.into_vec();
+                out.pop();
+                return Ok(vec![(id, out)]);
             }
         }
         "player_command" => {
@@ -1770,6 +1791,21 @@ pub fn play_from_canon(id: i32, body: &[u8]) -> ProtocolResult<Vec<(i32, Vec<u8>
                 .map(|i| (i, w.into_vec()))
                 .into_iter()
                 .collect());
+        }
+        "container_click" if ezzmc_protocol::version::current().protocol == 754 => {
+            let (win, _state) = (r.var_int()?, r.var_int()?);
+            let (slot, button, mode) = (r.i16()?, r.u8()?, r.var_int()?);
+            let n = r.length("changed slots", 128)?;
+            let mut changed = Vec::with_capacity(n);
+            for _ in 0..n {
+                let s = r.i16()?;
+                let mut stack = Writer::new();
+                hashed_to_1201(&mut r, &mut stack)?;
+                changed.push((s, stack.into_vec()));
+            }
+            w.bytes(&crate::v1165::container_click(
+                win as u8, slot, button, mode, changed,
+            ));
         }
         "container_click" => {
             let (win, state) = (r.var_int()?, r.var_int()?);
@@ -1893,8 +1929,19 @@ pub(crate) fn heightmap_id(name: &str) -> Option<i32> {
 
 /// Белый список clientbound-пакетов Play 1.20.1 → тело канона (`None` — отбросить).
 pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
-    let (conv755, conv17, conv18, conv00, conv0, conv);
-    let (name, body) = if ezzmc_protocol::version::current().protocol == 755 {
+    let (conv754, conv755, conv17, conv18, conv00, conv0, conv);
+    let (name, body) = if ezzmc_protocol::version::current().protocol == 754 {
+        conv754 = crate::v1165::from_1_16_5(name, body)?;
+        match &conv754 {
+            Pre18::Keep => (name, body),
+            Pre18::Replace(b) => (name, b.as_slice()),
+            Pre18::Drop => return Ok(None),
+        }
+    } else {
+        (name, body)
+    };
+    // 1.16.5 и 1.17: окна без stateId, одиночный/списковый remove — формат до 1.17.1.
+    let (name, body) = if ezzmc_protocol::version::current().protocol <= 755 {
         conv755 = from_1_17(name, body)?;
         match &conv755 {
             Some((n, b)) => (*n, b.as_slice()),

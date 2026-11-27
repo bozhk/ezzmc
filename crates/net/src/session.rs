@@ -26,9 +26,14 @@ impl PacketIds {
         Self::new(v.packets)
     }
     pub fn get(&self, state: State, dir: Direction, name: &str) -> NetResult<i32> {
-        self.table
-            .iter()
-            .find(|p| p.state == state && p.dir == dir && p.name == name)
+        let find = |name| {
+            self.table
+                .iter()
+                .find(|p| p.state == state && p.dir == dir && p.name == name)
+        };
+        find(name)
+            // 1.16.5: ServerboundMovePlayerPacket (только onGround) называется без суффикса.
+            .or_else(|| (name == "move_player_status_only").then(|| find("move_player"))?)
             .map(|p| p.id as i32)
             .ok_or_else(|| {
                 ProtocolError::Other(format!("нет пакета {state:?}/{dir:?}/{name}")).into()

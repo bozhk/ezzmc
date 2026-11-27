@@ -3,8 +3,8 @@
 //! канонического блока, нет блока вовсе → воздух (VANILLA-UNSURE: ViaVersion подставляет замены).
 use crate::block::{decode_state, BlockInfo};
 use crate::generated::{
-    b1_17_1, b1_18_2, b1_19, b1_19_2, b1_19_3, b1_19_4, b1_20_1, b1_20_2, b1_20_4, b1_21_1,
-    b1_21_11, b1_21_3, b1_21_4, b1_21_5, b1_21_8, b26_3,
+    b1_16_5, b1_17_1, b1_18_2, b1_19, b1_19_2, b1_19_3, b1_19_4, b1_20_1, b1_20_2, b1_20_4,
+    b1_21_1, b1_21_11, b1_21_3, b1_21_4, b1_21_5, b1_21_8, b26_3,
 };
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -20,7 +20,20 @@ pub fn build_state_map(from: &'static [BlockInfo], to: &'static [BlockInfo]) -> 
             continue;
         };
         let old = &from[bi];
-        let Some(new) = by_name.get(old.name) else {
+        // 1.17: grass_path → dirt_path; непустой котёл стал water_cauldron.
+        let level = old
+            .props
+            .iter()
+            .position(|p| p.name == "level")
+            .map(|k| old.props[k].values[idx[k] as usize]);
+        let name = match old.name {
+            "grass_path" => "dirt_path",
+            "dirt_path" if !by_name.contains_key("dirt_path") => "grass_path",
+            "cauldron" if level.is_some_and(|l| l != "0") => "water_cauldron",
+            "water_cauldron" if !by_name.contains_key("water_cauldron") => "cauldron",
+            n => n,
+        };
+        let Some(new) = by_name.get(name) else {
             out.push(0);
             continue;
         };
@@ -98,6 +111,11 @@ fn table_1_18_2() -> &'static [u32] {
     T.get_or_init(|| build_state_map(b1_18_2::BLOCKS, b26_3::BLOCKS))
 }
 
+fn table_1_16_5() -> &'static [u32] {
+    static T: OnceLock<Vec<u32>> = OnceLock::new();
+    T.get_or_init(|| build_state_map(b1_16_5::BLOCKS, b26_3::BLOCKS))
+}
+
 fn table_1_17_1() -> &'static [u32] {
     static T: OnceLock<Vec<u32>> = OnceLock::new();
     T.get_or_init(|| build_state_map(b1_17_1::BLOCKS, b26_3::BLOCKS))
@@ -162,6 +180,7 @@ pub fn state_to_canon(id: u32) -> u32 {
     // 1.21.5 — ещё и без dried_ghast.
     let t = match v.protocol {
         757 | 758 => table_1_18_2(),
+        754 => table_1_16_5(),
         755 | 756 => table_1_17_1(),
         759 => table_1_19(),
         760 => table_1_19_2(),
@@ -198,7 +217,9 @@ pub fn state_from_canon(id: u32) -> u32 {
     static T19: OnceLock<Vec<u32>> = OnceLock::new();
     static T1182: OnceLock<Vec<u32>> = OnceLock::new();
     static T1171: OnceLock<Vec<u32>> = OnceLock::new();
+    static T1165: OnceLock<Vec<u32>> = OnceLock::new();
     let t = match ezzmc_protocol::version::current().protocol {
+        754 => T1165.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_16_5::BLOCKS)),
         755 | 756 => T1171.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_17_1::BLOCKS)),
         759 => T19.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_19::BLOCKS)),
         757 | 758 => T1182.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_18_2::BLOCKS)),
