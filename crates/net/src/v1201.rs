@@ -173,7 +173,7 @@ pub fn login(conn: &mut Connection, ids: &PacketIds, name: &str) -> NetResult<Jo
                     conn.send(ids.get(State::Login, S, "custom_query")?, &reply)?;
                 }
             }
-            Some("login_finished") => {
+            Some("login_finished" | "game_profile") => {
                 // 1.20.1: uuid, имя (без свойств)
                 let mut r = Reader::new(&p.body);
                 let id = r.uuid()?;
@@ -606,11 +606,11 @@ fn enchant_names() -> Vec<String> {
     if let Some(fml) = ezzmc_world::modded::server_names("minecraft:enchantment") {
         return fml.iter().map(|n| enchant_canon_name(n)).collect();
     }
-    let names: &[&str] = if is_1_19_4() {
-        ezzmc_protocol::generated::r1_19_4::ENCHANTMENT
-    } else {
-        ezzmc_protocol::generated::r1_20_1::ENCHANTMENT
-    };
+    let names: &[&str] = [
+        ezzmc_protocol::generated::r1_20_1::ENCHANTMENT,
+        ezzmc_protocol::generated::r1_19_4::ENCHANTMENT,
+        ezzmc_protocol::generated::r1_19_3::ENCHANTMENT,
+    ][era()];
     names.iter().map(|n| enchant_canon_name(n)).collect()
 }
 
@@ -774,42 +774,54 @@ fn nbt_to_components(t: &Tag, book: bool) -> Vec<(u32, Vec<u8>)> {
     out
 }
 
-/// Сервер 1.19.4 (762) — тот же путь, свои реестры.
+/// Сервер 1.19.3/1.19.4 (761/762): тот же путь, тела сначала переводятся в формат 1.20.1.
 fn is_1_19_4() -> bool {
-    ezzmc_protocol::version::current().protocol == 762
+    matches!(ezzmc_protocol::version::current().protocol, 761 | 762)
+}
+
+/// Индекс версии для таблиц: 0 — 1.20.1, 1 — 1.19.4, 2 — 1.19.3.
+fn era() -> usize {
+    match ezzmc_protocol::version::current().protocol {
+        762 => 1,
+        761 => 2,
+        _ => 0,
+    }
 }
 
 type Remap = std::sync::OnceLock<Vec<Option<u32>>>;
+const ERAS: usize = 3;
 
-/// Таблица перевода id для 1.20.1 (`t[0]`) или 1.19.4 (`t[1]`), строится лениво.
+/// Таблица перевода id для версии `era()`, строится лениво.
 fn remap_for<'a>(
-    t: &'a [Remap; 2],
-    from: [&'static [&'static str]; 2],
+    t: &'a [Remap; ERAS],
+    from: [&'static [&'static str]; ERAS],
     to: &'static [&'static str],
 ) -> &'a [Option<u32>] {
-    let k = usize::from(is_1_19_4());
+    let k = era();
     t[k].get_or_init(|| ezzmc_protocol::version::build_remap(from[k], to))
 }
 
 fn item_map() -> &'static [Option<u32>] {
-    static T: [Remap; 2] = [Remap::new(), Remap::new()];
+    static T: [Remap; ERAS] = [const { Remap::new() }; ERAS];
     remap_for(
         &T,
         [
             ezzmc_protocol::version::V1_20_1.item,
             ezzmc_protocol::version::V1_19_4.item,
+            ezzmc_protocol::version::V1_19_3.item,
         ],
         ezzmc_protocol::version::CANON.item,
     )
 }
 
 fn menu_map() -> &'static [Option<u32>] {
-    static T: [Remap; 2] = [Remap::new(), Remap::new()];
+    static T: [Remap; ERAS] = [const { Remap::new() }; ERAS];
     remap_for(
         &T,
         [
             ezzmc_protocol::generated::r1_20_1::MENU,
             ezzmc_protocol::generated::r1_19_4::MENU,
+            ezzmc_protocol::generated::r1_19_3::MENU,
         ],
         ezzmc_protocol::generated::r26_3::MENU,
     )
@@ -921,12 +933,13 @@ fn hashed_to_nbt_stack(r: &mut Reader, w: &mut Writer, v1204: bool) -> ProtocolR
     for _ in 0..r.length("hashed removed", 256)? {
         r.var_int()?;
     }
-    static BACK: [Remap; 2] = [Remap::new(), Remap::new()];
-    let k = usize::from(is_1_19_4());
+    static BACK: [Remap; ERAS] = [const { Remap::new() }; ERAS];
+    let k = era();
     let back = BACK[k].get_or_init(|| {
         let to = [
             ezzmc_protocol::version::V1_20_1.item,
             ezzmc_protocol::version::V1_19_4.item,
+            ezzmc_protocol::version::V1_19_3.item,
         ];
         ezzmc_protocol::version::build_remap(ezzmc_protocol::version::CANON.item, to[k])
     });
@@ -959,12 +972,13 @@ static PLAYER_TYPE: std::sync::LazyLock<Option<usize>> = std::sync::LazyLock::ne
 });
 
 fn entity_type_map() -> &'static [Option<u32>] {
-    static T: [Remap; 2] = [Remap::new(), Remap::new()];
+    static T: [Remap; ERAS] = [const { Remap::new() }; ERAS];
     remap_for(
         &T,
         [
             ezzmc_protocol::version::V1_20_1.entity_type,
             ezzmc_protocol::version::V1_19_4.entity_type,
+            ezzmc_protocol::version::V1_19_3.entity_type,
         ],
         ezzmc_protocol::version::CANON.entity_type,
     )
@@ -995,14 +1009,16 @@ static PLAYER_ID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::n
 static SHIFT_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn id_of(name: &str) -> Option<i32> {
-    ezzmc_protocol::generated::v1_20_1::PACKETS
+    ezzmc_protocol::version::current()
+        .packets
         .iter()
         .find(|p| p.state == State::Play && p.dir == Direction::Serverbound && p.name == name)
         .map(|p| p.id as i32)
 }
 
 fn name_of_id(id: i32) -> Option<&'static str> {
-    ezzmc_protocol::generated::v1_20_1::PACKETS
+    ezzmc_protocol::version::current()
+        .packets
         .iter()
         .find(|p| p.state == State::Play && p.dir == Direction::Serverbound && p.id as i32 == id)
         .map(|p| p.name)

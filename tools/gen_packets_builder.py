@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Таблица id пакетов для версий без reports/packets.json.
 1.20.5/1.20.6: порядок addPacket в *Protocols.java, имена из create{Client,Server}bound("...") в *PacketTypes.java.
-1.20.2–1.20.4 (`--legacy <ver-с-именами>`): порядок addPacket(Класс.class, ...) в ConnectionProtocol.java,
+1.19.3–1.20.4 (`--legacy <ver-с-именами>`): порядок addPacket(Класс.class, ...) в ConnectionProtocol.java,
 имя пакета — по классу из *Protocols.java версии-донора (обычно 1.20.6); нет класса у донора → snake_case класса
 (печатается, проверить руками).
 Использование: tools/gen_packets_builder.py <ver> [--legacy 1.20.6]  → crates/protocol/src/generated/v<ver>.rs"""
@@ -58,7 +58,9 @@ def legacy_rows(ver, donor):
     heads = list(re.finditer(r'^   (HANDSHAKING|PLAY|STATUS|LOGIN|CONFIGURATION)\(', src, re.M))
     rows = []
     for k, h in enumerate(heads):
-        end = heads[k + 1].start() if k + 1 < len(heads) else src.index('NOT_REGISTERED')
+        # конец последнего состояния: NOT_REGISTERED (1.20.2+) или закрытие enum `   );` (≤1.20.1)
+        tail = re.search(r'NOT_REGISTERED|^   \);', src[h.end():], re.M)
+        end = heads[k + 1].start() if k + 1 < len(heads) else h.end() + tail.start()
         st = enum[h.group(1)]
         part = src[h.start():end]
         flows = list(re.finditer(r'PacketFlow\.(CLIENTBOUND|SERVERBOUND)', part))
