@@ -328,6 +328,35 @@ pub const V1_14: Version = Version {
     ..V1_14_4
 };
 
+/// 1.13.2 (404): тела → 1.14.4.
+pub const V1_13_2: Version = Version {
+    name: "1.13.2",
+    protocol: 404,
+    packets: generated::v1_13_2::PACKETS,
+    item: generated::r1_13_2::ITEM,
+    block: generated::r1_13_2::BLOCK,
+    entity_type: generated::r1_13_2::ENTITY_TYPE,
+    sound_event: generated::r1_13_2::SOUND_EVENT,
+    particle_type: generated::r1_13_2::PARTICLE_TYPE,
+};
+
+/// 1.13.1 (401): таблицы 1.13.2.
+pub const V1_13_1: Version = Version {
+    name: "1.13.1",
+    protocol: 401,
+    ..V1_13_2
+};
+
+/// 1.13 (393): пакеты 1.13.2, свои предметы и блоки.
+/// VANILLA-UNSURE: звуки, сущности и частицы взяты из 1.13.2 (маппингов 1.13 нет).
+pub const V1_13: Version = Version {
+    name: "1.13",
+    protocol: 393,
+    item: generated::r1_13::ITEM,
+    block: generated::r1_13::BLOCK,
+    ..V1_13_2
+};
+
 /// 1.17 (протокол 755): регистры и состояния блоков совпадают с 1.17.1.
 pub const V1_17: Version = Version {
     name: "1.17",
@@ -429,14 +458,40 @@ impl Version {
     }
 }
 
-/// Переименования записей реестров между версиями (в обе стороны).
+/// Переименования записей реестров между версиями: (старое имя, новое имя).
+const RENAMES: &[(&str, &str)] = &[
+    // 1.14
+    ("sign", "oak_sign"),
+    ("wall_sign", "oak_wall_sign"),
+    ("rose_red", "red_dye"),
+    ("dandelion_yellow", "yellow_dye"),
+    ("cactus_green", "green_dye"),
+    // 1.16
+    ("zombie_pigman", "zombified_piglin"),
+    ("zombie_pigman_spawn_egg", "zombified_piglin_spawn_egg"),
+    // 1.17
+    ("grass_path", "dirt_path"),
+    // 1.20.3
+    ("grass", "short_grass"),
+    // 1.20.5
+    ("scute", "turtle_scute"),
+];
+
+/// Имя записи по другую сторону переименования (в обе стороны).
 fn renamed(name: &str) -> &str {
-    match name {
-        // 1.17: grass_path → dirt_path
-        "grass_path" => "dirt_path",
-        "dirt_path" => "grass_path",
-        n => n,
+    for &(old, new) in RENAMES {
+        if name == old {
+            return new;
+        }
+        if name == new {
+            return old;
+        }
     }
+    // Канон → 1.13: `smooth_stone_slab` там называется `stone_slab`.
+    if name == "smooth_stone_slab" {
+        return "stone_slab";
+    }
+    name
 }
 
 /// Таблица «id реестра версии сервера → id канона» по именам записей;
@@ -444,8 +499,17 @@ fn renamed(name: &str) -> &str {
 pub fn build_remap(from: &[&str], to: &[&str]) -> Vec<Option<u32>> {
     let idx: std::collections::HashMap<&str, u32> =
         to.iter().enumerate().map(|(i, n)| (*n, i as u32)).collect();
+    // 1.14: прежняя `stone_slab` стала `smooth_stone_slab`, а имя `stone_slab` получил новый блок.
+    let flat_slab = !from.contains(&"smooth_stone_slab");
     from.iter()
-        .map(|n| idx.get(n).or_else(|| idx.get(renamed(n))).copied())
+        .map(|&n| {
+            let n = if n == "stone_slab" && flat_slab {
+                "smooth_stone_slab"
+            } else {
+                n
+            };
+            idx.get(n).or_else(|| idx.get(renamed(n))).copied()
+        })
         .collect()
 }
 
@@ -466,6 +530,19 @@ mod tests {
         assert_eq!(by_protocol(767).map(|v| v.name), Some("1.21.1"));
         assert_eq!(by_protocol(766).map(|v| v.name), Some("1.20.6"));
         assert!(by_protocol(1).is_none());
+    }
+
+    #[test]
+    fn all_1_13_items_exist_in_canon() {
+        for v in [V1_13, V1_13_2] {
+            let miss: Vec<_> = build_remap(v.item, CANON.item)
+                .iter()
+                .zip(v.item)
+                .filter(|(m, _)| m.is_none())
+                .map(|(_, n)| *n)
+                .collect();
+            assert!(miss.is_empty(), "{}: {miss:?}", v.name);
+        }
     }
 
     #[test]

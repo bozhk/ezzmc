@@ -96,8 +96,79 @@ def legacy_rows(ver, donor):
     return rows
 
 
+# Имена Yarn (1.13.x, NetworkState.java) → канонические. Ключ — (состояние, направление, класс).
+YARN_CLIENT_PLAY = """EntitySpawn:add_entity ExperienceOrbSpawn:add_experience_orb EntitySpawnGlobal:add_global_entity
+MobSpawn:add_mob PaintingSpawn:add_painting PlayerSpawn:add_player EntityAnimation:animate StatsUpdate:award_stats
+BlockBreakingProgress:block_destruction BlockEntityUpdate:block_entity_data BlockAction:block_event BlockUpdate:block_update
+BossBar:boss_event Difficulty:change_difficulty ChatMessage:chat ChunkDeltaUpdate:chunk_blocks_update
+CommandSuggestions:command_suggestions class_4376:commands ConfirmGuiAction:container_ack CloseScreen:container_close
+OpenScreen:open_screen Inventory:container_set_content ScreenHandlerPropertyUpdate:container_set_data
+ScreenHandlerSlotUpdate:container_set_slot ChunkLoadDistance:cooldown CustomPayload:custom_payload PlaySoundName:custom_sound
+Disconnect:disconnect EntityStatus:entity_event class_4381:tag_query Explosion:explode ChunkUnload:forget_level_chunk
+GameStateChange:game_event KeepAlive:keep_alive ChunkData:level_chunk WorldEvent:level_event Particle:level_particles
+GameJoin:login MapUpdate:map_item_data Entity:move_entity MoveRelative:move_entity_pos
+RotateAndMoveRelative:move_entity_pos_rot Rotate:move_entity_rot VehicleMove:move_vehicle SignEditorOpen:open_sign_editor
+CraftRecipeResponse:place_ghost_recipe PlayerAbilities:player_abilities CombatEvent:player_combat PlayerList:player_info
+class_4379:player_look_at PlayerPositionLook:player_position BedSleep:player_sleep RecipesUnlock:recipe
+EntitiesDestroy:remove_entities RemoveEntityStatusEffect:remove_mob_effect ResourcePackSend:resource_pack PlayerRespawn:respawn
+EntitySetHeadYaw:rotate_head SelectAdvancementTab:select_advancements_tab WorldBorder:set_border SetCameraEntity:set_camera
+HeldItemChange:set_carried_item ScoreboardDisplay:set_display_objective EntityTrackerUpdate:set_entity_data
+EntityAttach:set_entity_link EntityVelocityUpdate:set_entity_motion EntityEquipmentUpdate:set_equipped_item
+ExperienceBarUpdate:set_experience HealthUpdate:set_health ScoreboardObjectiveUpdate:set_objective SetPassengers:set_passengers
+Team:set_player_team ScoreboardPlayerUpdate:set_score PlayerSpawnPosition:set_spawn_position WorldTimeUpdate:set_time
+Title:set_titles class_4380:stop_sound PlaySoundId:sound PlayerListHeader:tab_list
+ChunkRenderDistanceCenter:take_item_entity EntityPosition:teleport_entity AdvancementUpdatePacket:update_advancements
+EntityAttributes:update_attributes EntityStatusEffect:update_mob_effect class_4382:update_recipes class_4383:update_tags"""
+YARN_SERVER_PLAY = """TeleportConfirm:accept_teleportation class_4384:block_entity_tag_query ChatMessage:chat
+ClientStatus:client_command ClientSettings:client_information RequestCommandCompletions:command_suggestion
+ConfirmGuiAction:container_ack ButtonClick:container_button_click ClickWindow:container_click GuiClose:container_close
+CustomPayload:custom_payload class_4385:edit_book class_4386:entity_tag_query PlayerInteractEntity:interact
+KeepAlive:keep_alive PlayerMove:move_player PositionOnly:move_player_pos Both:move_player_pos_rot LookOnly:move_player_rot
+VehicleMove:move_vehicle SteerBoat:paddle_boat class_4387:pick_item CraftRecipeRequest:place_recipe
+UpdatePlayerAbilities:player_abilities PlayerAction:player_action ClientCommand:player_command PlayerInput:player_input
+CraftingBlockData:recipe_book_update class_4388:rename_item ResourcePackStatus:resource_pack AdvancementTab:seen_advancements
+class_4389:select_trade class_4390:set_beacon UpdateSelectedSlot:set_carried_item class_4391:set_command_block
+class_4392:set_command_minecart CreativeInventoryAction:set_creative_mode_slot class_4393:set_structure_block
+UpdateSign:sign_update HandSwing:swing SpectatorTeleport:teleport_to_entity PlayerInteractBlock:use_item_on
+SwingHand:use_item"""
+YARN_OTHER = {
+    ('Handshake', 'Serverbound'): 'HandshakeC2SPacket:intention',
+    ('Status', 'Serverbound'): 'QueryRequest:status_request QueryPing:ping_request',
+    ('Status', 'Clientbound'): 'QueryResponse:status_response QueryPong:pong_response',
+    ('Login', 'Clientbound'): 'LoginDisconnect:login_disconnect LoginHello:hello LoginSuccess:game_profile '
+                              'LoginCompression:login_compression class_4394:custom_query',
+    ('Login', 'Serverbound'): 'LoginHello:hello LoginKey:key class_4396:custom_query',
+}
+
+
+def yarn_rows(ver):
+    """NetworkState.java (Yarn, 1.13.x): `register(NetworkSide.X, Cls.class)`, id — порядок в потоке."""
+    src = (pathlib.Path('reference') / ver / 'client/net/minecraft/network/NetworkState.java').read_text()
+    heads = list(re.finditer(r'^   (HANDSHAKING|PLAY|STATUS|LOGIN)\(', src, re.M))
+    enum = {'HANDSHAKING': 'Handshake', 'PLAY': 'Play', 'STATUS': 'Status', 'LOGIN': 'Login'}
+    maps = {('Play', 'Clientbound'): YARN_CLIENT_PLAY, ('Play', 'Serverbound'): YARN_SERVER_PLAY, **YARN_OTHER}
+    maps = {k: dict(x.split(':') for x in v.split()) for k, v in maps.items()}
+    rows = []
+    for k, h in enumerate(heads):
+        st = enum[h.group(1)]
+        part = src[h.start():heads[k + 1].start() if k + 1 < len(heads) else len(src)]
+        count = {}
+        for p in re.finditer(r'register\(NetworkSide\.(\w+),\s*([\w.]+)\.class', part):
+            d = 'Clientbound' if p.group(1) == 'CLIENTBOUND' else 'Serverbound'
+            c = p.group(2).split('.')[-1]
+            n = maps[(st, d)].get(c) or maps[(st, d)].get(re.sub(r'(S2C|C2S)Packet$', '', c))
+            if n is None:
+                sys.exit(f'{st} {d} {c}: нет в таблице имён Yarn')
+            rows.append((st, d, count.get(d, 0), n))
+            count[d] = count.get(d, 0) + 1
+    return rows
+
+
 ver = sys.argv[1]
-if '--legacy' in sys.argv:
+if '--yarn' in sys.argv:
+    rows = yarn_rows(ver)
+    src_note = 'NetworkState.java'
+elif '--legacy' in sys.argv:
     rows = legacy_rows(ver, sys.argv[sys.argv.index('--legacy') + 1])
     src_note = 'ConnectionProtocol.java'
 else:

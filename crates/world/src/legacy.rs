@@ -3,8 +3,9 @@
 //! канонического блока, нет блока вовсе → воздух (VANILLA-UNSURE: ViaVersion подставляет замены).
 use crate::block::{decode_state, BlockInfo};
 use crate::generated::{
-    b1_14_4, b1_15_2, b1_16_1, b1_16_5, b1_17_1, b1_18_2, b1_19, b1_19_2, b1_19_3, b1_19_4,
-    b1_20_1, b1_20_2, b1_20_4, b1_21_1, b1_21_11, b1_21_3, b1_21_4, b1_21_5, b1_21_8, b26_3,
+    b1_13, b1_13_2, b1_14_4, b1_15_2, b1_16_1, b1_16_5, b1_17_1, b1_18_2, b1_19, b1_19_2, b1_19_3,
+    b1_19_4, b1_20_1, b1_20_2, b1_20_4, b1_21_1, b1_21_11, b1_21_3, b1_21_4, b1_21_5, b1_21_8,
+    b26_3,
 };
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -27,6 +28,17 @@ pub fn build_state_map(from: &'static [BlockInfo], to: &'static [BlockInfo]) -> 
             .position(|p| p.name == "level")
             .map(|k| old.props[k].values[idx[k] as usize]);
         let name = match old.name {
+            "grass" => "short_grass",
+            "short_grass" if !by_name.contains_key("short_grass") => "grass",
+            "sign" => "oak_sign",
+            "oak_sign" if !by_name.contains_key("oak_sign") => "sign",
+            "wall_sign" => "oak_wall_sign",
+            "oak_wall_sign" if !by_name.contains_key("oak_wall_sign") => "wall_sign",
+            // 1.14: прежняя `stone_slab` стала `smooth_stone_slab`.
+            "stone_slab" if !from.iter().any(|b| b.name == "smooth_stone_slab") => {
+                "smooth_stone_slab"
+            }
+            "smooth_stone_slab" if !by_name.contains_key("smooth_stone_slab") => "stone_slab",
             "grass_path" => "dirt_path",
             "dirt_path" if !by_name.contains_key("dirt_path") => "grass_path",
             "cauldron" if level.is_some_and(|l| l != "0") => "water_cauldron",
@@ -116,6 +128,16 @@ fn table_1_16_5() -> &'static [u32] {
     T.get_or_init(|| build_state_map(b1_16_5::BLOCKS, b26_3::BLOCKS))
 }
 
+fn table_1_13() -> &'static [u32] {
+    static T: OnceLock<Vec<u32>> = OnceLock::new();
+    T.get_or_init(|| build_state_map(b1_13::BLOCKS, b26_3::BLOCKS))
+}
+
+fn table_1_13_2() -> &'static [u32] {
+    static T: OnceLock<Vec<u32>> = OnceLock::new();
+    T.get_or_init(|| build_state_map(b1_13_2::BLOCKS, b26_3::BLOCKS))
+}
+
 fn table_1_14_4() -> &'static [u32] {
     static T: OnceLock<Vec<u32>> = OnceLock::new();
     T.get_or_init(|| build_state_map(b1_14_4::BLOCKS, b26_3::BLOCKS))
@@ -195,6 +217,8 @@ pub fn state_to_canon(id: u32) -> u32 {
     // 1.21.5 — ещё и без dried_ghast.
     let t = match v.protocol {
         757 | 758 => table_1_18_2(),
+        393 => table_1_13(),
+        401 | 404 => table_1_13_2(),
         477..=498 => table_1_14_4(),
         573..=578 => table_1_15_2(),
         735 | 736 => table_1_16_1(),
@@ -237,9 +261,13 @@ pub fn state_from_canon(id: u32) -> u32 {
     static T1171: OnceLock<Vec<u32>> = OnceLock::new();
     static T1165: OnceLock<Vec<u32>> = OnceLock::new();
     static T1144: OnceLock<Vec<u32>> = OnceLock::new();
+    static T113: OnceLock<Vec<u32>> = OnceLock::new();
+    static T1132: OnceLock<Vec<u32>> = OnceLock::new();
     static T1152: OnceLock<Vec<u32>> = OnceLock::new();
     static T1161: OnceLock<Vec<u32>> = OnceLock::new();
     let t = match ezzmc_protocol::version::current().protocol {
+        393 => T113.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_13::BLOCKS)),
+        401 | 404 => T1132.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_13_2::BLOCKS)),
         477..=498 => T1144.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_14_4::BLOCKS)),
         573..=578 => T1152.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_15_2::BLOCKS)),
         735 | 736 => T1161.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_16_1::BLOCKS)),
@@ -325,5 +353,36 @@ mod tests {
             .count();
         assert!(bad < 400, "потеряно состояний: {bad}");
         assert_eq!(name(b26_3::BLOCKS, modded_state()), "black_concrete");
+    }
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+
+    fn map_name(from: &'static [BlockInfo], name: &str) -> &'static str {
+        let b = from.iter().find(|b| b.name == name).expect("block");
+        let canon = build_state_map(from, b26_3::BLOCKS)[b.default_state as usize];
+        let (i, _) = decode_state(b26_3::BLOCKS, canon).expect("state");
+        b26_3::BLOCKS[i].name
+    }
+
+    #[test]
+    fn old_block_names_resolve() {
+        assert_eq!(map_name(b1_20_1::BLOCKS, "grass"), "short_grass");
+        assert_eq!(map_name(b1_13_2::BLOCKS, "sign"), "oak_sign");
+        assert_eq!(map_name(b1_13_2::BLOCKS, "wall_sign"), "oak_wall_sign");
+        assert_eq!(map_name(b1_13_2::BLOCKS, "grass_path"), "dirt_path");
+        assert_eq!(map_name(b1_13_2::BLOCKS, "stone_slab"), "smooth_stone_slab");
+        assert_eq!(map_name(b1_14_4::BLOCKS, "stone_slab"), "stone_slab");
+    }
+
+    #[test]
+    fn all_1_13_blocks_exist_in_canon() {
+        for blocks in [b1_13::BLOCKS, b1_13_2::BLOCKS] {
+            for b in blocks.iter().filter(|b| !b.name.ends_with("air")) {
+                assert_ne!(map_name(blocks, b.name), "air", "{}", b.name);
+            }
+        }
     }
 }
