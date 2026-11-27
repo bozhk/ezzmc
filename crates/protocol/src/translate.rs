@@ -4,10 +4,12 @@
 //! блоков) переводятся по именам. Несовместимое значение (`Ok(false)`) вызывающий отбрасывает:
 //! компонент выпадает из патча, стек становится пустым.
 use crate::error::{ProtocolError, ProtocolResult};
-use crate::generated::{r1_21_10, r1_21_11, r1_21_4, r1_21_5, r1_21_6, r1_21_8, r26_3 as canon};
+use crate::generated::{
+    r1_21_10, r1_21_11, r1_21_3, r1_21_4, r1_21_5, r1_21_6, r1_21_8, r26_3 as canon,
+};
 use crate::item::{
-    components, components_1_21_10, components_1_21_11, components_1_21_4, components_1_21_5,
-    components_1_21_8, ClientRegistry, Shape, MAX_DEPTH,
+    components, components_1_21_10, components_1_21_11, components_1_21_3, components_1_21_4,
+    components_1_21_5, components_1_21_8, ClientRegistry, Shape, MAX_DEPTH,
 };
 use crate::version::build_remap;
 use crate::wire::{Reader, Writer};
@@ -57,6 +59,7 @@ src_names!(names_1_21_8, r1_21_8);
 src_names!(names_1_21_6, r1_21_6);
 src_names!(names_1_21_5, r1_21_5);
 src_names!(names_1_21_4, r1_21_4);
+src_names!(names_1_21_3, r1_21_3);
 
 type Names = fn(ClientRegistry) -> &'static [&'static str];
 type Comps = fn() -> &'static [&'static Shape];
@@ -99,10 +102,17 @@ const SRC_1_21_4: Source = Source {
     components: components_1_21_4,
 };
 
-/// Источник перевода для версии соединения: 769 — 1.21.4, 770 — 1.21.5, 771 — 1.21.6, 772 — 1.21.7/1.21.8,
+/// 1.21.2/1.21.3: custom_model_data — одно число, материал отделки с item_model_index.
+const SRC_1_21_3: Source = Source {
+    names: names_1_21_3,
+    components: components_1_21_3,
+};
+
+/// Источник перевода для версии соединения: 768 — 1.21.2/1.21.3, 769 — 1.21.4, 770 — 1.21.5, 771 — 1.21.6, 772 — 1.21.7/1.21.8,
 /// 773 — 1.21.9/1.21.10, остальное — 1.21.11.
 fn source_index(protocol: i32) -> usize {
     match protocol {
+        768 => 6,
         769 => 5,
         770 => 4,
         771 => 3,
@@ -111,13 +121,14 @@ fn source_index(protocol: i32) -> usize {
         _ => 2,
     }
 }
-const SOURCES: [Source; 6] = [
+const SOURCES: [Source; 7] = [
     SRC_1_21_8,
     SRC_1_21_10,
     SRC_1_21_11,
     SRC_1_21_6,
     SRC_1_21_5,
     SRC_1_21_4,
+    SRC_1_21_3,
 ];
 
 fn canon_names(reg: ClientRegistry) -> &'static [&'static str] {
@@ -459,6 +470,22 @@ impl Translator {
             w.bytes(extra);
             return Ok(ok);
         }
+        // Канон → 1.21.3: CustomModelData (списки) → одно число — первый float (0 без него).
+        if let (Struct(xs), Some(IntAsFloats)) = (s, d) {
+            let n = r.length("custom model floats", 1 << 16)?;
+            let mut first = 0.0f32;
+            for i in 0..n {
+                let v = r.f32()?;
+                if i == 0 {
+                    first = v;
+                }
+            }
+            for x in xs.iter().skip(1) {
+                crate::item::walk(r, x, depth)?;
+            }
+            w.var_int(first as i32);
+            return Ok(true);
+        }
         // Канон → версия без поздних полей структуры (Shape::Extend): общие поля
         // переводятся, добавленные позже — пропускаются.
         if let (Struct(xs), Some(Extend(ys, _))) = (s, d) {
@@ -699,6 +726,12 @@ impl Translator {
                 w.bytes(extra);
                 Ok(ok)
             }
+            IntAsFloats => {
+                // VANILLA: 1.21.4 CustomModelData — старое число становится единственным float.
+                let v = r.var_int()?;
+                w.var_int(1).f32(v as f32).var_int(0).var_int(0).var_int(0);
+                Ok(matches!(d, Some(Struct(x)) if x.len() == 4))
+            }
             Trailing(inner, skipped, _) => {
                 // Поле старой версии, снятое позже: значение переводится, поле пропускается.
                 let ok = self.tr(r, w, inner, d, depth)?;
@@ -856,7 +889,7 @@ fn len(r: &mut Reader, max: usize) -> ProtocolResult<usize> {
 
 /// Пропуск патча компонентов версии соединения (для [`Shape::Stack`] в `walk`).
 pub(crate) fn skip_patch_legacy(r: &mut Reader, depth: u32) -> ProtocolResult<()> {
-    static T: [OnceLock<Translator>; 6] = [const { OnceLock::new() }; 6];
+    static T: [OnceLock<Translator>; 7] = [const { OnceLock::new() }; 7];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::new(SOURCES[k], |s| s))
         .patch(r, &mut Writer::new(), depth)?;
@@ -866,14 +899,14 @@ pub(crate) fn skip_patch_legacy(r: &mut Reader, depth: u32) -> ProtocolResult<()
 /// Переводчик версии соединения (1.21.7–1.21.11) → канон; `block_state` — перевод id
 /// состояний (ezzmc-world). Таблицы строятся один раз на версию.
 pub fn from_server(block_state: fn(u32) -> u32) -> &'static Translator {
-    static T: [OnceLock<Translator>; 6] = [const { OnceLock::new() }; 6];
+    static T: [OnceLock<Translator>; 7] = [const { OnceLock::new() }; 7];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::new(SOURCES[k], block_state))
 }
 
 /// Переводчик канон → версия соединения (пакеты клиента); `block_state` — канон → версия.
 pub fn to_server(block_state: fn(u32) -> u32) -> &'static Translator {
-    static T: [OnceLock<Translator>; 6] = [const { OnceLock::new() }; 6];
+    static T: [OnceLock<Translator>; 7] = [const { OnceLock::new() }; 7];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::build(SOURCES[k], block_state, true))
 }
@@ -1229,6 +1262,30 @@ mod tests {
         let mut canon_tool = tool.clone();
         canon_tool.push(1);
         check("tool", tool.clone(), canon_tool, tool);
+    }
+
+    /// 1.21.3: custom_model_data — одно число (`Shape::IntAsFloats`) ↔ первый float канона.
+    #[test]
+    fn custom_model_data_1_21_3_int_as_floats() {
+        use crate::generated::r1_21_3 as old;
+        let back = Translator::build(SRC_1_21_3, |s| s, true);
+        let t = Translator::new(SRC_1_21_3, |s| s);
+        let shape =
+            components_1_21_3()[src_id(old::DATA_COMPONENT_TYPE, "custom_model_data") as usize];
+        let dst = &crate::item::components()
+            [src_id(canon::DATA_COMPONENT_TYPE, "custom_model_data") as usize];
+        let mut canon_val = vec![1];
+        canon_val.extend(7.0f32.to_be_bytes());
+        canon_val.extend([0, 0, 0]);
+        let mut r = Reader::new(&[7]);
+        let mut o = Writer::new();
+        assert!(t.tr(&mut r, &mut o, shape, Some(dst), 0).unwrap());
+        assert_eq!(o.into_vec(), canon_val);
+        let mut r = Reader::new(&canon_val);
+        let mut o = Writer::new();
+        assert!(back.tr(&mut r, &mut o, dst, Some(shape), 0).unwrap());
+        assert_eq!(r.remaining(), 0);
+        assert_eq!(o.into_vec(), vec![7]);
     }
 
     /// 1.21.10: частичный предикат компонента — голый id типа предиката (`Shape::Left`),

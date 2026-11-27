@@ -1,10 +1,12 @@
 //! Трансляция тел пакетов сервера старой версии в формат канона (26.3) — глава 18, TODO-372.
 //! Весь клиент разбирает только канонический формат; здесь исправляются расхождения
 //! между версиями. Реестровые id (предметы, сущности, звуки, частицы) — позже в этом же месте.
-use ezzmc_protocol::item::{ClientRegistry, Shape, PARTICLE, PARTICLE_1_21_11, SOUND};
+use ezzmc_protocol::item::{
+    ClientRegistry, Shape, PARTICLE, PARTICLE_1_21_11, PARTICLE_1_21_3, SOUND,
+};
 use ezzmc_protocol::translate::Translator;
 use ezzmc_protocol::version::{
-    build_remap, Version, CANON, V1_21_10, V1_21_11, V1_21_4, V1_21_5, V1_21_8,
+    build_remap, Version, CANON, V1_21_10, V1_21_11, V1_21_3, V1_21_4, V1_21_5, V1_21_8,
 };
 use ezzmc_protocol::wire::{Reader, Writer};
 use ezzmc_protocol::{Direction, ProtocolResult, State};
@@ -16,9 +18,11 @@ use std::sync::{Mutex, OnceLock};
 /// Версия соединения среди 1.21.5–1.21.11: 0 — 1.21.6–1.21.8 (771/772: пакеты, сущности и
 /// block_entity_type совпадают; предметы/звуки — в `Translator`), 1 — 1.21.9/1.21.10 (773),
 /// 2 — 1.21.11 (774), 3 — 1.21.5 (770: свои id пакетов и сущностей, форматы как у 1.21.8),
-/// 4 — 1.21.4 (769: форматы 1.21.5 плюс отличия ниже).
+/// 4 — 1.21.4 (769: форматы 1.21.5 плюс отличия ниже), 5 — 1.21.2/1.21.3 (768: как 1.21.4
+/// плюс свои отличия).
 fn ver() -> usize {
     match ezzmc_protocol::version::current().protocol {
+        768 => 5,
         769 => 4,
         770 => 3,
         771 | 772 => 0,
@@ -26,35 +30,62 @@ fn ver() -> usize {
         _ => 2,
     }
 }
-const VERSIONS: [&Version; 5] = [&V1_21_8, &V1_21_10, &V1_21_11, &V1_21_5, &V1_21_4];
+const VERSIONS: [&Version; 6] = [&V1_21_8, &V1_21_10, &V1_21_11, &V1_21_5, &V1_21_4, &V1_21_3];
 
 /// Форматы до 1.21.9 (1.21.5–1.21.8): скорости short, BlockPos спавна без измерения и т. п.
 fn pre_1_21_9(k: usize) -> bool {
-    matches!(k, 0 | 3 | 4)
+    matches!(k, 0 | 3 | 4 | 5)
 }
 
-/// Форматы до 1.21.6 (1.21.4/1.21.5): PRESS/RELEASE_SHIFT_KEY, нет HangingEntity#DATA_DIRECTION.
+/// Форматы до 1.21.6 (1.21.2–1.21.5): PRESS/RELEASE_SHIFT_KEY, нет HangingEntity#DATA_DIRECTION.
 fn pre_1_21_6(k: usize) -> bool {
-    matches!(k, 3 | 4)
+    matches!(k, 3..=5)
+}
+
+/// Форматы до 1.21.5 (1.21.2–1.21.4): add_experience_orb, showInTooltip, NBT-карты высот и т. п.
+fn pre_1_21_5(k: usize) -> bool {
+    matches!(k, 4 | 5)
+}
+
+/// Форма частиц версии соединения: 1.21.2/1.21.3 — `trail` без длительности.
+fn particle_src() -> &'static Shape {
+    if ver() == 5 {
+        &PARTICLE_1_21_3
+    } else {
+        &PARTICLE_1_21_11
+    }
 }
 
 fn entity_type_map() -> &'static [Option<u32>] {
-    static T: [OnceLock<Vec<Option<u32>>>; 5] = [const { OnceLock::new() }; 5];
+    static T: [OnceLock<Vec<Option<u32>>>; 6] = [const { OnceLock::new() }; 6];
     let k = ver();
-    T[k].get_or_init(|| build_remap(VERSIONS[k].entity_type, CANON.entity_type))
+    T[k].get_or_init(|| {
+        let mut t = build_remap(VERSIONS[k].entity_type, CANON.entity_type);
+        // VANILLA: CreakingTransient (1.21.2/1.21.3) — скрипун сердца; в 1.21.4 слит в creaking.
+        let creaking = CANON.entity_type.iter().position(|n| *n == "creaking");
+        for (i, n) in VERSIONS[k].entity_type.iter().enumerate() {
+            if *n == "creaking_transient" {
+                t[i] = creaking.map(|c| c as u32);
+            }
+        }
+        t
+    })
 }
 
 /// Реестр block_entity_type версии соединения → канон (в 26.x убран `bed`, добавлен `potent_sulfur`).
 fn block_entity_type(id: i32) -> Option<i32> {
-    use ezzmc_protocol::generated::{r1_21_10, r1_21_11, r1_21_4, r1_21_5, r1_21_8, r26_3};
-    const SRC: [&[&str]; 5] = [
+    use ezzmc_protocol::generated::{
+        r1_21_10, r1_21_11, r1_21_3, r1_21_4, r1_21_5, r1_21_8, r26_3,
+    };
+    const SRC: [&[&str]; 6] = [
         r1_21_8::BLOCK_ENTITY_TYPE,
         r1_21_10::BLOCK_ENTITY_TYPE,
         r1_21_11::BLOCK_ENTITY_TYPE,
         r1_21_5::BLOCK_ENTITY_TYPE,
         r1_21_4::BLOCK_ENTITY_TYPE,
+        r1_21_3::BLOCK_ENTITY_TYPE,
     ];
-    static T: [OnceLock<Vec<Option<u32>>>; 5] = [const { OnceLock::new() }; 5];
+    static T: [OnceLock<Vec<Option<u32>>>; 6] = [const { OnceLock::new() }; 6];
     let k = ver();
     T[k].get_or_init(|| build_remap(SRC[k], r26_3::BLOCK_ENTITY_TYPE))
         .get(usize::try_from(id).ok()?)
@@ -502,13 +533,13 @@ fn entity_data_value(r: &mut Reader, w: &mut Writer, ser: &str) -> ProtocolResul
             let empty = ser == "OPTIONAL_BLOCK_STATE" && v == 0;
             w.var_int(if empty { 0 } else { state(v as u32) as i32 });
         }
-        "PARTICLE" => return tr().value(r, w, &PARTICLE_1_21_11, &PARTICLE),
+        "PARTICLE" => return tr().value(r, w, particle_src(), &PARTICLE),
         "PARTICLES" => {
             let n = r.length("particles", 1 << 12)?;
             let mut list = Writer::new();
             let mut kept = 0;
             for _ in 0..n {
-                if tr().value(r, &mut list, &PARTICLE_1_21_11, &PARTICLE)? {
+                if tr().value(r, &mut list, particle_src(), &PARTICLE)? {
                     kept += 1;
                 }
             }
@@ -774,6 +805,7 @@ fn set_entity_data(r: &mut Reader, w: &mut Writer, k: usize) -> ProtocolResult<(
         SERIALIZERS_1_21_11,
         SERIALIZERS_1_21_8,
         SERIALIZERS_1_21_4,
+        SERIALIZERS_1_21_4,
     ][k];
     // VANILLA: HangingEntity#DATA_DIRECTION (#8) появился в 1.21.6 — поля рамок/картин 1.21.5
     // с #8 сдвигаются на 1 (направление приходит в add_entity, как и в 1.21.6).
@@ -796,7 +828,7 @@ fn set_entity_data(r: &mut Reader, w: &mut Writer, k: usize) -> ProtocolResult<(
                 value: src.into(),
             },
         )?;
-        if k == 4 {
+        if pre_1_21_5(k) {
             let Some(i) = index_1_21_4(ty, idx) else {
                 entity_data_value(r, &mut Writer::new(), ser)?;
                 continue;
@@ -812,6 +844,17 @@ fn set_entity_data(r: &mut Reader, w: &mut Writer, k: usize) -> ProtocolResult<(
                 ("mooshroom", 17, "STRING") => {
                     let v = r.string(32767)?;
                     Some(("INT", i32::from(v == "brown")))
+                }
+                // VANILLA: Salmon#DATA_TYPE (1.21.4) — INT по Salmon.Variant (small 0,
+                // medium 1, large 2); в 1.21.3 — строка.
+                ("salmon", _, "STRING") => {
+                    let v = r.string(32767)?;
+                    let id = match v.as_str() {
+                        "small" => 0,
+                        "large" => 2,
+                        _ => 1,
+                    };
+                    Some(("INT", id))
                 }
                 _ => None,
             };
@@ -933,7 +976,7 @@ fn serverbound_body(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
             w.bytes(r.bytes(3)?).var_int(r.var_int()?);
             let n = r.length("changed slots", 128)?;
             w.var_int(n as i32);
-            let stack = if ver() == 4 {
+            let stack = if pre_1_21_5(ver()) {
                 hashed_to_stack_1_21_4
             } else {
                 hashed_stack_back
@@ -946,7 +989,7 @@ fn serverbound_body(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
         }
         // VANILLA: LastSeenMessages.Update (1.21.5) дописал байт checksum в конец chat /
         // chat_command_signed; в 1.21.4 его нет.
-        "chat" | "chat_command_signed" if ver() == 4 => {
+        "chat" | "chat_command_signed" if pre_1_21_5(ver()) => {
             let Some((_, head)) = body.split_last() else {
                 return Ok(None);
             };
@@ -959,6 +1002,13 @@ fn serverbound_body(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
         }
         // VANILLA: ServerboundPlayerCommandPacket.Action (1.21.5): перед STOP_SLEEPING ещё
         // PRESS_SHIFT_KEY, RELEASE_SHIFT_KEY.
+        // VANILLA: ServerboundMoveVehiclePacket (1.21.4) дописал onGround; в 1.21.3 его нет.
+        "move_vehicle" if ver() == 5 => {
+            let Some((_, head)) = body.split_last() else {
+                return Ok(None);
+            };
+            w.bytes(head);
+        }
         "player_command" if pre_1_21_6(ver()) => {
             let (eid, action, data) = (r.var_int()?, r.var_int()?, r.var_int()?);
             w.var_int(eid).var_int(action + 2).var_int(data);
@@ -995,7 +1045,7 @@ fn hashed_to_stack_1_21_4(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> 
 /// Пакет сервера 1.21.4, которого нет в 1.21.5+, → пакеты 1.21.4 (id, тело), которые затем
 /// переводятся обычным путём. `None` — пакет не разворачивается.
 pub fn expand(name: Option<&str>, body: &[u8]) -> ProtocolResult<Option<Vec<Packet>>> {
-    if ezzmc_protocol::version::current().protocol != 769 || name != Some("add_experience_orb") {
+    if !pre_1_21_5(ver()) || name != Some("add_experience_orb") {
         return Ok(None);
     }
     // VANILLA: ClientboundAddExperienceOrbPacket (1.21.4): id, x, y, z, short value;
@@ -1008,7 +1058,7 @@ pub fn expand(name: Option<&str>, body: &[u8]) -> ProtocolResult<Option<Vec<Pack
     let (Some(add), Some(data), Some(ty)) = (
         clientbound_id("add_entity"),
         clientbound_id("set_entity_data"),
-        VERSIONS[4]
+        VERSIONS[ver()]
             .entity_type
             .iter()
             .position(|n| *n == "experience_orb"),
@@ -1210,7 +1260,7 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
         // list<BlockEntityInfo{byte xz, short y, registry block_entity_type, OPTIONAL_COMPOUND_TAG}>,
         // затем свет. Переводится только тип блок-сущности; без пары в каноне (bed) — запись выбрасывается.
         "level_chunk_with_light" => {
-            if ver() == 4 {
+            if pre_1_21_5(ver()) {
                 // VANILLA: ClientboundLevelChunkPacketData (1.21.4) — карты высот NBT-compound
                 // (ключ Heightmap.Types#getSerializationKey → LongArray); 1.21.5 — Map(id, long[]).
                 w.bytes(r.bytes(8)?);
@@ -1235,7 +1285,7 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
                 }
             }
             let start = r.pos();
-            if ver() != 4 {
+            if !pre_1_21_5(ver()) {
                 r.bytes(8)?;
                 for _ in 0..r.length("heightmaps", 16)? {
                     r.var_int()?;
@@ -1333,17 +1383,17 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
             // removed, progress, showAdvancements — форматы совпадают.
             w.bytes(r.rest());
             // VANILLA: showAdvancements (1.21.5) — в 1.21.4 нет, по умолчанию true.
-            if ver() == 4 {
+            if pre_1_21_5(ver()) {
                 w.bool(true);
             }
         }
         // VANILLA: ClientboundPlayerChatPacket (1.21.5) — первым globalIndex (VarInt), в 1.21.4 нет.
-        "player_chat" if ver() == 4 => {
+        "player_chat" if pre_1_21_5(ver()) => {
             w.var_int(0).bytes(r.rest());
         }
         // VANILLA: ClientboundSetPlayerTeamPacket.Parameters (1.21.4): nametagVisibility и
         // collisionRule — строки (readUtf(40)); 1.21.5 — Team.Visibility/CollisionRule по id.
-        "set_player_team" if ver() == 4 => {
+        "set_player_team" if pre_1_21_5(ver()) => {
             w.string(&r.string(32767)?);
             let method = r.u8()?;
             w.u8(method);
@@ -1469,12 +1519,18 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
         // → 26.3: particle, overrideLimiter, alwaysShow, xyz, dist xyz, maxSpeed xyz, varint count,
         // randomizationType DEFAULT (поведение 1.21.11: гаусс по всем осям с одной скоростью).
         "level_particles" => {
-            let flags = r.bytes(2)?;
+            // VANILLA: ClientboundLevelParticlesPacket (1.21.4) — overrideLimiter, alwaysShow;
+            // в 1.21.3 только overrideLimiter (LevelRenderer#addParticle с alwaysShow = false).
+            let flags: &[u8] = if ver() == 5 {
+                &[r.u8()?, 0]
+            } else {
+                r.bytes(2)?
+            };
             let pos = r.bytes(24)?;
             let dist = r.bytes(12)?;
             let speed = r.f32()?;
             let count = r.i32()?;
-            if !tr().value(&mut r, &mut w, &PARTICLE_1_21_11, &PARTICLE)? {
+            if !tr().value(&mut r, &mut w, particle_src(), &PARTICLE)? {
                 return Ok(Some(Vec::new()));
             }
             w.bytes(flags).bytes(pos).bytes(dist);
@@ -1503,7 +1559,7 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
             if kb {
                 w.bytes(r.bytes(24)?);
             }
-            if !tr().value(&mut r, &mut w, &PARTICLE_1_21_11, &PARTICLE)?
+            if !tr().value(&mut r, &mut w, particle_src(), &PARTICLE)?
                 || !tr().value(&mut r, &mut w, &SOUND, &SOUND)?
             {
                 return Ok(Some(Vec::new()));
@@ -1517,7 +1573,7 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
             let mut kept = 0;
             for _ in 0..n {
                 let mut one = Writer::new();
-                let ok = tr().value(&mut r, &mut one, &PARTICLE_1_21_11, &PARTICLE)?;
+                let ok = tr().value(&mut r, &mut one, particle_src(), &PARTICLE)?;
                 one.bytes(r.bytes(8)?).var_int(r.var_int()?);
                 if ok {
                     list.bytes(&one.into_vec());
@@ -1748,6 +1804,29 @@ mod tests {
             .var_int(2)
             .u8(0xFF);
         assert_eq!(run(w), e.into_vec());
+    }
+
+    /// 1.21.3: вариант лосося строкой → INT 1.21.4+ (small 0, medium 1, large 2).
+    #[test]
+    fn entity_data_1_21_3_salmon_variant() {
+        let ser = |n: &str| SERIALIZERS_1_21_4.iter().position(|x| *x == n).unwrap() as i32;
+        let canon = |n: &str| SERIALIZERS_26_3.iter().position(|x| *x == n).unwrap() as i32;
+        layouts().insert(-31, (DataLayout::Same, "salmon"));
+        let mut w = Writer::new();
+        w.var_int(-31)
+            .u8(17)
+            .var_int(ser("STRING"))
+            .string("large")
+            .u8(0xFF);
+        let mut out = Writer::new();
+        set_entity_data(&mut Reader::new(&w.into_vec()), &mut out, 5).unwrap();
+        let mut e = Writer::new();
+        e.var_int(-31)
+            .u8(17)
+            .var_int(canon("INT"))
+            .var_int(2)
+            .u8(0xFF);
+        assert_eq!(out.into_vec(), e.into_vec());
     }
 
     /// 1.21.10: рука игрока BYTE → HUMANOID_ARM, гнев волка INT → LONG, номера сериализаторов

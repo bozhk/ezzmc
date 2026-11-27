@@ -133,6 +133,10 @@ pub enum Shape {
     /// (e.g. pre-1.21.5 `showInTooltip`): skipped on translation, written as
     /// these bytes (its default) on the way back. Source-version shapes only.
     Trailing(&'static Shape, &'static Shape, &'static [u8]),
+    /// Pre-1.21.4 `CustomModelData.STREAM_CODEC`: a bare varint; newer versions
+    /// hold four lists (floats, flags, strings, colors) and the old value is the
+    /// single float. Source-version shapes only.
+    IntAsFloats,
 }
 
 use Shape::*;
@@ -316,6 +320,9 @@ const BLOCK_STATE: Shape = BlockState;
 /// that has any; the rest are `SimpleParticleType`s with none.
 macro_rules! particle {
     ($item:expr) => {
+        particle!($item, Struct(&[Double, Double, Double, Int, VarInt]))
+    };
+    ($item:expr, $trail:expr) => {
         ByRegistryOr(
             ClientRegistry::ParticleType,
             &[
@@ -362,7 +369,7 @@ macro_rules! particle {
                     ]),
                 ),
                 // TrailParticleOption.java:28: a `Vec3`, colour and duration.
-                ("trail", Struct(&[Double, Double, Double, Int, VarInt])),
+                ("trail", $trail),
                 // ShriekParticleOption.java:28
                 ("shriek", VarInt),
                 ("dust_pillar", BLOCK_STATE),
@@ -376,6 +383,10 @@ macro_rules! particle {
 pub static PARTICLE: Shape = particle!(ItemTemplate);
 /// 1.21.11 ItemParticleOption.java:20: `ItemStack.STREAM_CODEC` instead of a template.
 pub static PARTICLE_1_21_11: Shape = particle!(Stack);
+/// 1.21.2/1.21.3 TargetColorParticleOption: `trail` without duration.
+// VANILLA-UNSURE: TrailParticle.Provider (1.21.3) picks lifetime 10..49 at random;
+// the canonical duration is fixed at 30 (the mean).
+pub static PARTICLE_1_21_3: Shape = particle!(Stack, Extend(&[Double, Double, Double, Int], &[30]));
 
 /// The 26.2 value layout of each `DataComponents` entry, by registry name.
 /// Components without a network codec fall back to their persistent Codec as
@@ -970,6 +981,57 @@ static COMPONENTS_1_21_4: &[(&str, Shape)] = &[
     ),
 ];
 
+/// `TrimMaterial.STREAM_CODEC` (1.21.2/1.21.3): asset name, ingredient item,
+/// item model index, armor-material overrides, description.
+static TRIM_MATERIAL_1_21_3: Shape = Holder(&Struct(&[
+    STRING,
+    RegistryId(ClientRegistry::Item),
+    Float,
+    Map(&IDENTIFIER, &STRING),
+    TEXT,
+]));
+
+/// 1.21.3 → 1.21.4: `custom_model_data` was one int (1.21.4 datafixer moves it
+/// into `floats`), trim materials carried `item_model_index`. Equippable `model`
+/// became `asset_id` with the same encoding.
+// VANILLA: CustomModelData, TrimMaterial, Equippable (1.21.3).
+static COMPONENTS_1_21_3: &[(&str, Shape)] = &[
+    ("custom_model_data", IntAsFloats),
+    (
+        "trim",
+        Trailing(
+            &Struct(&[Ref(&TRIM_MATERIAL_1_21_3), Ref(&TRIM_PATTERN_1_21_4)]),
+            &Bool,
+            &[1],
+        ),
+    ),
+];
+
+/// Component shapes of 1.21.2/1.21.3 by their own component type id.
+pub(crate) fn components_1_21_3() -> &'static [&'static Shape] {
+    static T: std::sync::LazyLock<Vec<&'static Shape>> = std::sync::LazyLock::new(|| {
+        crate::generated::r1_21_3::DATA_COMPONENT_TYPE
+            .iter()
+            .map(|name| {
+                [
+                    COMPONENTS_1_21_3,
+                    COMPONENTS_1_21_4,
+                    COMPONENTS_1_21_5,
+                    COMPONENTS_1_21_8,
+                    COMPONENTS_1_21_10,
+                    COMPONENTS_1_21_11,
+                    COMPONENTS_26_2,
+                ]
+                .iter()
+                .find_map(|layer| layer.iter().find(|(n, _)| n == name))
+                .map(|(_, s)| s)
+                .unwrap_or(&Shape::Nbt)
+            })
+            .collect()
+    });
+    &T
+}
+
 /// Component shapes of 1.21.4 by its own component type id.
 pub(crate) fn components_1_21_4() -> &'static [&'static Shape] {
     static T: std::sync::LazyLock<Vec<&'static Shape>> = std::sync::LazyLock::new(|| {
@@ -1316,6 +1378,9 @@ pub fn walk(r: &mut Reader, shape: &'static Shape, depth: u32) -> ProtocolResult
             r.string(MAX_STRING_LENGTH)?;
         }
         Append(inner, _) | Left(inner) | Right(inner) => walk(r, inner, depth)?,
+        IntAsFloats => {
+            r.var_int()?;
+        }
         Trailing(inner, skipped, _) => {
             walk(r, inner, depth)?;
             walk(r, skipped, depth)?;

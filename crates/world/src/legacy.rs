@@ -2,7 +2,7 @@
 //! Совпадение по имени блока и значениям свойств; нет блока/значения → состояние по умолчанию
 //! канонического блока, нет блока вовсе → воздух (VANILLA-UNSURE: ViaVersion подставляет замены).
 use crate::block::{decode_state, BlockInfo};
-use crate::generated::{b1_20_1, b1_21_11, b1_21_4, b1_21_5, b1_21_8, b26_3};
+use crate::generated::{b1_20_1, b1_21_11, b1_21_3, b1_21_4, b1_21_5, b1_21_8, b26_3};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -65,6 +65,11 @@ fn table_1_21_4() -> &'static [u32] {
     T.get_or_init(|| build_state_map(b1_21_4::BLOCKS, b26_3::BLOCKS))
 }
 
+fn table_1_21_3() -> &'static [u32] {
+    static T: OnceLock<Vec<u32>> = OnceLock::new();
+    T.get_or_init(|| build_state_map(b1_21_3::BLOCKS, b26_3::BLOCKS))
+}
+
 fn table_1_21_5() -> &'static [u32] {
     static T: OnceLock<Vec<u32>> = OnceLock::new();
     T.get_or_init(|| build_state_map(b1_21_5::BLOCKS, b26_3::BLOCKS))
@@ -108,6 +113,7 @@ pub fn state_to_canon(id: u32) -> u32 {
     // 1.21.9/1.21.10 и 1.21.11 — одинаковые состояния; 1.21.6–1.21.8 — без медных блоков 1.21.9;
     // 1.21.5 — ещё и без dried_ghast.
     let t = match v.protocol {
+        768 => table_1_21_3(),
         769 => table_1_21_4(),
         770 => table_1_21_5(),
         771 | 772 => table_1_21_8(),
@@ -123,7 +129,9 @@ pub fn state_from_canon(id: u32) -> u32 {
     static T11: OnceLock<Vec<u32>> = OnceLock::new();
     static T5: OnceLock<Vec<u32>> = OnceLock::new();
     static T4: OnceLock<Vec<u32>> = OnceLock::new();
+    static T3: OnceLock<Vec<u32>> = OnceLock::new();
     let t = match ezzmc_protocol::version::current().protocol {
+        768 => T3.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_21_3::BLOCKS)),
         769 => T4.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_21_4::BLOCKS)),
         770 => T5.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_21_5::BLOCKS)),
         771 | 772 => T8.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_21_8::BLOCKS)),

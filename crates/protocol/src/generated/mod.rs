@@ -2,6 +2,7 @@
 pub mod r1_20_1;
 pub mod r1_21_10;
 pub mod r1_21_11;
+pub mod r1_21_3;
 pub mod r1_21_4;
 pub mod r1_21_5;
 pub mod r1_21_6;
@@ -10,6 +11,7 @@ pub mod r26_3;
 pub mod v1_20_1;
 pub mod v1_21_10;
 pub mod v1_21_11;
+pub mod v1_21_3;
 pub mod v1_21_4;
 pub mod v1_21_5;
 pub mod v1_21_8;
