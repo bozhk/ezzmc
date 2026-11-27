@@ -2,10 +2,10 @@
 # Источники: Mojang version_manifest_v2 (даты) + PrismarineJS/minecraft-data protocolVersions.json (protocol, data version).
 # Получено 2026-11-07. Проверка первоисточником: `cargo xtask verify-versions` (TODO-370, 2026-11-26):
 # 1.7.10–26.3 сверены с jar Mojang (version.json / RealmsSharedConstants), 1.5.2 — по эталону reference/1.5.2;
-# 1.6.1–1.6.4 и 1.7.2–1.7.9 — только вторичные источники (minecraft-data, wiki), TODO-459.
+# 1.6.1–1.6.4 и 1.7.2–1.7.9 — пингом ванильного server.jar Mojang (2026-11-27, TODO-459): 1.6.x — legacy-пинг
+# FE 01 FA MC|PingHost (ответ «§1\0protocol\0version…»), 1.7.x — Status JSON.
 # era: pre-netty (≤1.6.4, TCP без Netty-фрейминга) · netty-early (1.7.x) · play · config (≥1.20.2, есть состояние Configuration)
 # Ванильная версия-канон = latest. Записи отсортированы по дате выхода.
-# Нет в источнике protocol: 1.7.3 (по wiki protocol 4 как у 1.7.2) — добавить после проверки, TODO-452.
 
 latest = "26.3"
 
@@ -41,6 +41,13 @@ config_state = false
 name = "1.7.2"
 protocol = 4
 released = "2013-10-25"
+era = "netty-early"
+config_state = false
+
+[[version]]
+name = "1.7.3"
+protocol = 4
+released = "2013-12-06"
 era = "netty-early"
 config_state = false
 
