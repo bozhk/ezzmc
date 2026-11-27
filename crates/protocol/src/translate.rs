@@ -5,11 +5,13 @@
 //! компонент выпадает из патча, стек становится пустым.
 use crate::error::{ProtocolError, ProtocolResult};
 use crate::generated::{
-    r1_21_1, r1_21_10, r1_21_11, r1_21_3, r1_21_4, r1_21_5, r1_21_6, r1_21_8, r26_3 as canon,
+    r1_20_6, r1_21_1, r1_21_10, r1_21_11, r1_21_3, r1_21_4, r1_21_5, r1_21_6, r1_21_8,
+    r26_3 as canon,
 };
 use crate::item::{
-    components, components_1_21_1, components_1_21_10, components_1_21_11, components_1_21_3,
-    components_1_21_4, components_1_21_5, components_1_21_8, ClientRegistry, Shape, MAX_DEPTH,
+    components, components_1_20_6, components_1_21_1, components_1_21_10, components_1_21_11,
+    components_1_21_3, components_1_21_4, components_1_21_5, components_1_21_8, ClientRegistry,
+    Shape, MAX_DEPTH,
 };
 use crate::version::build_remap;
 use crate::wire::{Reader, Writer};
@@ -61,44 +63,56 @@ src_names!(names_1_21_5, r1_21_5);
 src_names!(names_1_21_4, r1_21_4);
 src_names!(names_1_21_3, r1_21_3);
 
-/// Реестры 1.21/1.21.1 под именами 1.21.2+: атрибуты без префикса `generic.`/`player.`/
+/// Реестры 1.20.5–1.21.1 под именами 1.21.2+: звуки зловещего спавнера (1.20.6), атрибуты без префикса `generic.`/`player.`/
 /// `zombie.`, `fire_resistant` → `damage_resistant`, лодки → дубовые; consume_effect_type нет.
 // VANILLA: Attributes, DataComponents, EntityType (1.21.1 → 1.21.2).
-fn names_1_21_1(reg: ClientRegistry) -> &'static [&'static str] {
-    fn renamed(
-        cell: &'static OnceLock<Vec<&'static str>>,
-        src: &'static [&'static str],
-        f: fn(&'static str) -> &'static str,
-    ) -> &'static [&'static str] {
-        cell.get_or_init(|| src.iter().map(|n| f(n)).collect())
-    }
-    static ATTR: OnceLock<Vec<&'static str>> = OnceLock::new();
-    static COMP: OnceLock<Vec<&'static str>> = OnceLock::new();
-    static ENT: OnceLock<Vec<&'static str>> = OnceLock::new();
-    match reg {
-        ClientRegistry::SoundEvent => r1_21_1::SOUND_EVENT,
-        ClientRegistry::Item => r1_21_1::ITEM,
-        ClientRegistry::DataComponentType => {
-            renamed(&COMP, r1_21_1::DATA_COMPONENT_TYPE, |n| match n {
-                "fire_resistant" => "damage_resistant",
-                n => n,
-            })
+macro_rules! names_pre_1_21_2 {
+    ($fn:ident, $m:ident) => {
+        fn $fn(reg: ClientRegistry) -> &'static [&'static str] {
+            fn renamed(
+                cell: &'static OnceLock<Vec<&'static str>>,
+                src: &'static [&'static str],
+                f: fn(&'static str) -> &'static str,
+            ) -> &'static [&'static str] {
+                cell.get_or_init(|| src.iter().map(|n| f(n)).collect())
+            }
+            static ATTR: OnceLock<Vec<&'static str>> = OnceLock::new();
+            static COMP: OnceLock<Vec<&'static str>> = OnceLock::new();
+            static ENT: OnceLock<Vec<&'static str>> = OnceLock::new();
+            static SND: OnceLock<Vec<&'static str>> = OnceLock::new();
+            match reg {
+                // VANILLA: SoundEvents (1.20.6 → 1.21) — звуки зловещего спавнера испытаний.
+                ClientRegistry::SoundEvent => renamed(&SND, $m::SOUND_EVENT, |n| match n {
+                    "block.trial_spawner.ambient_charged" => "block.trial_spawner.ambient_ominous",
+                    "block.trial_spawner.charge_activate" => "block.trial_spawner.ominous_activate",
+                    n => n,
+                }),
+                ClientRegistry::Item => $m::ITEM,
+                ClientRegistry::DataComponentType => {
+                    renamed(&COMP, $m::DATA_COMPONENT_TYPE, |n| match n {
+                        "fire_resistant" => "damage_resistant",
+                        n => n,
+                    })
+                }
+                ClientRegistry::PositionSourceType => $m::POSITION_SOURCE_TYPE,
+                ClientRegistry::ParticleType => $m::PARTICLE_TYPE,
+                ClientRegistry::BlockEntityType => $m::BLOCK_ENTITY_TYPE,
+                ClientRegistry::ConsumeEffectType => &[],
+                ClientRegistry::EntityType => renamed(&ENT, $m::ENTITY_TYPE, |n| match n {
+                    "boat" => "oak_boat",
+                    "chest_boat" => "oak_chest_boat",
+                    n => n,
+                }),
+                ClientRegistry::Attribute => renamed(&ATTR, $m::ATTRIBUTE, |n| {
+                    n.split_once('.').map_or(n, |(_, x)| x)
+                }),
+                ClientRegistry::Block => $m::BLOCK,
+            }
         }
-        ClientRegistry::PositionSourceType => r1_21_1::POSITION_SOURCE_TYPE,
-        ClientRegistry::ParticleType => r1_21_1::PARTICLE_TYPE,
-        ClientRegistry::BlockEntityType => r1_21_1::BLOCK_ENTITY_TYPE,
-        ClientRegistry::ConsumeEffectType => &[],
-        ClientRegistry::EntityType => renamed(&ENT, r1_21_1::ENTITY_TYPE, |n| match n {
-            "boat" => "oak_boat",
-            "chest_boat" => "oak_chest_boat",
-            n => n,
-        }),
-        ClientRegistry::Attribute => renamed(&ATTR, r1_21_1::ATTRIBUTE, |n| {
-            n.split_once('.').map_or(n, |(_, x)| x)
-        }),
-        ClientRegistry::Block => r1_21_1::BLOCK,
-    }
+    };
 }
+names_pre_1_21_2!(names_1_21_1, r1_21_1);
+names_pre_1_21_2!(names_1_20_6, r1_20_6);
 
 type Names = fn(ClientRegistry) -> &'static [&'static str];
 type Comps = fn() -> &'static [&'static Shape];
@@ -148,15 +162,22 @@ const SRC_1_21_1: Source = Source {
     components: components_1_21_1,
 };
 
+/// 1.20.5/1.20.6: как 1.21.1, но еда без using_converts_to, модификаторы атрибутов с UUID.
+const SRC_1_20_6: Source = Source {
+    names: names_1_20_6,
+    components: components_1_20_6,
+};
+
 const SRC_1_21_3: Source = Source {
     names: names_1_21_3,
     components: components_1_21_3,
 };
 
-/// Источник перевода для версии соединения: 767 — 1.21/1.21.1, 768 — 1.21.2/1.21.3, 769 — 1.21.4, 770 — 1.21.5, 771 — 1.21.6, 772 — 1.21.7/1.21.8,
+/// Источник перевода для версии соединения: 766 — 1.20.5/1.20.6, 767 — 1.21/1.21.1, 768 — 1.21.2/1.21.3, 769 — 1.21.4, 770 — 1.21.5, 771 — 1.21.6, 772 — 1.21.7/1.21.8,
 /// 773 — 1.21.9/1.21.10, остальное — 1.21.11.
 fn source_index(protocol: i32) -> usize {
     match protocol {
+        766 => 8,
         767 => 7,
         768 => 6,
         769 => 5,
@@ -167,7 +188,7 @@ fn source_index(protocol: i32) -> usize {
         _ => 2,
     }
 }
-const SOURCES: [Source; 8] = [
+const SOURCES: [Source; 9] = [
     SRC_1_21_8,
     SRC_1_21_10,
     SRC_1_21_11,
@@ -176,6 +197,7 @@ const SOURCES: [Source; 8] = [
     SRC_1_21_4,
     SRC_1_21_3,
     SRC_1_21_1,
+    SRC_1_20_6,
 ];
 
 fn canon_names(reg: ClientRegistry) -> &'static [&'static str] {
@@ -517,6 +539,13 @@ impl Translator {
             w.bytes(extra);
             return Ok(ok);
         }
+        // Канон → 1.20.6: id модификатора атрибута → UUID и имя.
+        if let (Utf(_), Some(ModifierUuid)) = (s, d) {
+            let id = r.string(MAX_STRING_LENGTH)?;
+            let (uuid, name) = crate::item::modifier_uuid_1_20_6(&id);
+            w.uuid(uuid).string(&name);
+            return Ok(true);
+        }
         // Канон → версия, где значения не было (Shape::Const): значение пропускается.
         if let Some(Const(_)) = d {
             crate::item::walk(r, s, depth)?;
@@ -782,6 +811,13 @@ impl Translator {
                 w.bytes(bytes);
                 Ok(d.is_some())
             }
+            ModifierUuid => {
+                // VANILLA: AttributeModifierIdFix (1.21) — UUID и имя → id модификатора.
+                let uuid = r.uuid()?;
+                let name = r.string(MAX_STRING_LENGTH)?;
+                w.string(&crate::item::modifier_id_1_21(uuid, &name));
+                Ok(matches!(d, Some(Utf(_))))
+            }
             IntAsFloats => {
                 // VANILLA: 1.21.4 CustomModelData — старое число становится единственным float.
                 let v = r.var_int()?;
@@ -945,7 +981,7 @@ fn len(r: &mut Reader, max: usize) -> ProtocolResult<usize> {
 
 /// Пропуск патча компонентов версии соединения (для [`Shape::Stack`] в `walk`).
 pub(crate) fn skip_patch_legacy(r: &mut Reader, depth: u32) -> ProtocolResult<()> {
-    static T: [OnceLock<Translator>; 8] = [const { OnceLock::new() }; 8];
+    static T: [OnceLock<Translator>; 9] = [const { OnceLock::new() }; 9];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::new(SOURCES[k], |s| s))
         .patch(r, &mut Writer::new(), depth)?;
@@ -955,14 +991,14 @@ pub(crate) fn skip_patch_legacy(r: &mut Reader, depth: u32) -> ProtocolResult<()
 /// Переводчик версии соединения (1.21.7–1.21.11) → канон; `block_state` — перевод id
 /// состояний (ezzmc-world). Таблицы строятся один раз на версию.
 pub fn from_server(block_state: fn(u32) -> u32) -> &'static Translator {
-    static T: [OnceLock<Translator>; 8] = [const { OnceLock::new() }; 8];
+    static T: [OnceLock<Translator>; 9] = [const { OnceLock::new() }; 9];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::new(SOURCES[k], block_state))
 }
 
 /// Переводчик канон → версия соединения (пакеты клиента); `block_state` — канон → версия.
 pub fn to_server(block_state: fn(u32) -> u32) -> &'static Translator {
-    static T: [OnceLock<Translator>; 8] = [const { OnceLock::new() }; 8];
+    static T: [OnceLock<Translator>; 9] = [const { OnceLock::new() }; 9];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::build(SOURCES[k], block_state, true))
 }
@@ -1368,6 +1404,98 @@ mod tests {
         assert!(back.tr(&mut r, &mut o, dst, Some(shape), 0).unwrap());
         let mut want = head.clone();
         want.extend([0x3f, 0xcc, 0xcc, 0xcd, 0, 0]);
+        assert_eq!(o.into_vec(), want);
+    }
+
+    /// 1.20.6: модификатор атрибута (UUID, имя) → id по AttributeModifierIdFix, флаг
+    /// showInTooltip снимается; обратно — UUID известного id и флаг true.
+    #[test]
+    fn attribute_modifiers_1_20_6_uuid() {
+        use crate::generated::r1_20_6 as old;
+        let t = Translator::new(SRC_1_20_6, |s| s);
+        let back = Translator::build(SRC_1_20_6, |s| s, true);
+        let comp = |names: &[&str]| src_id(names, "attribute_modifiers") as usize;
+        let shape = components_1_20_6()[comp(old::DATA_COMPONENT_TYPE)];
+        let dst = &crate::item::components()[comp(canon::DATA_COMPONENT_TYPE)];
+        let uuid = 0xcb3f55d3_645c_4f38_a497_9c13a33db5cf_u128;
+        let mut v = Writer::new();
+        v.var_int(1)
+            .var_int(src_id(old::ATTRIBUTE, "generic.attack_damage"));
+        v.uuid(uuid).string("Weapon modifier").f64(5.0).var_int(0);
+        v.var_int(1).bool(true);
+        let v = v.into_vec();
+        let mut r = Reader::new(&v);
+        let mut o = Writer::new();
+        assert!(t.tr(&mut r, &mut o, shape, Some(dst), 0).unwrap());
+        assert_eq!(r.remaining(), 0);
+        let mut want = Writer::new();
+        want.var_int(1)
+            .var_int(src_id(canon::ATTRIBUTE, "attack_damage"));
+        want.string("minecraft:base_attack_damage")
+            .f64(5.0)
+            .var_int(0);
+        want.var_int(1).var_int(0);
+        let want = want.into_vec();
+        assert_eq!(o.into_vec(), want);
+        let mut r = Reader::new(&want);
+        let mut o = Writer::new();
+        assert!(back.tr(&mut r, &mut o, dst, Some(shape), 0).unwrap());
+        let mut old_back = Writer::new();
+        old_back
+            .var_int(1)
+            .var_int(src_id(old::ATTRIBUTE, "generic.attack_damage"));
+        old_back
+            .uuid(uuid)
+            .string("minecraft:base_attack_damage")
+            .f64(5.0)
+            .var_int(0);
+        old_back.var_int(1).bool(true);
+        assert_eq!(o.into_vec(), old_back.into_vec());
+    }
+
+    /// 1.20.6: id модификатора без известного UUID — `minecraft:<uuid>` и обратно тот же UUID.
+    #[test]
+    fn modifier_id_1_20_6_fallback() {
+        use crate::item::{modifier_id_1_21, modifier_uuid_1_20_6};
+        let u = 0x0123_4567_89ab_cdef_0011_2233_4455_6677_u128;
+        let id = modifier_id_1_21(u, "x");
+        assert_eq!(id, "minecraft:01234567-89ab-cdef-0011-223344556677");
+        assert_eq!(modifier_uuid_1_20_6(&id).0, u);
+        assert_eq!(
+            modifier_id_1_21(1, "Random spawn bonus"),
+            "minecraft:random_spawn_bonus"
+        );
+        assert_eq!(
+            modifier_uuid_1_20_6("minecraft:random_spawn_bonus").1,
+            "Random spawn bonus"
+        );
+        let (a, _) = modifier_uuid_1_20_6("mymod:speed");
+        assert_eq!(a, modifier_uuid_1_20_6("mymod:speed").0);
+    }
+
+    /// 1.20.6: еда без using_converts_to — eat_seconds и эффекты снимаются, обратно по умолчанию.
+    #[test]
+    fn food_1_20_6_trailing() {
+        use crate::generated::r1_20_6 as old;
+        let back = Translator::build(SRC_1_20_6, |s| s, true);
+        let t = Translator::new(SRC_1_20_6, |s| s);
+        let shape = components_1_20_6()[src_id(old::DATA_COMPONENT_TYPE, "food") as usize];
+        let dst = &crate::item::components()[src_id(canon::DATA_COMPONENT_TYPE, "food") as usize];
+        let mut v = Writer::new();
+        v.var_int(4).f32(2.4).bool(false);
+        let head = v.buf.clone();
+        v.f32(3.2).var_int(0);
+        let v = v.into_vec();
+        let mut r = Reader::new(&v);
+        let mut o = Writer::new();
+        assert!(t.tr(&mut r, &mut o, shape, Some(dst), 0).unwrap());
+        assert_eq!(r.remaining(), 0);
+        assert_eq!(o.into_vec(), head);
+        let mut r = Reader::new(&head);
+        let mut o = Writer::new();
+        assert!(back.tr(&mut r, &mut o, dst, Some(shape), 0).unwrap());
+        let mut want = head.clone();
+        want.extend([0x3f, 0xcc, 0xcc, 0xcd, 0]);
         assert_eq!(o.into_vec(), want);
     }
 

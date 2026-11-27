@@ -130,6 +130,19 @@ pub const V1_21_1: Version = Version {
     particle_type: generated::r1_21_1::PARTICLE_TYPE,
 };
 
+/// 1.20.5/1.20.6 (протокол 766): как 1.21.1, но без синхронизации реестров enchantment/
+/// painting_variant/jukebox_song, модификаторы атрибутов с UUID, use_item без поворота.
+pub const V1_20_6: Version = Version {
+    name: "1.20.6",
+    protocol: 766,
+    packets: generated::v1_20_6::PACKETS,
+    item: generated::r1_20_6::ITEM,
+    block: generated::r1_20_6::BLOCK,
+    entity_type: generated::r1_20_6::ENTITY_TYPE,
+    sound_event: generated::r1_20_6::SOUND_EVENT,
+    particle_type: generated::r1_20_6::PARTICLE_TYPE,
+};
+
 /// Forge/ваниль 1.20.1 (протокол 763): нет Configuration-фазы, реестры внутри Play `login`.
 pub const V1_20_1: Version = Version {
     name: "1.20.1",
@@ -146,7 +159,8 @@ pub const V1_20_1: Version = Version {
 pub const CANON: Version = V26_3;
 
 pub const SUPPORTED: &[Version] = &[
-    V26_3, V1_21_11, V1_21_10, V1_21_8, V1_21_6, V1_21_5, V1_21_4, V1_21_3, V1_21_1, V1_20_1,
+    V26_3, V1_21_11, V1_21_10, V1_21_8, V1_21_6, V1_21_5, V1_21_4, V1_21_3, V1_21_1, V1_20_6,
+    V1_20_1,
 ];
 
 /// Версия по protocol number из Status-ответа.
@@ -170,9 +184,9 @@ impl Version {
         self.protocol == CANON.protocol
     }
 
-    /// 1.21–1.21.11: переводятся одним путём (`legacy::clientbound_1_21_11`).
+    /// 1.20.5–1.21.11: переводятся одним путём (`legacy::clientbound_1_21_11`).
     pub fn is_1_21_late(&self) -> bool {
-        matches!(self.protocol, 767..=774)
+        matches!(self.protocol, 766..=774)
     }
 }
 
@@ -199,6 +213,7 @@ mod tests {
         assert_eq!(by_protocol(769).map(|v| v.name), Some("1.21.4"));
         assert_eq!(by_protocol(768).map(|v| v.name), Some("1.21.3"));
         assert_eq!(by_protocol(767).map(|v| v.name), Some("1.21.1"));
+        assert_eq!(by_protocol(766).map(|v| v.name), Some("1.20.6"));
         assert!(by_protocol(1).is_none());
     }
 

@@ -356,8 +356,8 @@ pub fn configure(
     conn.send(ids.get(ST, S, "custom_payload")?, &w.buf)?;
     let mut w = Writer::new();
     info.write(&mut w);
-    // VANILLA: ClientInformation (1.21.1) — без particleStatus (VarInt 0..2, один байт).
-    if ezzmc_protocol::version::current().protocol == 767 {
+    // VANILLA: ClientInformation (1.20.5–1.21.1) — без particleStatus (VarInt 0..2, один байт).
+    if matches!(ezzmc_protocol::version::current().protocol, 766 | 767) {
         w.buf.pop();
     }
     conn.send(ids.get(ST, S, "client_information")?, &w.buf)?;
@@ -386,7 +386,7 @@ pub fn configure(
                 let mut rd = parse_registry_data(&p.body)?;
                 // 1.21–1.21.10: цвета неба/тумана в `effects`, у измерений `effects` вместо
                 // skybox/attributes (атрибуты окружения появились в 1.21.11) — как у 1.20.1.
-                if matches!(ezzmc_protocol::version::current().protocol, 767..=773) {
+                if matches!(ezzmc_protocol::version::current().protocol, 766..=773) {
                     let f: Option<fn(Tag) -> Tag> = match rd.registry.as_str() {
                         "minecraft:dimension_type" => Some(crate::v1201::dimension_to_canon),
                         "minecraft:worldgen/biome" => Some(crate::v1201::biome_to_canon),
@@ -439,6 +439,18 @@ pub fn configure(
                 return Ok(ConfigOutcome::Transfer { host, port });
             }
             "finish_configuration" => {
+                // VANILLA: 1.20.5/1.20.6 — enchantment и painting_variant встроенные (в 1.21
+                // стали синхронизируемыми): реестры собираются из таблиц версии.
+                if ezzmc_protocol::version::current().protocol == 766 {
+                    cfg.registries.push(crate::v1201::enchant_registry_1_20_6());
+                    cfg.registries.push(RegistryData {
+                        registry: "minecraft:painting_variant".into(),
+                        entries: ezzmc_protocol::generated::r1_20_6::PAINTING_VARIANT
+                            .iter()
+                            .map(|n| (format!("minecraft:{n}"), None))
+                            .collect(),
+                    });
+                }
                 conn.send(ids.get(ST, S, "finish_configuration")?, &[])?;
                 conn.set_state(State::Play)?;
                 return Ok(ConfigOutcome::Play(Box::new(cfg)));

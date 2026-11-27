@@ -2,11 +2,12 @@
 //! Весь клиент разбирает только канонический формат; здесь исправляются расхождения
 //! между версиями. Реестровые id (предметы, сущности, звуки, частицы) — позже в этом же месте.
 use ezzmc_protocol::item::{
-    ClientRegistry, Shape, PARTICLE, PARTICLE_1_21_11, PARTICLE_1_21_3, SOUND,
+    modifier_id_1_21, ClientRegistry, Shape, PARTICLE, PARTICLE_1_21_11, PARTICLE_1_21_3, SOUND,
 };
 use ezzmc_protocol::translate::Translator;
 use ezzmc_protocol::version::{
-    build_remap, Version, CANON, V1_21_1, V1_21_10, V1_21_11, V1_21_3, V1_21_4, V1_21_5, V1_21_8,
+    build_remap, Version, CANON, V1_20_6, V1_21_1, V1_21_10, V1_21_11, V1_21_3, V1_21_4, V1_21_5,
+    V1_21_8,
 };
 use ezzmc_protocol::wire::{Reader, Writer};
 use ezzmc_protocol::{Direction, ProtocolResult, State};
@@ -19,9 +20,11 @@ use std::sync::{Mutex, OnceLock};
 /// block_entity_type совпадают; предметы/звуки — в `Translator`), 1 — 1.21.9/1.21.10 (773),
 /// 2 — 1.21.11 (774), 3 — 1.21.5 (770: свои id пакетов и сущностей, форматы как у 1.21.8),
 /// 4 — 1.21.4 (769: форматы 1.21.5 плюс отличия ниже), 5 — 1.21.2/1.21.3 (768: как 1.21.4
-/// плюс свои отличия), 6 — 1.21/1.21.1 (767: как 1.21.3 плюс отличия до 1.21.2).
+/// плюс свои отличия), 6 — 1.21/1.21.1 (767: как 1.21.3 плюс отличия до 1.21.2), 7 — 1.20.5/1.20.6
+/// (766: как 1.21.1 плюс отличия до 1.21).
 fn ver() -> usize {
     match ezzmc_protocol::version::current().protocol {
+        766 => 7,
         767 => 6,
         768 => 5,
         769 => 4,
@@ -31,33 +34,38 @@ fn ver() -> usize {
         _ => 2,
     }
 }
-const VERSIONS: [&Version; 7] = [
-    &V1_21_8, &V1_21_10, &V1_21_11, &V1_21_5, &V1_21_4, &V1_21_3, &V1_21_1,
+const VERSIONS: [&Version; 8] = [
+    &V1_21_8, &V1_21_10, &V1_21_11, &V1_21_5, &V1_21_4, &V1_21_3, &V1_21_1, &V1_20_6,
 ];
 
 /// Форматы до 1.21.9 (1.21.5–1.21.8): скорости short, BlockPos спавна без измерения и т. п.
 fn pre_1_21_9(k: usize) -> bool {
-    matches!(k, 0 | 3..=6)
+    matches!(k, 0 | 3..=7)
 }
 
 /// Форматы до 1.21.6 (1.21–1.21.5): PRESS/RELEASE_SHIFT_KEY, нет HangingEntity#DATA_DIRECTION.
 fn pre_1_21_6(k: usize) -> bool {
-    matches!(k, 3..=6)
+    matches!(k, 3..=7)
 }
 
 /// Форматы до 1.21.5 (1.21–1.21.4): add_experience_orb, showInTooltip, NBT-карты высот и т. п.
 fn pre_1_21_5(k: usize) -> bool {
-    matches!(k, 4..=6)
+    matches!(k, 4..=7)
 }
 
-/// Форматы до 1.21.2 (1.21/1.21.1): id контейнеров байтом, старые позиция/телепорт/взрыв.
+/// Форматы до 1.21.2 (1.20.5–1.21.1): id контейнеров байтом, старые позиция/телепорт/взрыв.
 fn pre_1_21_2(k: usize) -> bool {
-    k == 6
+    matches!(k, 6 | 7)
+}
+
+/// Форматы до 1.21 (1.20.5/1.20.6): модификаторы атрибутов с UUID, use_item без поворота.
+fn pre_1_21(k: usize) -> bool {
+    k == 7
 }
 
 /// Форма частиц версии соединения: 1.21–1.21.3 — `trail` без длительности (в 1.21.1 его нет).
 fn particle_src() -> &'static Shape {
-    if matches!(ver(), 5 | 6) {
+    if matches!(ver(), 5..=7) {
         &PARTICLE_1_21_3
     } else {
         &PARTICLE_1_21_11
@@ -65,7 +73,7 @@ fn particle_src() -> &'static Shape {
 }
 
 fn entity_type_map() -> &'static [Option<u32>] {
-    static T: [OnceLock<Vec<Option<u32>>>; 7] = [const { OnceLock::new() }; 7];
+    static T: [OnceLock<Vec<Option<u32>>>; 8] = [const { OnceLock::new() }; 8];
     let k = ver();
     T[k].get_or_init(|| {
         let mut t = build_remap(VERSIONS[k].entity_type, CANON.entity_type);
@@ -93,9 +101,9 @@ fn entity_type_map() -> &'static [Option<u32>] {
 /// Реестр block_entity_type версии соединения → канон (в 26.x убран `bed`, добавлен `potent_sulfur`).
 fn block_entity_type(id: i32) -> Option<i32> {
     use ezzmc_protocol::generated::{
-        r1_21_1, r1_21_10, r1_21_11, r1_21_3, r1_21_4, r1_21_5, r1_21_8, r26_3,
+        r1_20_6, r1_21_1, r1_21_10, r1_21_11, r1_21_3, r1_21_4, r1_21_5, r1_21_8, r26_3,
     };
-    const SRC: [&[&str]; 7] = [
+    const SRC: [&[&str]; 8] = [
         r1_21_8::BLOCK_ENTITY_TYPE,
         r1_21_10::BLOCK_ENTITY_TYPE,
         r1_21_11::BLOCK_ENTITY_TYPE,
@@ -103,8 +111,9 @@ fn block_entity_type(id: i32) -> Option<i32> {
         r1_21_4::BLOCK_ENTITY_TYPE,
         r1_21_3::BLOCK_ENTITY_TYPE,
         r1_21_1::BLOCK_ENTITY_TYPE,
+        r1_20_6::BLOCK_ENTITY_TYPE,
     ];
-    static T: [OnceLock<Vec<Option<u32>>>; 7] = [const { OnceLock::new() }; 7];
+    static T: [OnceLock<Vec<Option<u32>>>; 8] = [const { OnceLock::new() }; 8];
     let k = ver();
     T[k].get_or_init(|| build_remap(SRC[k], r26_3::BLOCK_ENTITY_TYPE))
         .get(usize::try_from(id).ok()?)
@@ -839,6 +848,7 @@ fn set_entity_data(r: &mut Reader, w: &mut Writer, k: usize) -> ProtocolResult<(
         SERIALIZERS_1_21_4,
         SERIALIZERS_1_21_4,
         SERIALIZERS_1_21_4,
+        SERIALIZERS_1_21_4,
     ][k];
     // VANILLA: HangingEntity#DATA_DIRECTION (#8) появился в 1.21.6 — поля рамок/картин 1.21.5
     // с #8 сдвигаются на 1 (направление приходит в add_entity, как и в 1.21.6).
@@ -1052,7 +1062,7 @@ fn serverbound_body(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
         // VANILLA: ServerboundPlayerCommandPacket.Action (1.21.5): перед STOP_SLEEPING ещё
         // PRESS_SHIFT_KEY, RELEASE_SHIFT_KEY.
         // VANILLA: ServerboundMoveVehiclePacket (1.21.4) дописал onGround; в 1.21.3 его нет.
-        "move_vehicle" if matches!(ver(), 5 | 6) => {
+        "move_vehicle" if matches!(ver(), 5..=7) => {
             let Some((_, head)) = body.split_last() else {
                 return Ok(None);
             };
@@ -1089,6 +1099,19 @@ fn serverbound_body(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
             };
             w.f32(axis(4, 8)).f32(axis(1, 2));
             w.u8(u8::from(i & 16 != 0) | (u8::from(i & 32 != 0) << 1));
+        }
+        // VANILLA: FriendlyByteBuf#writeBlockHitResult (1.21.1) — без worldBorderHit (1.21.2).
+        "use_item_on" if pre_1_21_2(ver()) => {
+            w.var_int(r.var_int()?)
+                .bytes(r.bytes(8)?)
+                .var_int(r.var_int()?);
+            w.bytes(r.bytes(12)?).bool(r.bool()?);
+            r.bool()?;
+            w.var_int(r.var_int()?);
+        }
+        // VANILLA: ServerboundUseItemPacket (1.20.6) — рука и sequence, без yRot/xRot.
+        "use_item" if pre_1_21(ver()) => {
+            w.var_int(r.var_int()?).var_int(r.var_int()?);
         }
         // VANILLA: ClientInformation (1.21.1) — без particleStatus (появился в 1.21.2).
         "client_information" if pre_1_21_2(ver()) => {
@@ -1646,6 +1669,13 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
             tr().stack(&mut r, &mut w)?;
         }
         // VANILLA: id окна 1.21.1 байтом (ContainerSetData, ContainerClose, HorseScreenOpen).
+        // VANILLA: ClientboundHorseScreenOpenPacket (1.20.6) — размер инвентаря вместо колонок:
+        // лошадь 2, осёл/мул с сундуком 16, лама 1 + 3 × колонки (AbstractHorse#getInventorySize).
+        "horse_screen_open" if pre_1_21(ver()) => {
+            container_id(&mut r, &mut w)?;
+            let size = r.var_int()?;
+            w.var_int((size.max(1) - 1) / 3).bytes(r.rest());
+        }
         "container_set_data" | "container_close" | "horse_screen_open" if pre_1_21_2(ver()) => {
             container_id(&mut r, &mut w)?;
             w.bytes(r.rest());
@@ -1736,7 +1766,7 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
         "level_particles" => {
             // VANILLA: ClientboundLevelParticlesPacket (1.21.4) — overrideLimiter, alwaysShow;
             // в 1.21.3 только overrideLimiter (LevelRenderer#addParticle с alwaysShow = false).
-            let flags: &[u8] = if matches!(ver(), 5 | 6) {
+            let flags: &[u8] = if matches!(ver(), 5..=7) {
                 &[r.u8()?, 0]
             } else {
                 r.bytes(2)?
@@ -1833,6 +1863,14 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
             }
             w.var_int(kept).bytes(&list.into_vec()).bool(true);
         }
+        // VANILLA: ClientboundProjectilePowerPacket (1.20.6) — вектор xPower/yPower/zPower; в 1.21
+        // одно accelerationPower по направлению полёта.
+        // VANILLA-UNSURE: берётся длина вектора (AbstractHurtingProjectile 1.20.6 → 1.21).
+        "projectile_power" if pre_1_21(ver()) => {
+            w.var_int(r.var_int()?);
+            let (x, y, z) = (r.f64()?, r.f64()?, r.f64()?);
+            w.f64((x * x + y * y + z * z).sqrt());
+        }
         // VANILLA: AttributeSnapshot — Attribute holder (реестр attribute), base, модификаторы.
         "update_attributes" => {
             w.var_int(r.var_int()?);
@@ -1842,14 +1880,30 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
             for _ in 0..n {
                 let id = tr().id(ClientRegistry::Attribute, r.var_int()?);
                 let start = r.pos();
-                r.f64()?;
-                for _ in 0..r.length("modifiers", 1 << 12)? {
-                    r.string(32767)?;
+                let modifiers = if pre_1_21(ver()) {
+                    // VANILLA: AttributeSnapshot#MODIFIER_STREAM_CODEC (1.20.6) — UUID вместо
+                    // id; имя на клиенте "Unknown synced attribute modifier".
+                    let mut m = Writer::new();
+                    let base = r.f64()?;
+                    let n = r.length("modifiers", 1 << 12)?;
+                    m.f64(base).var_int(n as i32);
+                    for _ in 0..n {
+                        let uuid = r.uuid()?;
+                        let id = modifier_id_1_21(uuid, "Unknown synced attribute modifier");
+                        m.string(&id).f64(r.f64()?).var_int(r.var_int()?);
+                    }
+                    m.into_vec()
+                } else {
                     r.f64()?;
-                    r.var_int()?;
-                }
+                    for _ in 0..r.length("modifiers", 1 << 12)? {
+                        r.string(32767)?;
+                        r.f64()?;
+                        r.var_int()?;
+                    }
+                    r.since(start).to_vec()
+                };
                 if let Some(id) = id {
-                    list.var_int(id).bytes(r.since(start));
+                    list.var_int(id).bytes(&modifiers);
                     kept += 1;
                 }
             }

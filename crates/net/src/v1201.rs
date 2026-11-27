@@ -533,9 +533,24 @@ fn enchant_holder(name: &str) -> Option<u32> {
 
 /// Синтетический `registry_data minecraft:enchantment` для подсказок (имена + max_level).
 fn enchant_registry() -> RegistryData {
+    enchant_registry_of(enchant_names())
+}
+
+/// 1.20.5/1.20.6: зачарования — встроенный реестр, сервер его не присылает; порядок =
+/// id в компонентах предметов.
+pub(crate) fn enchant_registry_1_20_6() -> RegistryData {
+    enchant_registry_of(
+        ezzmc_protocol::generated::r1_20_6::ENCHANTMENT
+            .iter()
+            .map(|n| format!("minecraft:{n}"))
+            .collect(),
+    )
+}
+
+fn enchant_registry_of(names: Vec<String>) -> RegistryData {
     RegistryData {
         registry: "minecraft:enchantment".into(),
-        entries: enchant_names()
+        entries: names
             .into_iter()
             .map(|n| {
                 let max = ENCHANT_MAX

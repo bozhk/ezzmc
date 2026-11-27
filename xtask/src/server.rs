@@ -1,7 +1,8 @@
-//! `cargo xtask server <ver> [порт] [--reset]`: отладочный ванильный сервер для тестов клиента.
+//! `cargo xtask server <ver> [порт] [--reset] [--animals]`: отладочный ванильный сервер для тестов клиента.
 //! Каталог `reference/_server/<ver>/` (вне git): offline-режим (`online-mode=false`), стабильный seed (обычный мир),
 //! творческий режим, мир без мобов/погоды, стабильный seed, spawn-protection=0. Запуск — на переднем плане
 //! (Ctrl+C / `stop` в консоли). Порт по умолчанию 25565. `--reset` удаляет мир (но не jar и не настройки).
+//! `--animals` — `spawn-animals=true`: до 1.21.2 сервер с `false` сразу удаляет и призванных животных.
 //! Принятие EULA Mojang для локального отладочного сервера записывается автоматически (`eula=true`).
 use crate::fetch_reference::Res;
 use crate::gen_reports::server_jar;
@@ -31,6 +32,7 @@ motd=ezzmc test server
 
 pub fn run_cmd(ver: &str, rest: &[String]) -> Res<()> {
     let reset = rest.iter().any(|a| a == "--reset");
+    let animals = rest.iter().any(|a| a == "--animals");
     let port: u16 = match rest.iter().find(|a| !a.starts_with("--")) {
         Some(p) => p.parse().map_err(|_| format!("порт `{p}` не число"))?,
         None => 25565,
@@ -47,7 +49,14 @@ pub fn run_cmd(ver: &str, rest: &[String]) -> Res<()> {
     // Настройки пишем всегда: стенд должен быть воспроизводим (правки руками затираются).
     fs::write(
         dir.join("server.properties"),
-        format!("{PROPERTIES}server-port={port}\n"),
+        format!(
+            "{}server-port={port}\n",
+            if animals {
+                PROPERTIES.replace("spawn-animals=false", "spawn-animals=true")
+            } else {
+                PROPERTIES.to_owned()
+            }
+        ),
     )?;
     eprintln!(
         "сервер {ver} на 127.0.0.1:{port} (offline), каталог {}",

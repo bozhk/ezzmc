@@ -1,5 +1,6 @@
 // @generated `cargo xtask gen-protocol`. НЕ РЕДАКТИРОВАТЬ.
 pub mod r1_20_1;
+pub mod r1_20_6;
 pub mod r1_21_1;
 pub mod r1_21_10;
 pub mod r1_21_11;
@@ -10,6 +11,7 @@ pub mod r1_21_6;
 pub mod r1_21_8;
 pub mod r26_3;
 pub mod v1_20_1;
+pub mod v1_20_6;
 pub mod v1_21_1;
 pub mod v1_21_10;
 pub mod v1_21_11;

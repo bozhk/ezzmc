@@ -141,6 +141,9 @@ pub enum Shape {
     /// (e.g. pre-1.21.2 unit `fire_resistant` → `damage_resistant` with the
     /// `is_fire` tag). Source-version shapes only.
     Const(&'static [u8]),
+    /// Pre-1.21 `AttributeModifier` key: UUID and name; 1.21 replaced both with
+    /// an identifier (see [`modifier_id_1_21`]). Source-version shapes only.
+    ModifierUuid,
 }
 
 use Shape::*;
@@ -1021,6 +1024,191 @@ static TRIM_MATERIAL_1_21_1: Shape = Holder(&Struct(&[
     TEXT,
 ]));
 
+/// `AttributeModifierIdFix.ID_MAP` (1.21): well-known modifier UUIDs → ids.
+static MODIFIER_IDS: &[(u128, &str)] = &[
+    (
+        0x736565d2e1a7403da3f81aeb3e302542,
+        "minecraft:creative_mode_block_range",
+    ),
+    (
+        0x98491ef697b14584ae8271a8cc85cf73,
+        "minecraft:creative_mode_entity_range",
+    ),
+    (0x91aeaa56376b4498935b2f7f68070635, "minecraft:effect.speed"),
+    (
+        0x7107de5e7ce84030940e514c1f160890,
+        "minecraft:effect.slowness",
+    ),
+    (0xaf8b6e3f33284c0aaa365ba2bb9dbef3, "minecraft:effect.haste"),
+    (
+        0x55fced67e92a486e9800b47f202c4386,
+        "minecraft:effect.mining_fatigue",
+    ),
+    (
+        0x648d70646a604f598abec2c23a6dd7a9,
+        "minecraft:effect.strength",
+    ),
+    (
+        0xc0105bf3aef846b09ebc92943757ccbe,
+        "minecraft:effect.jump_boost",
+    ),
+    (
+        0x22653b89116e49dc9b6b9971489b5be5,
+        "minecraft:effect.weakness",
+    ),
+    (
+        0x5d6f0ba2118646acb896c61c5cee99cc,
+        "minecraft:effect.health_boost",
+    ),
+    (
+        0xeae29cf0701e4ed6883a96f798f3dab5,
+        "minecraft:effect.absorption",
+    ),
+    (0x03c3c89d70374b42869fb146bcb64d2e, "minecraft:effect.luck"),
+    (
+        0xcc5af1422bd24215b6362605aed11727,
+        "minecraft:effect.unluck",
+    ),
+    (0x6555be7463b341f1a24577833b3c2562, "minecraft:evil"),
+    (0x1eaf83ff72074596b37ad7a07b3ec4ce, "minecraft:powder_snow"),
+    (0x662a6b8dda3e4c1c881396ea6097278d, "minecraft:sprinting"),
+    (0x020e0dfb87ae46539556831010e291a0, "minecraft:attacking"),
+    (0x766bfa6411f311ea8d71362b9e155667, "minecraft:baby"),
+    (0x7e0292f2943448d5a29f9583af7df27f, "minecraft:covered"),
+    (0x9e36292401de4ddda2b2d0f7a405a174, "minecraft:suffocating"),
+    (0x5cd17e52a79a43d3a52990fde04b181e, "minecraft:drinking"),
+    (0xb9766b5995664402bc1f2ee2a276d836, "minecraft:baby"),
+    (0x49455a497ec545bab8863b90b23a1718, "minecraft:attacking"),
+    (0x845db27cc624495f8c9f6020a9a58b6b, "minecraft:armor.boots"),
+    (
+        0xd8499b040e664726ab2964469d734e0d,
+        "minecraft:armor.leggings",
+    ),
+    (
+        0x9f3d476dc1184544836564846904b48e,
+        "minecraft:armor.chestplate",
+    ),
+    (0x2ad3f246fee14e67b88669fd380bb150, "minecraft:armor.helmet"),
+    (0xc1c727718b8eba4aace081a93c8928b2, "minecraft:armor.body"),
+    (
+        0xb572ecd2ac0c4071abde9594af072a37,
+        "minecraft:enchantment.fire_protection",
+    ),
+    (
+        0x40a9968f5c664e2fb7f42ec2f4b3e450,
+        "minecraft:enchantment.blast_protection",
+    ),
+    (
+        0x07a65791f64d4e7986c7f83932f007ec,
+        "minecraft:enchantment.respiration",
+    ),
+    (
+        0x60b1b7dbfffd4ad0817cd6c6a93d8a45,
+        "minecraft:enchantment.aqua_affinity",
+    ),
+    (
+        0x11dc269a447646c0aff39e17d7eb6801,
+        "minecraft:enchantment.depth_strider",
+    ),
+    (
+        0x87f46a96686f4796b03522e16ee9e038,
+        "minecraft:enchantment.soul_speed",
+    ),
+    (
+        0xb9716dbd50df4080850e70347d24e687,
+        "minecraft:enchantment.soul_speed",
+    ),
+    (
+        0x92437d00c3a74f2e8f6c1f21585d5dd0,
+        "minecraft:enchantment.swift_sneak",
+    ),
+    (
+        0x5d3d087bdebe4037b53ed84f3ff51f17,
+        "minecraft:enchantment.sweeping_edge",
+    ),
+    (
+        0x3ceb37c0db6246b5bd02785457b01d96,
+        "minecraft:enchantment.efficiency",
+    ),
+    (
+        0xcb3f55d3645c4f38a4979c13a33db5cf,
+        "minecraft:base_attack_damage",
+    ),
+    (
+        0xfa233e1c41804865b01bbcce9785aca3,
+        "minecraft:base_attack_speed",
+    ),
+];
+
+/// `AttributeModifierIdFix.NAME_MAP` (1.21): random-bonus modifiers by name.
+static MODIFIER_NAMES: &[(&str, &str)] = &[
+    ("Random spawn bonus", "minecraft:random_spawn_bonus"),
+    (
+        "Random zombie-spawn bonus",
+        "minecraft:zombie_random_spawn_bonus",
+    ),
+    ("Leader zombie bonus", "minecraft:leader_zombie_bonus"),
+    (
+        "Zombie reinforcement callee charge",
+        "minecraft:reinforcement_callee_charge",
+    ),
+    (
+        "Zombie reinforcement caller charge",
+        "minecraft:reinforcement_caller_charge",
+    ),
+];
+
+/// Pre-1.21 modifier (UUID, name) → 1.21 id: known UUID, then known name, then
+/// `minecraft:<uuid>`.
+// VANILLA: AttributeModifierIdFix#fixModifiers (1.21.1).
+// VANILLA-UNSURE: modifiers merged by NAME_MAP are not summed (one per item here).
+pub fn modifier_id_1_21(uuid: u128, name: &str) -> String {
+    if let Some((_, id)) = MODIFIER_IDS.iter().find(|(u, _)| *u == uuid) {
+        return (*id).to_owned();
+    }
+    if let Some((_, id)) = MODIFIER_NAMES.iter().find(|(n, _)| *n == name) {
+        return (*id).to_owned();
+    }
+    let h = format!("{uuid:032x}");
+    format!(
+        "minecraft:{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..32]
+    )
+}
+
+/// 1.21 id → pre-1.21 modifier (UUID, name): inverse of [`modifier_id_1_21`];
+/// an id without a UUID gets a stable hash of its text.
+// VANILLA-UNSURE: no vanilla inverse (1.21 servers never downgrade); the name is the id.
+pub fn modifier_uuid_1_20_6(id: &str) -> (u128, String) {
+    if let Some((u, _)) = MODIFIER_IDS.iter().find(|(_, n)| *n == id) {
+        return (*u, id.to_owned());
+    }
+    if let Some((n, _)) = MODIFIER_NAMES.iter().find(|(_, x)| *x == id) {
+        return (fnv128(id), (*n).to_owned());
+    }
+    let hex: String = id
+        .strip_prefix("minecraft:")
+        .unwrap_or("")
+        .chars()
+        .filter(|c| *c != '-')
+        .collect();
+    match u128::from_str_radix(&hex, 16) {
+        Ok(u) if hex.len() == 32 => (u, id.to_owned()),
+        _ => (fnv128(id), id.to_owned()),
+    }
+}
+
+/// FNV-1a, 128 bit: stable UUID for a modifier id without one.
+fn fnv128(s: &str) -> u128 {
+    s.bytes().fold(0x6c62272e07bb014262b821756295c58d, |h, b| {
+        (h ^ u128::from(b)).wrapping_mul(0x0000000001000000000000000000013b)
+    })
+}
+
 /// 1.21.1 → 1.21.2: food lost eat_seconds/using_converts_to/effects (moved to
 /// `consumable`), `fire_resistant` became `damage_resistant` (#is_fire), potion
 /// contents got `custom_name`, instruments a float duration and description.
@@ -1081,6 +1269,77 @@ pub(crate) fn components_1_21_1() -> &'static [&'static Shape] {
             })
             .map(|name| {
                 [
+                    COMPONENTS_1_21_1,
+                    COMPONENTS_1_21_3,
+                    COMPONENTS_1_21_4,
+                    COMPONENTS_1_21_5,
+                    COMPONENTS_1_21_8,
+                    COMPONENTS_1_21_10,
+                    COMPONENTS_1_21_11,
+                    COMPONENTS_26_2,
+                ]
+                .iter()
+                .find_map(|layer| layer.iter().find(|(n, _)| *n == name))
+                .map(|(_, s)| s)
+                .unwrap_or(&Shape::Nbt)
+            })
+            .collect()
+    });
+    &T
+}
+
+/// 1.20.6 → 1.21: food lost `using_converts_to`, attribute modifiers were keyed
+/// by UUID and name instead of an identifier (`Shape::ModifierUuid`).
+// VANILLA: FoodProperties, ItemAttributeModifiers, AttributeModifier (1.20.6).
+static COMPONENTS_1_20_6: &[(&str, Shape)] = &[
+    (
+        "food",
+        Trailing(
+            &Struct(&[VarInt, Float, Bool]),
+            &Struct(&[
+                Float,
+                List(UNBOUNDED, &Struct(&[Ref(&MOB_EFFECT_INSTANCE), Float])),
+            ]),
+            // eat_seconds 1.6F, no effects
+            &[0x3f, 0xcc, 0xcc, 0xcd, 0],
+        ),
+    ),
+    (
+        "attribute_modifiers",
+        Trailing(
+            &List(
+                UNBOUNDED,
+                &Extend(
+                    &[
+                        RegistryId(ClientRegistry::Attribute),
+                        Struct(&[ModifierUuid, Double, VarInt]),
+                        VarInt,
+                    ],
+                    &[0],
+                ),
+            ),
+            &Bool,
+            &[1],
+        ),
+    ),
+];
+
+/// Component shapes of 1.20.5/1.20.6 by their own component type id (with
+/// `fire_resistant` named `damage_resistant`, see `translate::names_1_20_6`).
+pub(crate) fn components_1_20_6() -> &'static [&'static Shape] {
+    static T: std::sync::LazyLock<Vec<&'static Shape>> = std::sync::LazyLock::new(|| {
+        crate::generated::r1_20_6::DATA_COMPONENT_TYPE
+            .iter()
+            .map(|name| {
+                if *name == "fire_resistant" {
+                    "damage_resistant"
+                } else {
+                    name
+                }
+            })
+            .map(|name| {
+                [
+                    COMPONENTS_1_20_6,
                     COMPONENTS_1_21_1,
                     COMPONENTS_1_21_3,
                     COMPONENTS_1_21_4,
@@ -1475,6 +1734,10 @@ pub fn walk(r: &mut Reader, shape: &'static Shape, depth: u32) -> ProtocolResult
             r.var_int()?;
         }
         Const(_) => {}
+        ModifierUuid => {
+            r.uuid()?;
+            r.string(MAX_STRING_LENGTH)?;
+        }
         Trailing(inner, skipped, _) => {
             walk(r, inner, depth)?;
             walk(r, skipped, depth)?;

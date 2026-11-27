@@ -276,13 +276,40 @@ fn fmt_num(v: f64) -> String {
     }
 }
 
-/// Подстановка `%s` по порядку и `%%` → `%` (как в lang-шаблонах Mojang).
+/// VANILLA: TranslatableContents#decomposeTemplate — `%s` по порядку, `%n$s` по номеру, `%%` → `%`.
 fn fill(tpl: &str, args: &[&str]) -> String {
-    let mut s = tpl.to_owned();
-    for a in args {
-        s = s.replacen("%s", a, 1);
+    let mut out = String::with_capacity(tpl.len());
+    let mut rest = tpl;
+    let mut next = 0usize;
+    while let Some(p) = rest.find('%') {
+        out.push_str(&rest[..p]);
+        let tail = &rest[p + 1..];
+        if let Some(t) = tail.strip_prefix('%') {
+            out.push('%');
+            rest = t;
+        } else if let Some(t) = tail.strip_prefix('s') {
+            out.push_str(args.get(next).copied().unwrap_or(""));
+            next += 1;
+            rest = t;
+        } else {
+            let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+            match (
+                tail[..digits].parse::<usize>(),
+                tail[digits..].strip_prefix("$s"),
+            ) {
+                (Ok(n), Some(t)) if n >= 1 => {
+                    out.push_str(args.get(n - 1).copied().unwrap_or(""));
+                    rest = t;
+                }
+                _ => {
+                    out.push('%');
+                    rest = tail;
+                }
+            }
+        }
     }
-    s.replace("%%", "%")
+    out.push_str(rest);
+    out
 }
 
 /// VANILLA: StringUtil#formatTickDuration (tickrate 20): `mm:ss`, при часах `hh:mm:ss`.
@@ -1576,6 +1603,12 @@ mod durability_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fill_positional_args() {
+        assert_eq!(super::fill(" %2$s: %1$s", &["+7", "Урон"]), " Урон: +7");
+        assert_eq!(super::fill("%s %s%%", &["a", "b"]), "a b%");
+    }
+
     use super::*;
     use crate::particles::FireworkShape;
 

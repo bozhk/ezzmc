@@ -60,13 +60,10 @@ impl ChunkCache {
             // берётся из нижнего ряда ближайшего слоя выше (или 15 над всеми слоями); нулевой слой
             // затемнил бы всю секцию. Блочный свет без слоя = 0.
             let fresh = match kind {
-                Kind::Sky => layers[i + 1..]
-                    .iter()
-                    .find_map(|l| l.as_ref())
-                    .map_or_else(
-                        || crate::light::DataLayer::filled(15),
-                        crate::light::DataLayer::repeat_first_layer,
-                    ),
+                Kind::Sky => layers[i + 1..].iter().find_map(|l| l.as_ref()).map_or_else(
+                    || crate::light::DataLayer::filled(15),
+                    crate::light::DataLayer::repeat_first_layer,
+                ),
                 Kind::Block => crate::light::DataLayer::filled(0),
             };
             layers[i] = Some(fresh);

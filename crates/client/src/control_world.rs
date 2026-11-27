@@ -855,7 +855,11 @@ impl App {
                     j["rotation"] = json!(e.int_meta(10).unwrap_or(0));
                     j["direction"] = json!(e.data);
                 }
+                // VANILLA: Entity#FLAG_ONFIRE = 0, FLAG_SHIFT_KEY_DOWN = 1.
                 if e.flags & 1 != 0 {
+                    j["on_fire"] = json!(true);
+                }
+                if e.flags & 2 != 0 {
                     j["sneaking"] = json!(true);
                 }
                 if *name == "ender_dragon" {
