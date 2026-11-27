@@ -1439,6 +1439,14 @@ fn hashed_to_stack_1_21_4(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> 
 /// Пакет сервера 1.21.4, которого нет в 1.21.5+, → пакеты 1.21.4 (id, тело), которые затем
 /// переводятся обычным путём. `None` — пакет не разворачивается.
 pub fn expand(name: Option<&str>, body: &[u8]) -> ProtocolResult<Option<Vec<Packet>>> {
+    // 1.16/1.16.1: изменения чанка → обновления секций формата 1.16.2.
+    if crate::v1201::is_1_16_1() {
+        let name = name.unwrap_or_default();
+        return Ok(crate::v1165::expand_1_16_1(name, body)?.map(|bodies| {
+            let id = crate::v1165::SECTION_UPDATE_ID;
+            bodies.into_iter().map(|b| (id, b)).collect()
+        }));
+    }
     if !pre_1_21_5(ver()) || name != Some("add_experience_orb") {
         return Ok(None);
     }

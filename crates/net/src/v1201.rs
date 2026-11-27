@@ -206,14 +206,23 @@ pub fn login(conn: &mut Connection, ids: &PacketIds, name: &str) -> NetResult<Jo
         }
         early.push(p);
     };
+    let login16 = if is_1_16_1() {
+        Some(crate::v1165::from_1_16_1("login", &login_pkt.body)?)
+    } else {
+        None
+    };
+    let raw16 = match &login16 {
+        Some(Pre18::Replace(b)) => b.as_slice(),
+        _ => &login_pkt.body,
+    };
     let pre17 = if is_1_17() {
-        from_1_17_1("login", &login_pkt.body)?
+        from_1_17_1("login", raw16)?
     } else {
         Pre18::Keep
     };
     let raw17 = match &pre17 {
         Pre18::Replace(b) => b.as_slice(),
-        _ => &login_pkt.body,
+        _ => raw16,
     };
     let pre18 = if is_1_18() {
         from_1_18_2("login", raw17)?
@@ -916,12 +925,31 @@ pub(crate) fn registries_from_codec(t: &Tag) -> Vec<RegistryData> {
             "minecraft:worldgen/biome" => t.map(biome_to_canon),
             _ => t,
         };
+        // 1.16–1.17: id биомов с пропусками (127, 129…), а чанк ссылается по id — дыры
+        // заполняются, чтобы позиция в списке совпадала с id.
+        if name == "minecraft:worldgen/biome" {
+            fill_id_gaps(&mut entries);
+        }
         out.push(RegistryData {
             registry: name.clone(),
             entries: entries.into_iter().map(|(_, n, t)| (n, norm(t))).collect(),
         });
     }
     out
+}
+
+fn fill_id_gaps(entries: &mut Vec<(i64, String, Option<Tag>)>) {
+    let Some(filler) = entries.first().map(|e| e.2.clone()) else {
+        return;
+    };
+    let max = entries.last().map_or(0, |e| e.0).clamp(0, 4095);
+    let mut sorted = std::mem::take(entries).into_iter().peekable();
+    for id in 0..=max {
+        match sorted.next_if(|e| e.0 == id) {
+            Some(e) => entries.push(e),
+            None => entries.push((id, format!("ezzmc:gap_{id}"), filler.clone())),
+        }
+    }
 }
 
 fn put(t: &mut Vec<(String, Tag)>, k: &str, v: Tag) {
@@ -1180,6 +1208,7 @@ fn enchant_names() -> Vec<String> {
         ezzmc_protocol::generated::r1_18_2::ENCHANTMENT,
         ezzmc_protocol::generated::r1_17_1::ENCHANTMENT,
         ezzmc_protocol::generated::r1_16_5::ENCHANTMENT,
+        ezzmc_protocol::generated::r1_16_1::ENCHANTMENT,
     ][era()];
     names.iter().map(|n| enchant_canon_name(n)).collect()
 }
@@ -1346,36 +1375,41 @@ fn nbt_to_components(t: &Tag, book: bool) -> Vec<(u32, Vec<u8>)> {
 
 /// Сервер 1.17–1.19.4 (755–762): тот же путь, тела сначала переводятся в формат 1.20.1.
 fn is_1_19_4() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 751..=762)
+    matches!(ezzmc_protocol::version::current().protocol, 735..=762)
 }
 
 /// Сервер 1.17–1.19.2 (755–760): тела сначала переводятся в формат 1.19.3 (`from_1_19_2`).
 fn is_1_19_2() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 751..=760)
+    matches!(ezzmc_protocol::version::current().protocol, 735..=760)
 }
 
 /// Сервер 1.17–1.19 (755–759): тела сначала переводятся в формат 1.19.2 (`from_1_19`).
 fn is_1_19() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 751..=759)
+    matches!(ezzmc_protocol::version::current().protocol, 735..=759)
 }
 
 /// Сервер 1.17–1.18.2 (755–758): тела сначала переводятся в формат 1.19 (`from_1_18_2`).
 fn is_1_18() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 751..=758)
+    matches!(ezzmc_protocol::version::current().protocol, 735..=758)
 }
 
 /// Сервер 1.17/1.17.1 (755/756): тела сначала переводятся в формат 1.18.2 (`from_1_17_1`).
-/// 1.16.2–1.16.5 (формат провода один, `v1165`).
+/// 1.16–1.16.5 (`v1165`).
 pub(crate) fn is_1_16() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 751..=754)
+    matches!(ezzmc_protocol::version::current().protocol, 735..=754)
+}
+
+/// 1.16/1.16.1: вход, респаун и чанк отличаются от 1.16.2.
+pub(crate) fn is_1_16_1() -> bool {
+    matches!(ezzmc_protocol::version::current().protocol, 735 | 736)
 }
 
 fn is_1_17() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 751..=756)
+    matches!(ezzmc_protocol::version::current().protocol, 735..=756)
 }
 
 /// Индекс версии для таблиц: 0 — 1.20.1, 1 — 1.19.4, 2 — 1.19.3, 3 — 1.19.2, 4 — 1.19, 5 — 1.18–1.18.2,
-/// 6 — 1.17–1.17.1, 7 — 1.16.5.
+/// 6 — 1.17–1.17.1, 7 — 1.16.2–1.16.5, 8 — 1.16–1.16.1.
 fn era() -> usize {
     match ezzmc_protocol::version::current().protocol {
         762 => 1,
@@ -1387,12 +1421,13 @@ fn era() -> usize {
         // 1.17 (755): регистры совпадают с 1.17.1
         755 | 756 => 6,
         751..=754 => 7,
+        735 | 736 => 8,
         _ => 0,
     }
 }
 
 type Remap = std::sync::OnceLock<Vec<Option<u32>>>;
-const ERAS: usize = 8;
+const ERAS: usize = 9;
 
 /// Таблица перевода id для версии `era()`, строится лениво.
 fn remap_for<'a>(
@@ -1417,6 +1452,7 @@ fn item_map() -> &'static [Option<u32>] {
             ezzmc_protocol::version::V1_18_2.item,
             ezzmc_protocol::version::V1_17_1.item,
             ezzmc_protocol::version::V1_16_5.item,
+            ezzmc_protocol::version::V1_16_1.item,
         ],
         ezzmc_protocol::version::CANON.item,
     )
@@ -1436,6 +1472,7 @@ fn effect_map() -> &'static [Option<u32>] {
             ezzmc_protocol::generated::r1_18_2::MOB_EFFECT,
             ezzmc_protocol::generated::r1_17_1::MOB_EFFECT,
             ezzmc_protocol::generated::r1_16_5::MOB_EFFECT,
+            ezzmc_protocol::generated::r1_16_1::MOB_EFFECT,
         ],
         ezzmc_protocol::generated::r26_3::MOB_EFFECT,
     )
@@ -1454,6 +1491,7 @@ fn menu_map() -> &'static [Option<u32>] {
             ezzmc_protocol::generated::r1_18_2::MENU,
             ezzmc_protocol::generated::r1_17_1::MENU,
             ezzmc_protocol::generated::r1_16_5::MENU,
+            ezzmc_protocol::generated::r1_16_1::MENU,
         ],
         ezzmc_protocol::generated::r26_3::MENU,
     )
@@ -1584,6 +1622,7 @@ fn hashed_to_nbt_stack(r: &mut Reader, w: &mut Writer, v1204: bool) -> ProtocolR
             ezzmc_protocol::version::V1_18_2.item,
             ezzmc_protocol::version::V1_17_1.item,
             ezzmc_protocol::version::V1_16_5.item,
+            ezzmc_protocol::version::V1_16_1.item,
         ];
         ezzmc_protocol::version::build_remap(ezzmc_protocol::version::CANON.item, to[k])
     });
@@ -1628,6 +1667,7 @@ fn entity_type_map() -> &'static [Option<u32>] {
             ezzmc_protocol::version::V1_18_2.entity_type,
             ezzmc_protocol::version::V1_17_1.entity_type,
             ezzmc_protocol::version::V1_16_5.entity_type,
+            ezzmc_protocol::version::V1_16_1.entity_type,
         ],
         ezzmc_protocol::version::CANON.entity_type,
     )
@@ -1863,7 +1903,7 @@ fn nbt_bytes(t: &Tag) -> Vec<u8> {
 }
 
 /// JSON-компонент → NBT-тег канона (смешанные списки оборачиваются в `{text:..}`).
-fn json_to_tag(v: &serde_json::Value) -> Tag {
+pub(crate) fn json_to_tag(v: &serde_json::Value) -> Tag {
     use serde_json::Value as J;
     match v {
         J::String(s) => Tag::String(s.clone()),
@@ -1934,7 +1974,18 @@ pub(crate) fn heightmap_id(name: &str) -> Option<i32> {
 
 /// Белый список clientbound-пакетов Play 1.20.1 → тело канона (`None` — отбросить).
 pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
+    let conv736;
     let (conv754, conv755, conv17, conv18, conv00, conv0, conv);
+    // 1.16/1.16.1: сначала в формат 1.16.2.
+    let (name, body) = if is_1_16_1() {
+        conv736 = crate::v1165::from_1_16_1(name, body)?;
+        match &conv736 {
+            Pre18::Replace(b) => (name, b.as_slice()),
+            _ => (name, body),
+        }
+    } else {
+        (name, body)
+    };
     let (name, body) = if is_1_16() {
         conv754 = crate::v1165::from_1_16_5(name, body)?;
         match &conv754 {

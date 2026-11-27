@@ -1,12 +1,13 @@
-//! Отличия протоколов 1.16.2–1.16.5 (751–754) от 1.17: тела приводятся к формату 1.17/1.17.1, дальше идут
+//! Отличия протоколов 1.16–1.16.1 (735/736) от 1.16.2 и 1.16.2–1.16.5 (751–754) от 1.17: тела приводятся к формату 1.17/1.17.1, дальше идут
 //! общим путём `v1201`. Клики по контейнерам и подтверждения транзакций — свои.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI16, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 
+use ezzmc_protocol::nbt::{self, Tag};
 use ezzmc_protocol::wire::{Reader, Writer};
-use ezzmc_protocol::{nbt, Direction, ProtocolResult, State};
+use ezzmc_protocol::{Direction, ProtocolResult, State};
 
 use crate::v1201::Pre18;
 
@@ -38,6 +39,257 @@ fn item<'a>(r: &mut Reader<'a>) -> ProtocolResult<&'a [u8]> {
         nbt::read_named(r)?;
     }
     Ok(r.since(at))
+}
+
+/// Типы измерений из `login` 1.16.1: `respawn` ссылается на них по имени.
+static DIM_TYPES_1_16: LazyLock<Mutex<Vec<(String, Tag)>>> = LazyLock::new(Default::default);
+
+/// Биомы 1.16/1.16.1 `[id, имя, элемент]`: сервер их не присылает (реестр встроен в клиент).
+/// VANILLA: Biomes (1.16.1) — id и имена; параметры — отчёт biomes 1.16.2.
+const BIOMES_1_16: &str = include_str!("data/biomes_1_16.json");
+
+fn string_tag(s: &str) -> Tag {
+    Tag::String(s.to_owned())
+}
+
+fn registry(name: &str, values: Vec<(i32, String, Tag)>) -> (String, Tag) {
+    let list = values
+        .into_iter()
+        .map(|(id, n, element)| {
+            Tag::Compound(vec![
+                ("name".into(), Tag::String(n)),
+                ("id".into(), Tag::Int(id)),
+                ("element".into(), element),
+            ])
+        })
+        .collect();
+    let reg = Tag::Compound(vec![
+        ("type".into(), string_tag(name)),
+        ("value".into(), Tag::List(list)),
+    ]);
+    (name.to_owned(), reg)
+}
+
+fn biomes_1_16() -> Vec<(i32, String, Tag)> {
+    let rows: Vec<(i32, String, serde_json::Value)> =
+        serde_json::from_str(BIOMES_1_16).unwrap_or_default();
+    rows.into_iter()
+        .map(|(id, name, e)| {
+            (
+                id,
+                format!("minecraft:{name}"),
+                crate::v1201::json_to_tag(&e),
+            )
+        })
+        .collect()
+}
+
+/// VANILLA: RegistryAccess.RegistryHolder#CODEC (1.16.1) — `{dimension: [{name, …поля типа}]}`
+/// → кодек 1.16.2 с `dimension_type` и `worldgen/biome`.
+fn codec_1_16_1(codec: &Tag) -> (Tag, Vec<(String, Tag)>) {
+    let list = match codec.get("dimension") {
+        Some(Tag::List(l)) => l.as_slice(),
+        _ => &[],
+    };
+    let dims: Vec<(String, Tag)> = list
+        .iter()
+        .filter_map(|d| {
+            let name = d.get("name")?.as_str()?.to_owned();
+            let Tag::Compound(fields) = d else {
+                return None;
+            };
+            let mut el: Vec<_> = fields.iter().filter(|f| f.0 != "name").cloned().collect();
+            // 1.16.2 добавил `effects` (по имени типа) вместо жёсткой связи с измерением.
+            el.push(("effects".into(), string_tag(&name)));
+            // VANILLA: DimensionType#coordinateScale (1.16.2) вместо флага `shrunk` (1.16.1).
+            let shrunk = d.get("shrunk").and_then(Tag::as_i64) == Some(1);
+            let scale = if shrunk { 8.0 } else { 1.0 };
+            el.push(("coordinate_scale".into(), Tag::Double(scale)));
+            Some((name, Tag::Compound(el)))
+        })
+        .collect();
+    let values = dims
+        .iter()
+        .enumerate()
+        .map(|(i, (n, t))| (i as i32, n.clone(), t.clone()))
+        .collect();
+    let out = Tag::Compound(vec![
+        registry("minecraft:dimension_type", values),
+        registry("minecraft:worldgen/biome", biomes_1_16()),
+    ]);
+    (out, dims)
+}
+
+fn write_dim_type(w: &mut Writer, dims: &[(String, Tag)], name: &str) -> ProtocolResult<()> {
+    let element = dims
+        .iter()
+        .find(|d| d.0 == name)
+        .map_or_else(|| Tag::Compound(Vec::new()), |d| d.1.clone());
+    write_nbt(w, &element)
+}
+
+fn write_nbt(w: &mut Writer, tag: &Tag) -> ProtocolResult<()> {
+    let mut out = Vec::new();
+    nbt::write_named(&mut out, "", tag)?;
+    w.bytes(&out);
+    Ok(())
+}
+
+/// Тело клиентского пакета 1.16/1.16.1 → формат 1.16.2.
+pub fn from_1_16_1(name: &str, body: &[u8]) -> ProtocolResult<Pre18> {
+    let mut r = Reader::new(body);
+    let mut w = Writer::with_capacity(body.len() + 32);
+    match name {
+        // VANILLA: ClientboundLoginPacket (1.16.1): hardcore — бит 8 байта режима, тип
+        // измерения — имя, maxPlayers — байт.
+        "login" => {
+            w.i32(r.i32()?);
+            let mode = r.u8()?;
+            w.bool(mode & 8 != 0).u8(mode & !8).u8(r.u8()?);
+            let n = r.length("levels", 1024)?;
+            w.var_int(n as i32);
+            for _ in 0..n {
+                w.string(&r.string(32767)?);
+            }
+            let codec = nbt::read_named(&mut r)?.map(|(_, t)| t);
+            let (codec, dims) = codec_1_16_1(&codec.unwrap_or(Tag::Compound(Vec::new())));
+            write_nbt(&mut w, &codec)?;
+            write_dim_type(&mut w, &dims, &r.string(32767)?)?;
+            *DIM_TYPES_1_16
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = dims;
+            w.string(&r.string(32767)?).bytes(r.bytes(8)?);
+            w.var_int(i32::from(r.u8()?)).bytes(r.rest());
+        }
+        // VANILLA: ClientboundRespawnPacket (1.16.1): тип измерения — имя.
+        "respawn" => {
+            let dim_type = r.string(32767)?;
+            let dims = DIM_TYPES_1_16
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            write_dim_type(&mut w, &dims, &dim_type)?;
+            w.bytes(r.rest());
+        }
+        // VANILLA: ClientboundLevelChunkPacket (1.16.1): + bool forgetOldData; биомы — 1024
+        // int без длины (1.16.2: массив varint).
+        "level_chunk" => {
+            w.i32(r.i32()?).i32(r.i32()?);
+            let full = r.bool()?;
+            r.bool()?;
+            w.bool(full).var_int(r.var_int()?);
+            let at = r.pos();
+            nbt::read_named(&mut r)?;
+            w.bytes(r.since(at));
+            if full {
+                w.var_int(1024);
+                for _ in 0..1024 {
+                    w.var_int(r.i32()?);
+                }
+            }
+            w.bytes(r.rest());
+        }
+        _ => return Ok(Pre18::Keep),
+    }
+    Ok(Pre18::Replace(w.into_vec()))
+}
+
+/// Id внутреннего пакета: изменения одной секции в формате 1.16.2 (`section_blocks_update`) —
+/// в таблице 1.16.1 такого пакета нет.
+pub const SECTION_UPDATE_ID: i32 = 0x1000;
+
+/// Тело `section_blocks_update` 1.16.2: long SectionPos, bool suppressLight, varint n,
+/// varlong (состояние << 12 | x<<8 | z<<4 | y).
+fn section_update(cx: i32, sy: i32, cz: i32, entries: &[(u16, i32)]) -> Vec<u8> {
+    // VANILLA: SectionPos#asLong (1.16.2)
+    let pos = ((i64::from(cx) & 0x3F_FFFF) << 42)
+        | ((i64::from(cz) & 0x3F_FFFF) << 20)
+        | (i64::from(sy) & 0xF_FFFF);
+    let mut w = Writer::with_capacity(16 + entries.len() * 4);
+    w.i64(pos).bool(false).var_int(entries.len() as i32);
+    for &(at, state) in entries {
+        w.var_long((i64::from(state) << 12) | i64::from(at));
+    }
+    w.into_vec()
+}
+
+/// Пакеты 1.16.1 с изменениями блоков → тела по секциям (`None` — пакет не из них).
+///
+/// VANILLA: ChunkHolder#broadcastChanges (1.16.1) — 2..63 изменений идут пакетом
+/// ChunkBlocksUpdate, от 64 — частичным чанком (fullChunk=false).
+pub fn expand_1_16_1(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<Vec<u8>>>> {
+    match name {
+        "chunk_blocks_update" => chunk_blocks_update(body).map(Some),
+        // байт 8 — fullChunk
+        "level_chunk" if body.get(8) == Some(&0) => partial_chunk(body).map(Some),
+        _ => Ok(None),
+    }
+}
+
+/// VANILLA: ClientboundChunkBlocksUpdatePacket (1.16.1): int x, int z чанка, записи short
+/// (x<<12 | z<<8 | y) + varint состояние.
+fn chunk_blocks_update(body: &[u8]) -> ProtocolResult<Vec<Vec<u8>>> {
+    let mut r = Reader::new(body);
+    let (cx, cz) = (r.i32()?, r.i32()?);
+    let n = r.length("block updates", 65536)?;
+    let mut sections: [Vec<(u16, i32)>; 16] = Default::default();
+    for _ in 0..n {
+        let off = r.i16()? as u16;
+        let state = r.var_int()?;
+        let (x, z, y) = (off >> 12, (off >> 8) & 15, off & 255);
+        sections[usize::from(y >> 4)].push(((x << 8) | (z << 4) | (y & 15), state));
+    }
+    Ok(sections
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| !e.is_empty())
+        .map(|(sy, e)| section_update(cx, sy as i32, cz, e))
+        .collect())
+}
+
+/// Секции частичного чанка → полные обновления секций.
+/// VANILLA: LevelChunk#replaceWithPacketData, LevelChunkSection#read, SimpleBitStorage (1.16.1):
+/// short, byte bits (минимум 4), палитра при bits < 9, long[] без переноса через границу long;
+/// индекс y<<8 | z<<4 | x.
+/// VANILLA-UNSURE: блок-энтити частичного чанка не переносятся.
+fn partial_chunk(body: &[u8]) -> ProtocolResult<Vec<Vec<u8>>> {
+    let mut r = Reader::new(body);
+    let (cx, cz) = (r.i32()?, r.i32()?);
+    r.bytes(2)?; // fullChunk, forgetOldData
+    let mask = r.var_int()?;
+    nbt::read_named(&mut r)?;
+    let len = r.length("chunk data", 1 << 21)?;
+    let mut data = Reader::new(r.bytes(len)?);
+    let mut out = Vec::new();
+    for sy in (0..16).filter(|i| mask & (1 << i) != 0) {
+        data.bytes(2)?;
+        let bits = u32::from(data.u8()?).clamp(4, 32);
+        let mut palette = Vec::new();
+        if bits < 9 {
+            for _ in 0..data.length("chunk palette", 256)? {
+                palette.push(data.var_int()?);
+            }
+        }
+        let n = data.length("chunk longs", 4096)?;
+        let mut longs = Vec::with_capacity(n);
+        for _ in 0..n {
+            longs.push(data.i64()? as u64);
+        }
+        let per_long = (64 / bits) as usize;
+        let mut entries = Vec::with_capacity(4096);
+        for i in 0..4096u16 {
+            let long = longs.get(usize::from(i) / per_long).copied().unwrap_or(0);
+            let raw = (long >> ((usize::from(i) % per_long) as u32 * bits)) & ((1 << bits) - 1);
+            let state = if bits < 9 {
+                palette.get(raw as usize).copied().unwrap_or(0)
+            } else {
+                raw as i32
+            };
+            let (x, z, y) = (i & 15, (i >> 4) & 15, i >> 8);
+            entries.push(((x << 8) | (z << 4) | y, state));
+        }
+        out.push(section_update(cx, sy, cz, &entries));
+    }
+    Ok(out)
 }
 
 /// Тело клиентского пакета 1.16.5 → формат 1.17.
@@ -159,4 +411,66 @@ pub fn ack_reply(id: i32, body: &[u8]) -> Option<(i32, Vec<u8>)> {
     let mut w = Writer::new();
     w.u8(window).i16(uid).u8(1);
     Some((find(Direction::Serverbound, "container_ack")?, w.into_vec()))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_updates_split() {
+        let mut w = Writer::new();
+        // чанк (-1, 2): x=3 z=4 y=70 и x=0 z=0 y=1 — две секции
+        w.i32(-1).i32(2).var_int(2);
+        w.i16(0x3446).var_int(9).i16(1).var_int(5);
+        let out = chunk_blocks_update(&w.into_vec()).unwrap();
+        assert_eq!(out.len(), 2);
+        let mut r = Reader::new(&out[1]);
+        let p = r.i64().unwrap();
+        assert_eq!((p >> 42, p << 44 >> 44, p << 22 >> 42), (-1, 4, 2));
+        assert!(!r.bool().unwrap());
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.var_long().unwrap(), (9 << 12) | (3 << 8) | (4 << 4) | 6);
+    }
+
+    #[test]
+    fn partial_chunk_to_section() {
+        let mut data = Writer::new();
+        data.i16(1)
+            .u8(4)
+            .var_int(2)
+            .var_int(0)
+            .var_int(7)
+            .var_int(256);
+        // блок x=1 y=0 z=0 — индекс палитры 1
+        data.i64(0x10);
+        for _ in 1..256 {
+            data.i64(0);
+        }
+        let data = data.into_vec();
+        let mut w = Writer::new();
+        w.i32(3).i32(4).bool(false).bool(false).var_int(1 << 2);
+        w.bytes(&[10, 0, 0, 0])
+            .var_int(data.len() as i32)
+            .bytes(&data);
+        let out = expand_1_16_1("level_chunk", &w.into_vec())
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        let mut r = Reader::new(&out[0]);
+        r.bytes(9).unwrap();
+        assert_eq!(r.var_int().unwrap(), 4096);
+        assert_eq!(r.var_long().unwrap(), 0);
+        assert_eq!(r.var_long().unwrap(), (7 << 12) | (1 << 8));
+    }
+
+    #[test]
+    fn biomes_table() {
+        let b = biomes_1_16();
+        assert_eq!(b.len(), 79);
+        assert!(b
+            .iter()
+            .any(|e| e.0 == 173 && e.1 == "minecraft:basalt_deltas"));
+    }
 }

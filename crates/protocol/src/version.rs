@@ -245,6 +245,24 @@ pub const V1_16_2: Version = Version {
     ..V1_16_5
 };
 
+/// 1.16.1 (736) и 1.16 (735): таблицы совпадают между собой; тела → 1.16.2 (`v1165::from_1_16_1`).
+pub const V1_16_1: Version = Version {
+    name: "1.16.1",
+    protocol: 736,
+    packets: generated::v1_16_1::PACKETS,
+    item: generated::r1_16_1::ITEM,
+    block: generated::r1_16_1::BLOCK,
+    entity_type: generated::r1_16_1::ENTITY_TYPE,
+    sound_event: generated::r1_16_1::SOUND_EVENT,
+    particle_type: generated::r1_16_1::PARTICLE_TYPE,
+};
+
+pub const V1_16: Version = Version {
+    name: "1.16",
+    protocol: 735,
+    ..V1_16_1
+};
+
 /// 1.17 (протокол 755): регистры и состояния блоков совпадают с 1.17.1.
 pub const V1_17: Version = Version {
     name: "1.17",
@@ -310,7 +328,7 @@ pub const CANON: Version = V26_3;
 pub const SUPPORTED: &[Version] = &[
     V26_3, V1_21_11, V1_21_10, V1_21_8, V1_21_6, V1_21_5, V1_21_4, V1_21_3, V1_21_1, V1_20_6,
     V1_20_4, V1_20_2, V1_20_1, V1_19_4, V1_19_3, V1_19_2, V1_19, V1_18_2, V1_18_1, V1_17_1, V1_17,
-    V1_16_5, V1_16_3, V1_16_2,
+    V1_16_5, V1_16_3, V1_16_2, V1_16_1, V1_16,
 ];
 
 /// Версия по protocol number из Status-ответа.
@@ -336,7 +354,7 @@ impl Version {
 
     /// 1.18–1.20.1: без Configuration-фазы, реестры в Play `login`; один путь (`v1201`).
     pub fn is_pre_config(&self) -> bool {
-        matches!(self.protocol, 751..=763)
+        matches!(self.protocol, 735..=763)
     }
 
     /// 1.20.2–1.21.11: переводятся одним путём (`legacy::clientbound_1_21_11`).
