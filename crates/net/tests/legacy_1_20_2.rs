@@ -92,3 +92,39 @@ fn explode_and_info_1_20_2() {
     assert!(r.bool().unwrap());
     assert_eq!(text(&mut r), "Bobby");
 }
+
+#[test]
+fn chat_type_id_1_20_2() {
+    set();
+    // player_chat: тип чата номером → Holder (id+1).
+    let mut w = Writer::new();
+    w.bytes(&[7; 16]).var_int(0).bool(false).string("hi");
+    w.i64(1).i64(2).var_int(0).bool(false).var_int(0);
+    w.var_int(4).string(r#"{"text":"Bob"}"#).bool(false);
+    let out = run("player_chat", w);
+    let mut r = Reader::new(&out);
+    assert_eq!(r.var_int().unwrap(), 0); // globalIndex
+    r.bytes(16).unwrap();
+    r.var_int().unwrap();
+    assert!(!r.bool().unwrap());
+    assert_eq!(r.string(256).unwrap(), "hi");
+    r.bytes(16).unwrap();
+    assert_eq!(r.var_int().unwrap(), 0);
+    assert!(!r.bool().unwrap());
+    assert_eq!(r.var_int().unwrap(), 0);
+    assert_eq!(r.var_int().unwrap(), 5);
+    assert_eq!(text(&mut r), "Bob");
+    assert!(!r.bool().unwrap());
+    assert_eq!(r.remaining(), 0);
+
+    let mut w = Writer::new();
+    w.string(r#"{"text":"msg"}"#).var_int(0);
+    w.string(r#"{"text":"Server"}"#).bool(false);
+    let out = run("disguised_chat", w);
+    let mut r = Reader::new(&out);
+    assert_eq!(text(&mut r), "msg");
+    assert_eq!(r.var_int().unwrap(), 1);
+    assert_eq!(text(&mut r), "Server");
+    assert!(!r.bool().unwrap());
+    assert_eq!(r.remaining(), 0);
+}

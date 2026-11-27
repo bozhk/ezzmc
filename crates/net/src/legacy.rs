@@ -1267,6 +1267,14 @@ fn serverbound_body(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
             };
             w.bytes(head);
         }
+        // VANILLA: ServerboundChatCommandPacket (1.20.2, 1.20.4) — единственный пакет команды,
+        // с подписями; байта checksum тоже нет (с 1.20.5 `chat_command` — только строка).
+        "chat_command" if pre_1_20_5(ver()) => {
+            let Some((_, head)) = body.split_last() else {
+                return Ok(None);
+            };
+            w.bytes(head);
+        }
         // VANILLA: ServerboundSetCreativeModeSlotPacket — short slot, OPTIONAL_UNTRUSTED stack.
         "set_creative_mode_slot" => {
             w.i16(r.i16()?);
@@ -2127,9 +2135,43 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
                 w.bool(true);
             }
         }
+        // VANILLA: ChatType.Bound (1.20.2–1.20.6) — тип чата номером в реестре
+        // (readVarInt / holderRegistry); с 1.21 — Holder (id+1, 0 — inline).
+        "disguised_chat" if pre_1_21(ver()) => {
+            let start = r.pos();
+            ezzmc_protocol::nbt::read_network(&mut r)?;
+            w.bytes(r.since(start));
+            w.var_int(r.var_int()?.saturating_add(1)).bytes(r.rest());
+        }
         // VANILLA: ClientboundPlayerChatPacket (1.21.5) — первым globalIndex (VarInt), в 1.21.4 нет.
         "player_chat" if pre_1_21_5(ver()) => {
-            w.var_int(0).bytes(r.rest());
+            w.var_int(0);
+            if !pre_1_21(ver()) {
+                w.bytes(r.rest());
+            } else {
+                let start = r.pos();
+                r.bytes(16)?;
+                r.var_int()?;
+                if r.bool()? {
+                    r.bytes(256)?;
+                }
+                r.string(256)?;
+                r.bytes(16)?;
+                for _ in 0..r.length("last seen", 20)? {
+                    if r.var_int()? == 0 {
+                        r.bytes(256)?;
+                    }
+                }
+                if r.bool()? {
+                    ezzmc_protocol::nbt::read_network(&mut r)?;
+                }
+                if r.var_int()? == 2 {
+                    let n = r.length("filter mask", 1 << 16)?;
+                    r.bytes(n * 8)?;
+                }
+                w.bytes(r.since(start));
+                w.var_int(r.var_int()?.saturating_add(1)).bytes(r.rest());
+            }
         }
         // VANILLA: ClientboundSetPlayerTeamPacket.Parameters (1.21.4): nametagVisibility и
         // collisionRule — строки (readUtf(40)); 1.21.5 — Team.Visibility/CollisionRule по id.

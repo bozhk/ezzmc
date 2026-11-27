@@ -1189,6 +1189,16 @@ impl App {
                 g.on_left_button(false);
                 ok(json!({}))
             }
+            "respawn" => {
+                // Агент: кнопка «Возродиться» на экране смерти.
+                if !self.dead_screen {
+                    return Some(err("death screen not open"));
+                }
+                if let Some(v) = &self.view {
+                    v.send(crate::netthread::NetCmd::Respawn);
+                }
+                ok(json!({}))
+            }
             "join_server" => {
                 let Some(addr) = c["addr"].as_str() else {
                     return Some(err("addr required"));

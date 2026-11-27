@@ -1346,27 +1346,32 @@ fn nbt_to_components(t: &Tag, book: bool) -> Vec<(u32, Vec<u8>)> {
 
 /// Сервер 1.17–1.19.4 (755–762): тот же путь, тела сначала переводятся в формат 1.20.1.
 fn is_1_19_4() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 754..=762)
+    matches!(ezzmc_protocol::version::current().protocol, 751..=762)
 }
 
 /// Сервер 1.17–1.19.2 (755–760): тела сначала переводятся в формат 1.19.3 (`from_1_19_2`).
 fn is_1_19_2() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 754..=760)
+    matches!(ezzmc_protocol::version::current().protocol, 751..=760)
 }
 
 /// Сервер 1.17–1.19 (755–759): тела сначала переводятся в формат 1.19.2 (`from_1_19`).
 fn is_1_19() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 754..=759)
+    matches!(ezzmc_protocol::version::current().protocol, 751..=759)
 }
 
 /// Сервер 1.17–1.18.2 (755–758): тела сначала переводятся в формат 1.19 (`from_1_18_2`).
 fn is_1_18() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 754..=758)
+    matches!(ezzmc_protocol::version::current().protocol, 751..=758)
 }
 
 /// Сервер 1.17/1.17.1 (755/756): тела сначала переводятся в формат 1.18.2 (`from_1_17_1`).
+/// 1.16.2–1.16.5 (формат провода один, `v1165`).
+pub(crate) fn is_1_16() -> bool {
+    matches!(ezzmc_protocol::version::current().protocol, 751..=754)
+}
+
 fn is_1_17() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 754..=756)
+    matches!(ezzmc_protocol::version::current().protocol, 751..=756)
 }
 
 /// Индекс версии для таблиц: 0 — 1.20.1, 1 — 1.19.4, 2 — 1.19.3, 3 — 1.19.2, 4 — 1.19, 5 — 1.18–1.18.2,
@@ -1381,7 +1386,7 @@ fn era() -> usize {
         757 | 758 => 5,
         // 1.17 (755): регистры совпадают с 1.17.1
         755 | 756 => 6,
-        754 => 7,
+        751..=754 => 7,
         _ => 0,
     }
 }
@@ -1767,7 +1772,7 @@ pub fn play_from_canon(id: i32, body: &[u8]) -> ProtocolResult<Vec<(i32, Vec<u8>
             // 1.16.5 — ещё и без textFiltering.
             if !is_1_17() {
                 w.bool(r.bool()?);
-            } else if ezzmc_protocol::version::current().protocol == 754 {
+            } else if is_1_16() {
                 let mut out = w.into_vec();
                 out.pop();
                 return Ok(vec![(id, out)]);
@@ -1792,7 +1797,7 @@ pub fn play_from_canon(id: i32, body: &[u8]) -> ProtocolResult<Vec<(i32, Vec<u8>
                 .into_iter()
                 .collect());
         }
-        "container_click" if ezzmc_protocol::version::current().protocol == 754 => {
+        "container_click" if is_1_16() => {
             let (win, _state) = (r.var_int()?, r.var_int()?);
             let (slot, button, mode) = (r.i16()?, r.u8()?, r.var_int()?);
             let n = r.length("changed slots", 128)?;
@@ -1930,7 +1935,7 @@ pub(crate) fn heightmap_id(name: &str) -> Option<i32> {
 /// Белый список clientbound-пакетов Play 1.20.1 → тело канона (`None` — отбросить).
 pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
     let (conv754, conv755, conv17, conv18, conv00, conv0, conv);
-    let (name, body) = if ezzmc_protocol::version::current().protocol == 754 {
+    let (name, body) = if is_1_16() {
         conv754 = crate::v1165::from_1_16_5(name, body)?;
         match &conv754 {
             Pre18::Keep => (name, body),

@@ -231,6 +231,20 @@ pub const V1_16_5: Version = Version {
     particle_type: generated::r1_16_5::PARTICLE_TYPE,
 };
 
+/// 1.16.3 (753) и 1.16.2 (751): регистры, блоки и порядок пакетов совпадают с 1.16.5
+/// (отличается только `edit_book`, клиент его старым серверам не шлёт).
+pub const V1_16_3: Version = Version {
+    name: "1.16.3",
+    protocol: 753,
+    ..V1_16_5
+};
+
+pub const V1_16_2: Version = Version {
+    name: "1.16.2",
+    protocol: 751,
+    ..V1_16_5
+};
+
 /// 1.17 (протокол 755): регистры и состояния блоков совпадают с 1.17.1.
 pub const V1_17: Version = Version {
     name: "1.17",
@@ -296,7 +310,7 @@ pub const CANON: Version = V26_3;
 pub const SUPPORTED: &[Version] = &[
     V26_3, V1_21_11, V1_21_10, V1_21_8, V1_21_6, V1_21_5, V1_21_4, V1_21_3, V1_21_1, V1_20_6,
     V1_20_4, V1_20_2, V1_20_1, V1_19_4, V1_19_3, V1_19_2, V1_19, V1_18_2, V1_18_1, V1_17_1, V1_17,
-    V1_16_5,
+    V1_16_5, V1_16_3, V1_16_2,
 ];
 
 /// Версия по protocol number из Status-ответа.
@@ -322,7 +336,7 @@ impl Version {
 
     /// 1.18–1.20.1: без Configuration-фазы, реестры в Play `login`; один путь (`v1201`).
     pub fn is_pre_config(&self) -> bool {
-        matches!(self.protocol, 754..=763)
+        matches!(self.protocol, 751..=763)
     }
 
     /// 1.20.2–1.21.11: переводятся одним путём (`legacy::clientbound_1_21_11`).

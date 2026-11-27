@@ -89,6 +89,7 @@ def launch(args):
     cmd = [BIN, "--control", f"127.0.0.1:{PORT}", "--name", name]
     if args.get("addr"):
         cmd += ["--connect", args["addr"]]
+    cmd = list(args.get("wrap") or []) + cmd  # e.g. a headless compositor
     env = dict(os.environ, **session_env, **{k: str(v) for k, v in (args.get("env") or {}).items()})
     proc = subprocess.Popen(cmd, cwd=ROOT, stdout=open(LOG, "w"), stderr=subprocess.STDOUT, env=env, start_new_session=True)
     if not connect():
@@ -181,6 +182,7 @@ TOOLS = {
     "game_join_server": ("Join a server, e.g. 127.0.0.1:25611, then call game_wait_joined.", S(addr=STR), "join_server"),
     "game_wait_joined": ("Wait until the world is joined and the position is known.", S(timeout_ms=INT), "wait_joined"),
     "game_dialog_button": ("Press a server dialog button by index (state.dialog.buttons; grid first, then footer).", S(index={"type": "integer"}), "dialog_button"),
+    "game_respawn": ("Death screen open (state.screen=='death'): press Respawn.", S(), "respawn"),
     "game_ui_click": ("Left-click a menu screen at window pixel x, y (menus only).", S(x={"type": "number"}, y={"type": "number"}), "ui_click"),
     "game_cursor": ("Move the mouse cursor to window pixel x, y without clicking (hover effects: chat tag/hover tooltips, slots). Use in chat/inventory screens.", S(x={"type": "number"}, y={"type": "number"}), "cursor"),
     "game_wait": ("Let the game run for ms milliseconds.", S(ms=INT), "wait"),

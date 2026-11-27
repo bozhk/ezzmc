@@ -269,7 +269,7 @@ impl Connection {
 
     /// 1.16.5: подтверждение отклонённой транзакции окна (нужно и античитам).
     fn auto_reply(&mut self, p: &Packet) -> NetResult<()> {
-        if self.state == State::Play && ezzmc_protocol::version::current().protocol == 754 {
+        if self.state == State::Play && crate::v1201::is_1_16() {
             if let Some((id, body)) = crate::v1165::ack_reply(p.id, &p.body) {
                 self.send_raw(id, &body)?;
             }
