@@ -207,6 +207,14 @@ pub const V1_18_2: Version = Version {
     particle_type: generated::r1_18_2::PARTICLE_TYPE,
 };
 
+/// 1.18/1.18.1 (протокол 757): провод совпадает с 1.18.2 (порядок пакетов, blocks.json, регистры
+/// клиента; id эффектов — byte вместо varint, для id < 128 байты те же), путь тот же, что у 1.18.2.
+pub const V1_18_1: Version = Version {
+    name: "1.18.1",
+    protocol: 757,
+    ..V1_18_2
+};
+
 /// 1.19 (протокол 759): подписанный чат v1, system_chat с typeId; тела → 1.19.2 (`v1201::from_1_19`)
 /// → 1.19.3 → 1.19.4 → 1.20.1.
 pub const V1_19: Version = Version {
@@ -251,7 +259,7 @@ pub const CANON: Version = V26_3;
 
 pub const SUPPORTED: &[Version] = &[
     V26_3, V1_21_11, V1_21_10, V1_21_8, V1_21_6, V1_21_5, V1_21_4, V1_21_3, V1_21_1, V1_20_6,
-    V1_20_4, V1_20_2, V1_20_1, V1_19_4, V1_19_3, V1_19_2, V1_19, V1_18_2,
+    V1_20_4, V1_20_2, V1_20_1, V1_19_4, V1_19_3, V1_19_2, V1_19, V1_18_2, V1_18_1,
 ];
 
 /// Версия по protocol number из Status-ответа.

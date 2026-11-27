@@ -193,3 +193,28 @@ fn serverbound_chat_and_sequences() {
     let out = play_from_canon(sid("use_item"), &w.into_vec()).unwrap();
     assert_eq!(out[0].1, vec![1]);
 }
+
+#[test]
+fn mob_effect_to_canon_holder() {
+    set();
+    // 1.18.2: varint entity, byte id (speed = 1), byte amplifier, varint duration, byte flags.
+    let mut w = Writer::new();
+    w.var_int(7).u8(1).u8(2).var_int(600).u8(6);
+    let out = ezzmc_net::v1201::play_to_canon("update_mob_effect", &w.into_vec())
+        .unwrap()
+        .unwrap();
+    let mut r = Reader::new(&out);
+    assert_eq!(r.var_int().unwrap(), 7);
+    // канон 26.3: speed = 0
+    assert_eq!(r.var_int().unwrap(), 0);
+    assert_eq!(r.var_int().unwrap(), 2);
+    assert_eq!(r.var_int().unwrap(), 600);
+    assert_eq!(r.u8().unwrap(), 6);
+    assert!(r.is_empty());
+    let mut w = Writer::new();
+    w.var_int(7).u8(2);
+    let out = ezzmc_net::v1201::play_to_canon("remove_mob_effect", &w.into_vec())
+        .unwrap()
+        .unwrap();
+    assert_eq!(out, vec![7, 1]);
+}

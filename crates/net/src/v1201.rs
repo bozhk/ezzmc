@@ -1138,14 +1138,15 @@ fn is_1_18() -> bool {
     matches!(ezzmc_protocol::version::current().protocol, 757 | 758)
 }
 
-/// Индекс версии для таблиц: 0 — 1.20.1, 1 — 1.19.4, 2 — 1.19.3, 3 — 1.19.2.
+/// Индекс версии для таблиц: 0 — 1.20.1, 1 — 1.19.4, 2 — 1.19.3, 3 — 1.19.2, 4 — 1.19, 5 — 1.18–1.18.2.
 fn era() -> usize {
     match ezzmc_protocol::version::current().protocol {
         762 => 1,
         761 => 2,
         760 => 3,
         759 => 4,
-        758 => 5,
+        // 1.18/1.18.1 (757): те же регистры item/menu/entity/enchant, что у 1.18.2
+        757 | 758 => 5,
         _ => 0,
     }
 }
@@ -1176,6 +1177,23 @@ fn item_map() -> &'static [Option<u32>] {
             ezzmc_protocol::version::V1_18_2.item,
         ],
         ezzmc_protocol::version::CANON.item,
+    )
+}
+
+/// id эффекта сервера (1-based, 0 — пусто) → id реестра mob_effect канона (0-based).
+fn effect_map() -> &'static [Option<u32>] {
+    static T: [Remap; ERAS] = [const { Remap::new() }; ERAS];
+    remap_for(
+        &T,
+        [
+            ezzmc_protocol::generated::r1_20_1::MOB_EFFECT,
+            ezzmc_protocol::generated::r1_19_4::MOB_EFFECT,
+            ezzmc_protocol::generated::r1_19_3::MOB_EFFECT,
+            ezzmc_protocol::generated::r1_19_2::MOB_EFFECT,
+            ezzmc_protocol::generated::r1_19::MOB_EFFECT,
+            ezzmc_protocol::generated::r1_18_2::MOB_EFFECT,
+        ],
+        ezzmc_protocol::generated::r26_3::MOB_EFFECT,
     )
 }
 
@@ -1668,6 +1686,35 @@ pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>>
     match name {
         "login" => return Ok(Some(login_to_canon(body)?)),
         "keep_alive" => w.bytes(body),
+        // VANILLA: ClientboundUpdateMobEffectPacket (1.20.1): varint entity, varint id (1-based),
+        // byte amplifier, varint duration, byte flags, Nullable FactorData (NBT) → 26.3: varint
+        // entity, Holder<MobEffect> (id реестра), varint amplifier, varint duration, byte flags
+        // (FLAG_BLEND = 8 — у эффекта есть плавное появление, в 1.20.1 это FactorData).
+        "update_mob_effect" => {
+            let ent = r.var_int()?;
+            let Some(id) = effect_map().get(r.var_int()? as usize).copied().flatten() else {
+                return Ok(Some(Vec::new()));
+            };
+            let amp = r.i8()?;
+            let dur = r.var_int()?;
+            let mut flags = r.u8()? & 7;
+            if r.bool().unwrap_or(false) {
+                flags |= 8;
+            }
+            w.var_int(ent)
+                .var_int(id as i32)
+                .var_int(i32::from(amp))
+                .var_int(dur)
+                .u8(flags)
+        }
+        // VANILLA: ClientboundRemoveMobEffectPacket (1.20.1): varint entity, varint id → Holder.
+        "remove_mob_effect" => {
+            let ent = r.var_int()?;
+            let Some(id) = effect_map().get(r.var_int()? as usize).copied().flatten() else {
+                return Ok(Some(Vec::new()));
+            };
+            w.var_int(ent).var_int(id as i32)
+        }
         // VANILLA: ClientboundLevelChunkWithLightPacket (1.20.1): int x, int z, NBT heightmaps,
         // byte[] секции, список BE, свет. Секции разбираются в Section::read (legacy-ветка).
         "level_chunk_with_light" => {
