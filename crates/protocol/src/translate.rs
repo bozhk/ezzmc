@@ -5,7 +5,7 @@
 //! компонент выпадает из патча, стек становится пустым.
 use crate::error::{ProtocolError, ProtocolResult};
 use crate::generated::{
-    r1_20_6, r1_21_1, r1_21_10, r1_21_11, r1_21_3, r1_21_4, r1_21_5, r1_21_6, r1_21_8,
+    r1_20_4, r1_20_6, r1_21_1, r1_21_10, r1_21_11, r1_21_3, r1_21_4, r1_21_5, r1_21_6, r1_21_8,
     r26_3 as canon,
 };
 use crate::item::{
@@ -68,6 +68,10 @@ src_names!(names_1_21_3, r1_21_3);
 // VANILLA: Attributes, DataComponents, EntityType (1.21.1 → 1.21.2).
 macro_rules! names_pre_1_21_2 {
     ($fn:ident, $m:ident) => {
+        names_pre_1_21_2!($fn, $m, $m);
+    };
+    // $c — модуль с DATA_COMPONENT_TYPE (у 1.20.4 компонентов нет: берётся 1.20.6, не используется).
+    ($fn:ident, $m:ident, $c:ident) => {
         fn $fn(reg: ClientRegistry) -> &'static [&'static str] {
             fn renamed(
                 cell: &'static OnceLock<Vec<&'static str>>,
@@ -89,7 +93,7 @@ macro_rules! names_pre_1_21_2 {
                 }),
                 ClientRegistry::Item => $m::ITEM,
                 ClientRegistry::DataComponentType => {
-                    renamed(&COMP, $m::DATA_COMPONENT_TYPE, |n| match n {
+                    renamed(&COMP, $c::DATA_COMPONENT_TYPE, |n| match n {
                         "fire_resistant" => "damage_resistant",
                         n => n,
                     })
@@ -113,6 +117,7 @@ macro_rules! names_pre_1_21_2 {
 }
 names_pre_1_21_2!(names_1_21_1, r1_21_1);
 names_pre_1_21_2!(names_1_20_6, r1_20_6);
+names_pre_1_21_2!(names_1_20_4, r1_20_4, r1_20_6);
 
 type Names = fn(ClientRegistry) -> &'static [&'static str];
 type Comps = fn() -> &'static [&'static Shape];
@@ -168,6 +173,12 @@ const SRC_1_20_6: Source = Source {
     components: components_1_20_6,
 };
 
+/// 1.20.3/1.20.4: реестры 1.20.4; предметы идут NBT мимо `Translator` (`net::legacy::stack`).
+const SRC_1_20_4: Source = Source {
+    names: names_1_20_4,
+    components: components_1_20_6,
+};
+
 const SRC_1_21_3: Source = Source {
     names: names_1_21_3,
     components: components_1_21_3,
@@ -177,6 +188,7 @@ const SRC_1_21_3: Source = Source {
 /// 773 — 1.21.9/1.21.10, остальное — 1.21.11.
 fn source_index(protocol: i32) -> usize {
     match protocol {
+        765 => 9,
         766 => 8,
         767 => 7,
         768 => 6,
@@ -188,7 +200,7 @@ fn source_index(protocol: i32) -> usize {
         _ => 2,
     }
 }
-const SOURCES: [Source; 9] = [
+const SOURCES: [Source; 10] = [
     SRC_1_21_8,
     SRC_1_21_10,
     SRC_1_21_11,
@@ -198,6 +210,7 @@ const SOURCES: [Source; 9] = [
     SRC_1_21_3,
     SRC_1_21_1,
     SRC_1_20_6,
+    SRC_1_20_4,
 ];
 
 fn canon_names(reg: ClientRegistry) -> &'static [&'static str] {
@@ -981,7 +994,7 @@ fn len(r: &mut Reader, max: usize) -> ProtocolResult<usize> {
 
 /// Пропуск патча компонентов версии соединения (для [`Shape::Stack`] в `walk`).
 pub(crate) fn skip_patch_legacy(r: &mut Reader, depth: u32) -> ProtocolResult<()> {
-    static T: [OnceLock<Translator>; 9] = [const { OnceLock::new() }; 9];
+    static T: [OnceLock<Translator>; 10] = [const { OnceLock::new() }; 10];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::new(SOURCES[k], |s| s))
         .patch(r, &mut Writer::new(), depth)?;
@@ -991,14 +1004,14 @@ pub(crate) fn skip_patch_legacy(r: &mut Reader, depth: u32) -> ProtocolResult<()
 /// Переводчик версии соединения (1.21.7–1.21.11) → канон; `block_state` — перевод id
 /// состояний (ezzmc-world). Таблицы строятся один раз на версию.
 pub fn from_server(block_state: fn(u32) -> u32) -> &'static Translator {
-    static T: [OnceLock<Translator>; 9] = [const { OnceLock::new() }; 9];
+    static T: [OnceLock<Translator>; 10] = [const { OnceLock::new() }; 10];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::new(SOURCES[k], block_state))
 }
 
 /// Переводчик канон → версия соединения (пакеты клиента); `block_state` — канон → версия.
 pub fn to_server(block_state: fn(u32) -> u32) -> &'static Translator {
-    static T: [OnceLock<Translator>; 9] = [const { OnceLock::new() }; 9];
+    static T: [OnceLock<Translator>; 10] = [const { OnceLock::new() }; 10];
     let k = source_index(crate::version::current().protocol);
     T[k].get_or_init(|| Translator::build(SOURCES[k], block_state, true))
 }

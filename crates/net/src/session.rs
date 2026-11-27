@@ -356,8 +356,8 @@ pub fn configure(
     conn.send(ids.get(ST, S, "custom_payload")?, &w.buf)?;
     let mut w = Writer::new();
     info.write(&mut w);
-    // VANILLA: ClientInformation (1.20.5–1.21.1) — без particleStatus (VarInt 0..2, один байт).
-    if matches!(ezzmc_protocol::version::current().protocol, 766 | 767) {
+    // VANILLA: ClientInformation (1.20.2–1.21.1) — без particleStatus (VarInt 0..2, один байт).
+    if matches!(ezzmc_protocol::version::current().protocol, 764..=767) {
         w.buf.pop();
     }
     conn.send(ids.get(ST, S, "client_information")?, &w.buf)?;
@@ -382,6 +382,15 @@ pub fn configure(
             "disconnect" => return Err(NetError::Disconnected(disconnect_text(&p.body))),
             "keep_alive" => conn.send(ids.get(ST, S, "keep_alive")?, &p.body)?, // long как есть
             "ping" => conn.send(ids.get(ST, S, "pong")?, &p.body)?,             // int как есть
+            // VANILLA: ClientboundRegistryDataPacket (1.20.2–1.20.4) — весь
+            // RegistrySynchronization.NETWORK_CODEC одним NBT-деревом.
+            "registry_data" if ezzmc_protocol::version::current().protocol <= 765 => {
+                let tag = ezzmc_protocol::nbt::read_network(&mut Reader::new(&p.body))?;
+                if let Some(t) = tag {
+                    cfg.registries
+                        .extend(crate::v1201::registries_from_codec(&t));
+                }
+            }
             "registry_data" => {
                 let mut rd = parse_registry_data(&p.body)?;
                 // 1.21–1.21.10: цвета неба/тумана в `effects`, у измерений `effects` вместо
@@ -441,11 +450,23 @@ pub fn configure(
             "finish_configuration" => {
                 // VANILLA: 1.20.5/1.20.6 — enchantment и painting_variant встроенные (в 1.21
                 // стали синхронизируемыми): реестры собираются из таблиц версии.
-                if ezzmc_protocol::version::current().protocol == 766 {
-                    cfg.registries.push(crate::v1201::enchant_registry_1_20_6());
+                let builtin = match ezzmc_protocol::version::current().protocol {
+                    766 => Some((
+                        crate::v1201::enchant_registry_1_20_6(),
+                        ezzmc_protocol::generated::r1_20_6::PAINTING_VARIANT,
+                    )),
+                    // VANILLA: 1.20.2–1.20.4 — то же (плюс wolf_variant/banner_pattern ещё нет).
+                    ..=765 => Some((
+                        crate::v1201::enchant_registry_1_20_4(),
+                        ezzmc_protocol::generated::r1_20_4::PAINTING_VARIANT,
+                    )),
+                    _ => None,
+                };
+                if let Some((ench, paintings)) = builtin {
+                    cfg.registries.push(ench);
                     cfg.registries.push(RegistryData {
                         registry: "minecraft:painting_variant".into(),
-                        entries: ezzmc_protocol::generated::r1_20_6::PAINTING_VARIANT
+                        entries: paintings
                             .iter()
                             .map(|n| (format!("minecraft:{n}"), None))
                             .collect(),

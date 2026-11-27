@@ -271,8 +271,16 @@ fn read_login(body: &[u8]) -> ProtocolResult<LoginBody> {
 /// записи по возрастанию `id`.
 fn parse_login_registries(body: &[u8]) -> ProtocolResult<Vec<RegistryData>> {
     let l = read_login(body)?;
-    let Tag::Compound(regs) = &l.registries else {
-        return Ok(Vec::new());
+    let mut out = registries_from_codec(&l.registries);
+    // У 1.20.1 зачарований в кодеке нет — подсказкам нужен реестр (TODO-508c).
+    out.push(enchant_registry());
+    Ok(out)
+}
+
+/// Реестры из NBT-кодека 1.20.1–1.20.4 (`RegistrySynchronization.NETWORK_CODEC`).
+pub(crate) fn registries_from_codec(t: &Tag) -> Vec<RegistryData> {
+    let Tag::Compound(regs) = t else {
+        return Vec::new();
     };
     let mut out = Vec::new();
     for (name, reg) in regs {
@@ -290,6 +298,12 @@ fn parse_login_registries(body: &[u8]) -> ProtocolResult<Vec<RegistryData>> {
             })
             .collect();
         entries.sort_by_key(|e| e.0);
+        // Индекс типа измерения в login/respawn = позиция в реестре (id по возрастанию).
+        if name == "minecraft:dimension_type" {
+            if let Ok(mut g) = DIM_TYPES.lock() {
+                *g = entries.iter().map(|e| e.1.clone()).collect();
+            }
+        }
         let norm = |t: Option<Tag>| match name.as_str() {
             "minecraft:dimension_type" => t.map(dimension_to_canon),
             "minecraft:worldgen/biome" => t.map(biome_to_canon),
@@ -300,9 +314,7 @@ fn parse_login_registries(body: &[u8]) -> ProtocolResult<Vec<RegistryData>> {
             entries: entries.into_iter().map(|(_, n, t)| (n, norm(t))).collect(),
         });
     }
-    // У 1.20.1 зачарований в кодеке нет — подсказкам нужен реестр (TODO-508c).
-    out.push(enchant_registry());
-    Ok(out)
+    out
 }
 
 fn put(t: &mut Vec<(String, Tag)>, k: &str, v: Tag) {
@@ -351,7 +363,7 @@ pub(crate) fn biome_to_canon(t: Tag) -> Tag {
 
 static DIM_TYPES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-fn dim_index(name: &str) -> i32 {
+pub(crate) fn dim_index(name: &str) -> i32 {
     DIM_TYPES
         .lock()
         .ok()
@@ -412,12 +424,42 @@ fn item_to_canon(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
     let id = r.var_int()?;
     let count = r.i8()?;
     let tag = nbt::read_named(r)?.map(|(_, t)| t);
+    stack_to_canon(id, count, tag, item_map(), w)
+}
+
+/// ItemStack 1.20.2–1.20.4 (bool, id, byte count, сетевой NBT без имени) → канон.
+/// VANILLA: FriendlyByteBuf#writeItem (1.20.4).
+pub(crate) fn item_to_canon_1_20_4(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    if !r.bool()? {
+        w.var_int(0);
+        return Ok(());
+    }
+    let id = r.var_int()?;
+    let count = r.i8()?;
+    let tag = nbt::read_network(r)?;
+    static T: std::sync::OnceLock<Vec<Option<u32>>> = std::sync::OnceLock::new();
+    let map = T.get_or_init(|| {
+        ezzmc_protocol::version::build_remap(
+            ezzmc_protocol::version::V1_20_4.item,
+            ezzmc_protocol::version::CANON.item,
+        )
+    });
+    stack_to_canon(id, count, tag, map, w)
+}
+
+fn stack_to_canon(
+    id: i32,
+    count: i8,
+    tag: Option<Tag>,
+    item_map: &[Option<u32>],
+    w: &mut Writer,
+) -> ProtocolResult<()> {
     // Модовый предмет Forge (снимок FML minecraft:item) → MOD_ITEM_BASE + id сервера (TODO-508).
     let canon = u32::try_from(id)
         .ok()
         .and_then(ezzmc_world::modded::modded_item)
         .or_else(|| {
-            item_map()
+            item_map
                 .get(usize::try_from(id).unwrap_or(usize::MAX))
                 .copied()
                 .flatten()
@@ -543,6 +585,16 @@ pub(crate) fn enchant_registry_1_20_6() -> RegistryData {
         ezzmc_protocol::generated::r1_20_6::ENCHANTMENT
             .iter()
             .map(|n| format!("minecraft:{n}"))
+            .collect(),
+    )
+}
+
+/// 1.20.3/1.20.4: то же для встроенного реестра 1.20.4.
+pub(crate) fn enchant_registry_1_20_4() -> RegistryData {
+    enchant_registry_of(
+        ezzmc_protocol::generated::r1_20_4::ENCHANTMENT
+            .iter()
+            .map(|n| enchant_canon_name(n))
             .collect(),
     )
 }
