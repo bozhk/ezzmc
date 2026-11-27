@@ -262,6 +262,34 @@ static LIGHT_17: std::sync::LazyLock<std::sync::Mutex<Light17>> =
 /// Верхняя граница числа секций в `level_chunk` (высота мира ≤ 4064).
 const MAX_SECTIONS_17: usize = 254;
 
+/// Тело клиентского пакета 1.17 → имя и тело 1.17.1 (`None` — пакет не отличается).
+pub fn from_1_17(name: &str, body: &[u8]) -> ProtocolResult<Option<(&'static str, Vec<u8>)>> {
+    let mut r = Reader::new(body);
+    let mut w = Writer::with_capacity(body.len() + 8);
+    let name = match name {
+        // VANILLA: ClientboundContainerSetContentPacket (1.17): window, short count, предметы —
+        // без stateId и предмета курсора (курсор сервер шлёт отдельным set_slot окна -1).
+        "container_set_content" => {
+            w.u8(r.u8()?).var_int(0);
+            let n = r.i16()?;
+            w.var_int(i32::from(n.max(0))).bytes(r.rest()).bool(false);
+            "container_set_content"
+        }
+        // VANILLA: ClientboundContainerSetSlotPacket (1.17): без stateId.
+        "container_set_slot" => {
+            w.u8(r.u8()?).var_int(0).bytes(r.rest());
+            "container_set_slot"
+        }
+        // VANILLA: ClientboundRemoveEntityPacket (1.17): одна сущность на пакет.
+        "remove_entity" => {
+            w.var_int(1).var_int(r.var_int()?);
+            "remove_entities"
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some((name, w.into_vec())))
+}
+
 /// Тело клиентского пакета 1.17.1 → формат 1.18.2.
 pub fn from_1_17_1(name: &str, body: &[u8]) -> ProtocolResult<Pre18> {
     let mut r = Reader::new(body);
@@ -462,6 +490,7 @@ pub fn from_1_19(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
 fn rename_1_17(name: &str) -> &str {
     match name {
         "level_chunk" => "level_chunk_with_light",
+        "remove_entity" => "remove_entities",
         n => n,
     }
 }
@@ -1309,33 +1338,33 @@ fn nbt_to_components(t: &Tag, book: bool) -> Vec<(u32, Vec<u8>)> {
     out
 }
 
-/// Сервер 1.17.1–1.19.4 (756–762): тот же путь, тела сначала переводятся в формат 1.20.1.
+/// Сервер 1.17–1.19.4 (755–762): тот же путь, тела сначала переводятся в формат 1.20.1.
 fn is_1_19_4() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 756..=762)
+    matches!(ezzmc_protocol::version::current().protocol, 755..=762)
 }
 
-/// Сервер 1.17.1–1.19.2 (756–760): тела сначала переводятся в формат 1.19.3 (`from_1_19_2`).
+/// Сервер 1.17–1.19.2 (755–760): тела сначала переводятся в формат 1.19.3 (`from_1_19_2`).
 fn is_1_19_2() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 756..=760)
+    matches!(ezzmc_protocol::version::current().protocol, 755..=760)
 }
 
-/// Сервер 1.17.1–1.19 (756–759): тела сначала переводятся в формат 1.19.2 (`from_1_19`).
+/// Сервер 1.17–1.19 (755–759): тела сначала переводятся в формат 1.19.2 (`from_1_19`).
 fn is_1_19() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 756..=759)
+    matches!(ezzmc_protocol::version::current().protocol, 755..=759)
 }
 
-/// Сервер 1.17.1–1.18.2 (756–758): тела сначала переводятся в формат 1.19 (`from_1_18_2`).
+/// Сервер 1.17–1.18.2 (755–758): тела сначала переводятся в формат 1.19 (`from_1_18_2`).
 fn is_1_18() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 756..=758)
+    matches!(ezzmc_protocol::version::current().protocol, 755..=758)
 }
 
-/// Сервер 1.17.1 (756): тела сначала переводятся в формат 1.18.2 (`from_1_17_1`).
+/// Сервер 1.17/1.17.1 (755/756): тела сначала переводятся в формат 1.18.2 (`from_1_17_1`).
 fn is_1_17() -> bool {
-    ezzmc_protocol::version::current().protocol == 756
+    matches!(ezzmc_protocol::version::current().protocol, 755 | 756)
 }
 
 /// Индекс версии для таблиц: 0 — 1.20.1, 1 — 1.19.4, 2 — 1.19.3, 3 — 1.19.2, 4 — 1.19, 5 — 1.18–1.18.2,
-/// 6 — 1.17.1.
+/// 6 — 1.17–1.17.1.
 fn era() -> usize {
     match ezzmc_protocol::version::current().protocol {
         762 => 1,
@@ -1344,7 +1373,8 @@ fn era() -> usize {
         759 => 4,
         // 1.18/1.18.1 (757): те же регистры item/menu/entity/enchant, что у 1.18.2
         757 | 758 => 5,
-        756 => 6,
+        // 1.17 (755): регистры совпадают с 1.17.1
+        755 | 756 => 6,
         _ => 0,
     }
 }
@@ -1743,9 +1773,12 @@ pub fn play_from_canon(id: i32, body: &[u8]) -> ProtocolResult<Vec<(i32, Vec<u8>
         }
         "container_click" => {
             let (win, state) = (r.var_int()?, r.var_int()?);
-            w.u8(win as u8)
-                .var_int(state)
-                .i16(r.i16()?)
+            w.u8(win as u8);
+            // VANILLA: ServerboundContainerClickPacket (1.17): без stateId.
+            if ezzmc_protocol::version::current().protocol != 755 {
+                w.var_int(state);
+            }
+            w.i16(r.i16()?)
                 .u8(r.u8()?)
                 .var_int(r.var_int()?);
             let n = r.length("changed slots", 128)?;
@@ -1860,7 +1893,16 @@ pub(crate) fn heightmap_id(name: &str) -> Option<i32> {
 
 /// Белый список clientbound-пакетов Play 1.20.1 → тело канона (`None` — отбросить).
 pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
-    let (conv17, conv18, conv00, conv0, conv);
+    let (conv755, conv17, conv18, conv00, conv0, conv);
+    let (name, body) = if ezzmc_protocol::version::current().protocol == 755 {
+        conv755 = from_1_17(name, body)?;
+        match &conv755 {
+            Some((n, b)) => (*n, b.as_slice()),
+            None => (name, body),
+        }
+    } else {
+        (name, body)
+    };
     let (name, body) = if is_1_17() {
         conv17 = from_1_17_1(name, body)?;
         match &conv17 {
