@@ -236,7 +236,7 @@ pub fn from_1_15_2(name: &str, body: &[u8]) -> ProtocolResult<Option<(&'static s
         "add_global_entity" => {
             let id = r.var_int()?;
             r.u8()?;
-            let kind = ezzmc_protocol::version::V1_15_2
+            let kind = ezzmc_protocol::version::current()
                 .entity_type
                 .iter()
                 .position(|n| n.ends_with("lightning_bolt"));

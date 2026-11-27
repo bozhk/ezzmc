@@ -3,6 +3,7 @@
 
 Пишет crates/net/src/entity_data_gen.rs. Запуск из корня: python3 tools/gen_entity_data.py
 """
+import difflib
 import re
 from pathlib import Path
 
@@ -82,6 +83,58 @@ for v in ERAS:
         rows.append((key, lists[out]))
     eras.append(sorted(set(rows)))
 
+
+# 1.13.2 есть только с именами Yarn: сопоставление не по именам полей, а выравниванием
+# последовательности сериализаторов типа с 1.14.4 → индекс 1.13 → индекс 1.14.4.
+YARN_SER = {"INTEGER": "INT", "TEXT_COMPONENT": "COMPONENT", "field_21650": "OPTIONAL_COMPONENT",
+            "ROTATION": "ROTATIONS", "FACING": "DIRECTION", "NBT_COMPOUND": "COMPOUND_TAG",
+            "field_21651": "PARTICLE", "OPTIONAL_BLOCK_STATE": "BLOCK_STATE"}
+
+
+def load_113():
+    base = Path("reference/1.13.2/client/net/minecraft")
+    parent, fields = {}, {}
+    for f in sorted(base.rglob("*.java")):
+        src = f.read_text()
+        for m in CLASS.finditer(src):
+            parent.setdefault(m[1], m[2].split(".")[-1])
+        for m in re.finditer(r"registerData\(\s*(\w+)\.class,\s*TrackedDataHandlerRegistry\.(\w+)", src):
+            fields.setdefault(m[1], []).append(YARN_SER.get(m[2], m[2]))
+    decl = (base / "entity/EntityType.java").read_text()
+    reg = {m[1]: m[2] for m in re.finditer(r'register\(\s*"(\w+)",\s*(?:EntityType\.)?EntityBuilder\.\w+\(\s*(\w+)\.class', decl)}
+    reg.setdefault("player", "PlayerEntity")
+
+    def chain(cls):
+        out = []
+        while cls:
+            out = fields.get(cls, []) + out
+            cls = parent.get(cls)
+        return out
+
+    return {name: chain(cls) for name, cls in reg.items()}
+
+
+old = load_113()
+new, _ = load("1.14.4")
+remaps = []
+for name, a in sorted(old.items()):
+    key = TYPE_ALIAS.get(name, name)
+    src = new.get(name)
+    if src is None:
+        print("1.13: нет типа в 1.14.4:", name)
+        continue
+    b = ["BLOCK_STATE" if s == "OPTIONAL_BLOCK_STATE" else s for _, s in src]
+    idx = [255] * len(a)
+    for i, j, n in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
+        for k in range(n):
+            idx[i + k] = j + k
+    # зомби 1.13: поле 14 «поднятые руки» удалено в 1.14 (выравнивание по типам этого не видит)
+    if name in ("zombie", "husk", "drowned", "zombie_pigman", "zombie_villager"):
+        idx[14:] = [255] + idx[14:-1]
+    if 255 in idx:
+        print("1.13: поля без пары", name, [(i, a[i]) for i, v in enumerate(idx) if v == 255])
+    remaps.append((key, idx))
+
 o = ["//! Сгенерировано `tools/gen_entity_data.py` из `reference/`. Не править руками.", "",
      "/// Поля по старому индексу: (индекс 26.3 или 255 — поля нет, id сериализатора 26.3).",
      "pub type Fields = &'static [(u8, u8)];", ""]
@@ -93,6 +146,10 @@ o += [f"    &[{', '.join(chr(34) + s + chr(34) for s in l)}]," for l in sers]
 o += ["];", "", "/// (тип сущности 26.3, поля), отсортировано по имени.",
       f"pub const TYPES: [&[(&str, Fields)]; {len(ERAS)}] = ["]
 o += [f"    &[{', '.join(f'({chr(34)}{k}{chr(34)}, {n})' for k, n in r)}]," for r in eras]
+o += ["];", ""]
+o += ["/// 1.13.x: (тип сущности 26.3, индекс 1.14.4 по индексу 1.13 или 255), отсортировано по имени.",
+      "pub const REMAP_1_13: &[(&str, &[u8])] = &["]
+o += [f'    ("{k}", &{v}),' for k, v in sorted(remaps)]
 o += ["];", ""]
 Path("crates/net/src/entity_data_gen.rs").write_text("\n".join(o))
 print("lists", len(lists), "types", [len(r) for r in eras])

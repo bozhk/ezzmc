@@ -2282,6 +2282,15 @@ pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>>
             });
             crate::entity_data::track(id, canon);
             lp_vec3(&mut w, vel);
+            // VANILLA: FallingBlockEntity — data это id состояния блока версии сервера.
+            let falling = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+                .get(canon as usize)
+                .is_some_and(|n| n.ends_with("falling_block"));
+            let data = if falling {
+                ezzmc_world::legacy::state_to_canon(data as u32) as i32
+            } else {
+                data
+            };
             w.u8(x_rot as u8)
                 .u8(y_rot as u8)
                 .u8(head as u8)

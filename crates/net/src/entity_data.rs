@@ -8,7 +8,7 @@ use ezzmc_protocol::generated::r26_3;
 use ezzmc_protocol::wire::{Reader, Writer};
 use ezzmc_protocol::{ProtocolError, ProtocolResult};
 
-use crate::entity_data_gen::{Fields, SERIALIZERS, TYPES};
+use crate::entity_data_gen::{Fields, REMAP_1_13, SERIALIZERS, TYPES};
 
 /// id сущности → тип 26.3 (из `add_entity`/`add_player`/входа).
 fn kinds() -> MutexGuard<'static, HashMap<i32, &'static str>> {
@@ -30,9 +30,16 @@ pub(crate) fn track_player(id: i32) {
 
 fn fields(era: usize, id: i32) -> Option<Fields> {
     let name = *kinds().get(&id)?;
+    // 1.13: индексы сначала переводятся в 1.14.4 (`remap_1_13`), дальше таблицы 1.14.4.
     let types = TYPES.get(era)?;
     let at = types.binary_search_by_key(&name, |(n, _)| *n).ok()?;
     types.get(at).map(|(_, f)| *f)
+}
+
+fn remap_1_13(id: i32) -> Option<&'static [u8]> {
+    let name = *kinds().get(&id)?;
+    let at = REMAP_1_13.binary_search_by_key(&name, |(n, _)| *n).ok()?;
+    REMAP_1_13.get(at).map(|(_, m)| *m)
 }
 
 /// VANILLA: ClientboundSetEntityDataPacket: id, записи (u8 индекс, varint сериализатор,
@@ -40,9 +47,13 @@ fn fields(era: usize, id: i32) -> Option<Fields> {
 pub(crate) fn to_canon(era: usize, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
     let mut r = Reader::new(body);
     let id = r.var_int()?;
-    let (Some(fields), Some(serializers)) = (fields(era, id), SERIALIZERS.get(era)) else {
+    let old = crate::v1201::is_1_13();
+    // Эры 1.13 в таблицах нет: сериализаторы — начало списка 1.14.4.
+    let table = if old { era.saturating_sub(1) } else { era };
+    let (Some(fields), Some(serializers)) = (fields(table, id), SERIALIZERS.get(table)) else {
         return Ok(None);
     };
+    let remap = old.then(|| remap_1_13(id).unwrap_or_default());
     let mut w = Writer::with_capacity(body.len() + 16);
     w.var_int(id);
     loop {
@@ -60,6 +71,10 @@ pub(crate) fn to_canon(era: usize, body: &[u8]) -> ProtocolResult<Option<Vec<u8>
             })?;
         let mut v = Writer::new();
         let keep = value(era, ser, &mut r, &mut v)?;
+        let idx = match remap {
+            Some(map) => map.get(usize::from(idx)).copied().unwrap_or(0xFF),
+            None => idx,
+        };
         // Мод или неизвестное поле: значение прочитано и отброшено.
         let target = fields.get(usize::from(idx)).filter(|f| f.0 != 0xFF);
         if let (true, Some(&(canon_idx, canon_ser))) = (keep, target) {
@@ -96,6 +111,13 @@ fn value(era: usize, ser: &str, r: &mut Reader, w: &mut Writer) -> ProtocolResul
             if some {
                 w.bytes(&crate::v1201::json_component(&r.string(262144)?));
             }
+        }
+        // 1.13/1.13.1: предмет с коротким id → форма 1.13.2.
+        "ITEM_STACK" if ezzmc_protocol::version::current().protocol < 404 => {
+            let mut new = Writer::new();
+            crate::v1132::item_to_1_13_2(r, &mut new)?;
+            let new = new.into_vec();
+            crate::v1201::item_to_canon(&mut Reader::new(&new), w)?;
         }
         "ITEM_STACK" => crate::v1201::item_to_canon(r, w)?,
         "ROTATIONS" | "VECTOR3" => {

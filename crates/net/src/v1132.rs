@@ -99,7 +99,7 @@ fn item_id_out(id: i32) -> Option<i32> {
 
 /// Предмет 1.13/1.13.1 (`short id`, -1 — пусто, byte count, NBT) → формат 1.13.2.
 /// VANILLA: PacketByteBuf#readItemStack (1.13.2: bool, varint id).
-fn item_to_1_13_2(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+pub(crate) fn item_to_1_13_2(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
     let id = r.i16()?;
     if id < 0 {
         w.bool(false);
@@ -138,6 +138,50 @@ fn item_from_1_13_2(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
         }
     }
     Ok(())
+}
+
+/// Вид объекта в `add_entity` 1.13 → имя типа сущности (у вагонеток вид уточняет `data`).
+/// VANILLA: ClientPlayNetworkHandler#onEntitySpawn (1.13.2).
+fn object_name(object: u8, data: i32) -> Option<&'static str> {
+    Some(match object {
+        1 => "boat",
+        2 => "item",
+        3 => "area_effect_cloud",
+        10 => match data {
+            1 => "chest_minecart",
+            2 => "furnace_minecart",
+            3 => "tnt_minecart",
+            4 => "spawner_minecart",
+            5 => "hopper_minecart",
+            6 => "command_block_minecart",
+            _ => "minecart",
+        },
+        50 => "tnt",
+        51 => "end_crystal",
+        60 => "arrow",
+        61 => "snowball",
+        62 => "egg",
+        63 => "fireball",
+        64 => "small_fireball",
+        65 => "ender_pearl",
+        66 => "wither_skull",
+        67 => "shulker_bullet",
+        68 => "llama_spit",
+        70 => "falling_block",
+        71 => "item_frame",
+        72 => "eye_of_ender",
+        73 => "potion",
+        75 => "experience_bottle",
+        76 => "firework_rocket",
+        77 => "leash_knot",
+        78 => "armor_stand",
+        79 => "evoker_fangs",
+        90 => "fishing_bobber",
+        91 => "spectral_arrow",
+        93 => "dragon_fireball",
+        94 => "trident",
+        _ => return None,
+    })
 }
 
 /// Тип окна 1.13 (строка) → имя меню 1.14.
@@ -338,7 +382,15 @@ pub fn expand(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<Packet>>> {
         return Ok(None);
     }
     let sky = SKY_LIGHT.load(Ordering::Relaxed);
-    let light = light_to_1_14(&parse_chunk(body, sky)?, sky);
+    let chunk = parse_chunk(body, sky)?;
+    // VANILLA: ChunkHolder (1.13.2) — от 64 изменений идёт частичный чанк (fullChunk=false):
+    // меняются только присланные секции.
+    if !chunk.full {
+        let bodies = crate::v1165::expand_1_16_1("level_chunk", &chunk_to_1_14(&chunk)?)?;
+        let id = crate::v1165::SECTION_UPDATE_ID;
+        return Ok(bodies.map(|b| b.into_iter().map(|b| (id, b)).collect()));
+    }
+    let light = light_to_1_14(&chunk, sky);
     Ok(Some(vec![(CHUNK_ID, body.to_vec()), (LIGHT_ID, light)]))
 }
 
@@ -417,8 +469,24 @@ pub fn from_1_13(name: &str, body: &[u8]) -> ProtocolResult<Pre18> {
             w.var_int(r.var_int()?).var_int(r.var_int()?);
             item_to_1_13_2(&mut r, &mut w)?;
         }
-        // Раскладки метаданных и типов объектов 1.13 другие — переводятся отдельно (TODO-380c).
-        "set_entity_data" | "add_entity" => return Ok(Pre18::Drop),
+        // VANILLA: EntitySpawnS2CPacket (1.13.2): id, uuid, byte вид объекта, xyz, pitch, yaw,
+        // int data, скорость → 1.14: varint тип сущности.
+        "add_entity" => {
+            w.var_int(r.var_int()?).bytes(r.bytes(16)?);
+            let object = r.u8()?;
+            let pose = r.bytes(24 + 2)?;
+            let data = r.i32()?;
+            let kind = object_name(object, data).and_then(|name| {
+                ezzmc_protocol::version::current()
+                    .entity_type
+                    .iter()
+                    .position(|n| n.trim_start_matches("minecraft:") == name)
+            });
+            let Some(kind) = kind else {
+                return Ok(Pre18::Drop);
+            };
+            w.var_int(kind as i32).bytes(pose).i32(data).bytes(r.rest());
+        }
         _ => return Ok(Pre18::Keep),
     }
     Ok(Pre18::Replace(w.into_vec()))
@@ -461,6 +529,14 @@ pub(crate) fn to_1_13(name: &str, body: &mut Vec<u8>) -> ProtocolResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_ids() {
+        assert_eq!(object_name(10, 0), Some("minecart"));
+        assert_eq!(object_name(10, 5), Some("hopper_minecart"));
+        assert_eq!(object_name(78, 0), Some("armor_stand"));
+        assert_eq!(object_name(200, 0), None);
+    }
 
     #[test]
     fn position_roundtrip() {

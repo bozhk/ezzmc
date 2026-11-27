@@ -10,7 +10,7 @@ area. The full run is for changes in shared packet code, on a couple of eras.
 
 For every version: starts `cargo xtask server <ver>`, joins with ezzmc through the control
 socket, runs the checks (client actions are verified on the server, server actions on the
-client) and prints a PASS/FAIL table. Exit code 1 if anything failed. Needs Minecraft 1.14+
+client) and prints a PASS/FAIL table. Exit code 1 if anything failed. Needs Minecraft 1.13+
 (`data` command). Env: SMOKE_PORT (25650), SMOKE_CONTROL_PORT (25590), SMOKE_DIR (/tmp).
 """
 import os
@@ -179,10 +179,19 @@ def c_teleport(s, ver):
           "gamerule doWeatherCycle false", "gamerule doMobSpawning false", "weather clear",
           "worldborder center 0 0", "worldborder set 59999968",  # stand worlds are reused
           "time set 1000", f"gamemode spectator {BOT}",
-          f"execute in minecraft:overworld run tp {BOT} {HOME[0]} {HOME[1]} {HOME[2]} 0 20")
+          f"execute in overworld run tp {BOT} {HOME[0]} {HOME[1]} {HOME[2]} 0 20")
     cmd("wait", ms=4000)
-    s.run(f"fill 1000 {Y} 1000 1016 {Y + 6} 1016 air", f"fill 1000 {Y - 1} 1000 1016 {Y - 1} 1016 stone",
-          "kill @e[type=!minecraft:player]", f"tp {BOT} {HOME[0]} {HOME[1]} {HOME[2]} 0 20",
+    for attempt in range(10):  # a fresh world may still be generating ("That position is not loaded")
+        s.run(f"fill 1000 {Y} 1000 1016 {Y + 6} 1016 air",
+              f"fill 1000 {Y - 1} 1000 1016 {Y - 1} 1016 stone")
+        try:
+            s.is_block((1016, Y - 1, 1016), "stone", 3)
+            s.is_block((1000, Y - 1, 1000), "stone", 3)
+            break
+        except Fail:
+            if attempt == 9:
+                raise
+    s.run("kill @e[type=!minecraft:player]", f"tp {BOT} {HOME[0]} {HOME[1]} {HOME[2]} 0 20",
           f"clear {BOT}", f"effect clear {BOT}")
     block(1001, Y - 1, 1001, "stone")
     s.run(f"gamemode survival {BOT}")
@@ -384,11 +393,11 @@ def c_movement(s, ver):
 
 
 def c_nether(s, ver):
-    s.run(f"gamemode spectator {BOT}", f"execute in minecraft:the_nether run tp {BOT} 0.5 {Y} 0.5")
+    s.run(f"gamemode spectator {BOT}", f"execute in the_nether run tp {BOT} 0.5 {Y} 0.5")
     until("nether", lambda: ("the_nether" in state()["world"]["dimension"], state()["world"]["dimension"]), 30)
     until("nether chunks", lambda: (cmd("block_at", x=0, y=1, z=0).get("loaded"), "not loaded"), 30)
     block(0, 0, 0, "bedrock")
-    s.run(f"execute in minecraft:overworld run tp {BOT} {HOME[0]} {HOME[1]} {HOME[2]} 0 20",
+    s.run(f"execute in overworld run tp {BOT} {HOME[0]} {HOME[1]} {HOME[2]} 0 20",
           f"gamemode survival {BOT}")
     until("overworld", lambda: ("overworld" in state()["world"]["dimension"], state()["world"]["dimension"]), 30)
     at(HOME, 30)
