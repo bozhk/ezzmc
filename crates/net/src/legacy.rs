@@ -1446,7 +1446,13 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
                     kept += 1;
                 }
             }
-            w.var_int(kept).bytes(&list.into_vec()).bytes(r.rest());
+            w.var_int(kept).bytes(&list.into_vec());
+            crate::v1201::light_to_canon(&mut r, &mut w)?;
+        }
+        // VANILLA: ClientboundLightUpdatePacket (1.21.11 и ниже): маски света long[] (writeBitSet).
+        "light_update" => {
+            w.var_int(r.var_int()?).var_int(r.var_int()?);
+            crate::v1201::light_to_canon(&mut r, &mut w)?;
         }
         // VANILLA: ClientboundBlockEntityDataPacket: BlockPos, registry block_entity_type, tag.
         "block_entity_data" => {
@@ -1871,6 +1877,26 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// До 26.1 маски света — long[] (writeBitSet); канон читает byte[] (ByteBufCodecs.BIT_SET).
+    #[test]
+    fn light_update_masks_to_byte_bitsets() {
+        let mut w = Writer::new();
+        w.var_int(3).var_int(-2);
+        w.bitset(&[0b10]).bitset(&[]).bitset(&[0b100]).bitset(&[]);
+        w.var_int(1).var_int(2048).bytes(&[0x11; 2048]).var_int(0);
+        let out = clientbound_1_21_11("light_update", &w.into_vec())
+            .unwrap()
+            .unwrap();
+        let mut r = Reader::new(&out);
+        assert_eq!((r.var_int().unwrap(), r.var_int().unwrap()), (3, -2));
+        assert_eq!(r.bitset_bytes().unwrap(), vec![0b10]);
+        assert_eq!(r.bitset_bytes().unwrap(), Vec::<u64>::new());
+        assert_eq!(r.bitset_bytes().unwrap(), vec![0b100]);
+        assert_eq!(r.bitset_bytes().unwrap(), Vec::<u64>::new());
+        assert_eq!(r.var_int().unwrap(), 1);
+        assert_eq!(r.var_int().unwrap(), 2048);
+    }
 
     #[test]
     fn block_entity_type_drops_bed() {

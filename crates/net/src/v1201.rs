@@ -967,7 +967,8 @@ fn bitset_to_canon(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
     Ok(())
 }
 
-fn light_to_canon(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+/// VANILLA: FriendlyByteBuf#writeBitSet до 26.1 — long[]; в 26.x ByteBufCodecs.BIT_SET — byte[].
+pub(crate) fn light_to_canon(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
     for _ in 0..4 {
         bitset_to_canon(r, w)?;
     }
