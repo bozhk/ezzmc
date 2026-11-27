@@ -56,6 +56,21 @@ impl DataLayer {
         d[i >> 1] = d[i >> 1] & !(15 << shift) | (v & 15) << shift;
     }
 
+    /// VANILLA: SkyLightSectionStorage#repeatFirstLayer — нижний ряд (y=0) повторён на все 16 высот.
+    pub fn repeat_first_layer(&self) -> Self {
+        let Some(d) = &self.data else {
+            return self.clone();
+        };
+        let mut out = Box::new([0u8; DATA_LAYER_BYTES]);
+        for chunk in out.chunks_exact_mut(128) {
+            chunk.copy_from_slice(&d[..128]);
+        }
+        DataLayer {
+            data: Some(out),
+            default: 0,
+        }
+    }
+
     /// VANILLA: DataLayer#isEmpty — все значения нули.
     pub fn is_empty(&self) -> bool {
         match &self.data {

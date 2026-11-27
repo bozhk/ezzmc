@@ -52,8 +52,26 @@ impl ChunkCache {
             Kind::Sky => &mut c.light.sky,
             Kind::Block => &mut c.light.block,
         };
-        if let Some(slot) = layers.get_mut(i) {
-            let l = slot.get_or_insert_with(|| crate::light::DataLayer::filled(0));
+        if i >= layers.len() {
+            return;
+        }
+        if layers[i].is_none() {
+            // VANILLA: SkyLightSectionStorage#createDataLayer — у секции без небесного слоя реальный свет
+            // берётся из нижнего ряда ближайшего слоя выше (или 15 над всеми слоями); нулевой слой
+            // затемнил бы всю секцию. Блочный свет без слоя = 0.
+            let fresh = match kind {
+                Kind::Sky => layers[i + 1..]
+                    .iter()
+                    .find_map(|l| l.as_ref())
+                    .map_or_else(
+                        || crate::light::DataLayer::filled(15),
+                        crate::light::DataLayer::repeat_first_layer,
+                    ),
+                Kind::Block => crate::light::DataLayer::filled(0),
+            };
+            layers[i] = Some(fresh);
+        }
+        if let Some(Some(l)) = layers.get_mut(i) {
             let (lx, ly, lz) = ((x & 15) as usize, (y & 15) as usize, (z & 15) as usize);
             if l.get(lx, ly, lz) != v {
                 l.set(lx, ly, lz, v);
@@ -312,6 +330,31 @@ mod tests {
         c.set_block(0, 100, 0, BlockState::AIR);
         assert_eq!(c.light_get(Kind::Sky, 0, 99, 0), Some(15));
         assert_eq!(c.light_get(Kind::Sky, 0, 50, 0), Some(15));
+    }
+
+    /// Сервер не шлёт слои для открытого неба: блок в такой секции не должен гасить всю секцию.
+    #[test]
+    fn block_in_section_without_sky_layer_keeps_neighbours_lit() {
+        let mut c = ChunkCache::new(F, 4);
+        c.set_center(0, 0);
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                c.apply_packet(LevelChunkPacket {
+                    x: cx,
+                    z: cz,
+                    chunk: Chunk::empty(&F),
+                    heightmaps: vec![],
+                    block_entities: vec![],
+                    light: LightUpdate::default(),
+                });
+            }
+        }
+        assert_eq!(c.light_get(Kind::Sky, 5, 70, 5), Some(15));
+        c.set_block(0, 64, 0, state("oak_log"));
+        assert_eq!(c.light_get(Kind::Sky, 0, 64, 0), Some(0));
+        assert_eq!(c.light_get(Kind::Sky, 5, 70, 5), Some(15));
+        assert_eq!(c.light_get(Kind::Sky, 1, 64, 0), Some(15));
+        assert_eq!(c.light_get(Kind::Sky, 0, 63, 0), Some(14));
     }
 }
 
