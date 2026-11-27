@@ -1086,7 +1086,9 @@ fn serverbound_body(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
             w.bytes(r.bytes(3)?).var_int(r.var_int()?);
             let n = r.length("changed slots", 128)?;
             w.var_int(n as i32);
-            let stack = if pre_1_21_5(ver()) {
+            let stack = if pre_1_20_5(ver()) {
+                crate::v1201::hashed_to_1_20_4
+            } else if pre_1_21_5(ver()) {
                 hashed_to_stack_1_21_4
             } else {
                 hashed_stack_back
@@ -1108,7 +1110,11 @@ fn serverbound_body(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
         // VANILLA: ServerboundSetCreativeModeSlotPacket — short slot, OPTIONAL_UNTRUSTED stack.
         "set_creative_mode_slot" => {
             w.i16(r.i16()?);
-            tr_back().stack_untrusted(&mut r, &mut w)?;
+            if pre_1_20_5(ver()) {
+                crate::v1201::untrusted_to_1_20_4(&mut r, &mut w)?;
+            } else {
+                tr_back().stack_untrusted(&mut r, &mut w)?;
+            }
         }
         // VANILLA: ServerboundPlayerCommandPacket.Action (1.21.5): перед STOP_SLEEPING ещё
         // PRESS_SHIFT_KEY, RELEASE_SHIFT_KEY.
@@ -1581,7 +1587,22 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
                     tr().value(&mut r, &mut w, &Shape::Nbt, &Shape::Nbt)?;
                     tr().value(&mut r, &mut w, &Shape::Nbt, &Shape::Nbt)?;
                     let mut icon = Writer::new();
-                    if !tr().value(&mut r, &mut icon, &Shape::Stack, &Shape::ItemTemplate)? {
+                    let ok = if pre_1_20_5(ver()) {
+                        // VANILLA: DisplayInfo#serializeToNetwork (1.20.4) — writeItem (NBT);
+                        // канонический стек (count, item, патч) → ItemTemplate (item, count, патч).
+                        let mut st = Writer::new();
+                        stack(&mut r, &mut st)?;
+                        let st = st.into_vec();
+                        let mut sr = Reader::new(&st);
+                        let count = sr.var_int()?;
+                        if count > 0 {
+                            icon.var_int(sr.var_int()?).var_int(count).bytes(sr.rest());
+                        }
+                        count > 0
+                    } else {
+                        tr().value(&mut r, &mut icon, &Shape::Stack, &Shape::ItemTemplate)?
+                    };
+                    if !ok {
                         icon = Writer::new();
                         icon.var_int(0).var_int(1).var_int(0).var_int(0);
                     }

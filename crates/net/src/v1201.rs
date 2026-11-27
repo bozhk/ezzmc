@@ -672,6 +672,31 @@ fn nbt_to_components(t: &Tag, book: bool) -> Vec<(u32, Vec<u8>)> {
     if book {
         ench("StoredEnchantments", "stored_enchantments");
     }
+    // VANILLA: ItemStackComponentizationFix (1.20.5) — Potion/CustomPotionColor → potion_contents;
+    // "minecraft:empty" не переносится. VANILLA-UNSURE: CustomPotionEffects не переносятся.
+    let potion = t
+        .get("Potion")
+        .and_then(Tag::as_str)
+        .map(|n| n.strip_prefix("minecraft:").unwrap_or(n))
+        .and_then(|n| {
+            ezzmc_protocol::generated::r26_3::POTION
+                .iter()
+                .position(|p| *p == n)
+        });
+    let color = int("CustomPotionColor");
+    if potion.is_some() || color.is_some() {
+        let mut w = Writer::new();
+        w.bool(potion.is_some());
+        if let Some(p) = potion {
+            w.var_int(p as i32);
+        }
+        w.bool(color.is_some());
+        if let Some(c) = color {
+            w.i32(c as i32);
+        }
+        w.var_int(0).bool(false);
+        put("potion_contents", w.into_vec());
+    }
     if let Some(d) = t.get("display") {
         let valid = |s: &str| serde_json::from_str::<serde_json::Value>(s).is_ok();
         if let Some(n) = d.get("Name").and_then(Tag::as_str).filter(|s| valid(s)) {
@@ -766,6 +791,45 @@ pub fn canon_name<'a>(name: &'a str, body: &[u8]) -> &'a str {
 
 /// Канонический HashedStack (present, item, count, 0, 0) → ItemStack 1.20.1 без NBT.
 fn hashed_to_1201(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    hashed_to_nbt_stack(r, w, false)
+}
+
+/// HashedStack канона → ItemStack 1.20.4 (id, байт count, пустой NBT). VANILLA-UNSURE: как и
+/// для 1.20.1, компоненты (в каноне только хеши) не передаются; сервер пришлёт исправление.
+pub(crate) fn hashed_to_1_20_4(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    hashed_to_nbt_stack(r, w, true)
+}
+
+/// ItemStack.OPTIONAL_UNTRUSTED канона (set_creative_mode_slot) → ItemStack 1.20.4 без NBT.
+/// VANILLA-UNSURE: компоненты не переводятся обратно в NBT (зачарования/имя теряются).
+pub(crate) fn untrusted_to_1_20_4(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    let count = r.var_int()?;
+    let item = if count > 0 { r.var_int()? } else { -1 };
+    let id = usize::try_from(item)
+        .ok()
+        .and_then(|i| back_1_20_4().get(i).copied().flatten());
+    match id {
+        Some(id) => w
+            .bool(true)
+            .var_int(id as i32)
+            .u8(count.min(127) as u8)
+            .u8(0),
+        None => w.bool(false),
+    };
+    Ok(())
+}
+
+fn back_1_20_4() -> &'static [Option<u32>] {
+    static BACK: std::sync::OnceLock<Vec<Option<u32>>> = std::sync::OnceLock::new();
+    BACK.get_or_init(|| {
+        ezzmc_protocol::version::build_remap(
+            ezzmc_protocol::version::CANON.item,
+            ezzmc_protocol::version::V1_20_4.item,
+        )
+    })
+}
+
+fn hashed_to_nbt_stack(r: &mut Reader, w: &mut Writer, v1204: bool) -> ProtocolResult<()> {
     if !r.bool()? {
         w.bool(false);
         return Ok(());
@@ -788,6 +852,7 @@ fn hashed_to_1201(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
     let modded = u32::try_from(item)
         .ok()
         .and_then(|i| i.checked_sub(ezzmc_world::modded::MOD_ITEM_BASE));
+    let back: &[Option<u32>] = if v1204 { back_1_20_4() } else { back };
     match modded.or_else(|| {
         back.get(usize::try_from(item).unwrap_or(usize::MAX))
             .copied()
