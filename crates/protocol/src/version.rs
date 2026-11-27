@@ -181,12 +181,25 @@ pub const V1_20_1: Version = Version {
     particle_type: generated::r1_20_1::PARTICLE_TYPE,
 };
 
+/// 1.19.4 (протокол 762): тот же набор и порядок пакетов, что у 1.20.1; тела переводятся
+/// в формат 1.20.1 (`legacy::from_1_19_4`) и дальше идут путём 1.20.1.
+pub const V1_19_4: Version = Version {
+    name: "1.19.4",
+    protocol: 762,
+    packets: generated::v1_20_1::PACKETS,
+    item: generated::r1_19_4::ITEM,
+    block: generated::r1_19_4::BLOCK,
+    entity_type: generated::r1_19_4::ENTITY_TYPE,
+    sound_event: generated::r1_19_4::SOUND_EVENT,
+    particle_type: generated::r1_19_4::PARTICLE_TYPE,
+};
+
 /// Каноническая версия (на ней написан весь клиент).
 pub const CANON: Version = V26_3;
 
 pub const SUPPORTED: &[Version] = &[
     V26_3, V1_21_11, V1_21_10, V1_21_8, V1_21_6, V1_21_5, V1_21_4, V1_21_3, V1_21_1, V1_20_6,
-    V1_20_4, V1_20_2, V1_20_1,
+    V1_20_4, V1_20_2, V1_20_1, V1_19_4,
 ];
 
 /// Версия по protocol number из Status-ответа.
@@ -208,6 +221,11 @@ pub fn set_current(v: Version) {
 impl Version {
     pub fn is_canon(&self) -> bool {
         self.protocol == CANON.protocol
+    }
+
+    /// 1.19.4–1.20.1: без Configuration-фазы, реестры в Play `login`; один путь (`v1201`).
+    pub fn is_pre_config(&self) -> bool {
+        matches!(self.protocol, 762..=763)
     }
 
     /// 1.20.2–1.21.11: переводятся одним путём (`legacy::clientbound_1_21_11`).

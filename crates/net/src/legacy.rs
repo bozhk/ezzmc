@@ -1517,7 +1517,7 @@ pub fn to_canon(name: Option<&str>, body: Vec<u8>) -> ProtocolResult<Option<Vec<
     if v.is_canon() {
         return Ok(Some(body));
     }
-    if v.protocol == 763 {
+    if v.is_pre_config() {
         return match name {
             Some(n) => clientbound_1_20_1(n, &body),
             None => Ok(None),

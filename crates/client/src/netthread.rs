@@ -406,9 +406,13 @@ fn run(
     let (host, port) = ezzmc_net::srv::parse_address(addr);
     let mut c = Connection::connect(addr).map_err(|x| e(&x))?;
     let own_uuid;
-    let cfg = if ver.protocol == 763 {
-        // 1.20.1 (в т. ч. Forge FML3): хендшейк с суффиксом, без Configuration, реестры из `login`.
-        let fml_host = format!("{host}{}", ezzmc_net::v1201::FML3_SUFFIX);
+    let cfg = if ver.is_pre_config() {
+        // 1.19.4/1.20.1 (в т. ч. Forge FML3 на 1.20.1): без Configuration, реестры из `login`.
+        let fml_host = if ver.protocol == 763 {
+            format!("{host}{}", ezzmc_net::v1201::FML3_SUFFIX)
+        } else {
+            host.clone()
+        };
         c.handshake(ver.protocol, &fml_host, port, Intent::Login)
             .map_err(|x| e(&x))?;
         let joined = ezzmc_net::v1201::login(&mut c, &ids, name).map_err(|x| e(&x))?;
@@ -572,7 +576,7 @@ fn run(
                 .map(|i| i as i32)
         })
         // 1.20.1: реестра часов нет, set_time переводится в часы с id 0
-        .or((ver.protocol == 763).then_some(0));
+        .or(ver.is_pre_config().then_some(0));
     let mut h = PlayHandler::new(ids);
     let mut loaded_sent = false;
     let mut cur_dim = String::new();
@@ -959,7 +963,7 @@ fn run(
             }
             // Сервер старой версии: тело → формат канона (глава 18).
             let canon_pname = match ver.protocol {
-                763 => pname.map(|n| ezzmc_net::v1201::canon_name(n, &p.body)),
+                762 | 763 => pname.map(|n| ezzmc_net::v1201::canon_name(n, &p.body)),
                 764 => pname.map(|n| ezzmc_net::legacy::canon_name_1_20_2(n, &p.body)),
                 766 | 767 => pname.map(|n| ezzmc_net::legacy::canon_name_1_21_1(n, &p.body)),
                 _ => None,

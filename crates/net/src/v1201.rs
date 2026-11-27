@@ -198,8 +198,13 @@ pub fn login(conn: &mut Connection, ids: &PacketIds, name: &str) -> NetResult<Jo
         }
         early.push(p);
     };
+    let login_body = if is_1_19_4() {
+        from_1_19_4("login", &login_pkt.body)?
+    } else {
+        None
+    };
     let cfg = ServerConfig {
-        registries: parse_login_registries(&login_pkt.body)?,
+        registries: parse_login_registries(login_body.as_deref().unwrap_or(&login_pkt.body))?,
         ..ServerConfig::default()
     };
     conn.push_front(login_pkt);
@@ -207,6 +212,48 @@ pub fn login(conn: &mut Connection, ids: &PacketIds, name: &str) -> NetResult<Jo
         conn.push_front(p);
     }
     Ok(Joined { profile, cfg })
+}
+
+/// Тело клиентского пакета 1.19.4 → формат 1.20.1 (`None` — тело не меняется).
+// VANILLA: ClientboundLoginPacket/ClientboundRespawnPacket (1.19.4) — без portalCooldown;
+// ClientboundLightUpdatePacketData (1.19.4) — bool trustEdges перед масками;
+// ClientboundSectionBlocksUpdatePacket (1.19.4) — bool suppressLightUpdates после позиции секции.
+pub fn from_1_19_4(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
+    let mut r = Reader::new(body);
+    let mut w = Writer::with_capacity(body.len() + 1);
+    match name {
+        "login" | "respawn" => {
+            w.bytes(body).var_int(0);
+        }
+        "light_update" => {
+            w.var_int(r.var_int()?).var_int(r.var_int()?);
+            r.bool()?;
+            w.bytes(r.rest());
+        }
+        "level_chunk_with_light" => {
+            r.i32()?;
+            r.i32()?;
+            nbt::read_named(&mut r)?;
+            let n = r.length("chunk data", 1 << 21)?;
+            r.bytes(n)?;
+            for _ in 0..r.length("block entities", 1 << 16)? {
+                r.u8()?;
+                r.i16()?;
+                r.var_int()?;
+                nbt::read_named(&mut r)?;
+            }
+            w.bytes(r.since(0));
+            r.bool()?;
+            w.bytes(r.rest());
+        }
+        "section_blocks_update" => {
+            w.i64(r.i64()?);
+            r.bool()?;
+            w.bytes(r.rest());
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(w.into_vec()))
 }
 
 /// Тело `login` 1.20.1 → (реестры, остальное). Формат:
@@ -559,10 +606,12 @@ fn enchant_names() -> Vec<String> {
     if let Some(fml) = ezzmc_world::modded::server_names("minecraft:enchantment") {
         return fml.iter().map(|n| enchant_canon_name(n)).collect();
     }
-    ezzmc_protocol::generated::r1_20_1::ENCHANTMENT
-        .iter()
-        .map(|n| enchant_canon_name(n))
-        .collect()
+    let names: &[&str] = if is_1_19_4() {
+        ezzmc_protocol::generated::r1_19_4::ENCHANTMENT
+    } else {
+        ezzmc_protocol::generated::r1_20_1::ENCHANTMENT
+    };
+    names.iter().map(|n| enchant_canon_name(n)).collect()
 }
 
 fn enchant_holder(name: &str) -> Option<u32> {
@@ -725,24 +774,45 @@ fn nbt_to_components(t: &Tag, book: bool) -> Vec<(u32, Vec<u8>)> {
     out
 }
 
+/// Сервер 1.19.4 (762) — тот же путь, свои реестры.
+fn is_1_19_4() -> bool {
+    ezzmc_protocol::version::current().protocol == 762
+}
+
+type Remap = std::sync::OnceLock<Vec<Option<u32>>>;
+
+/// Таблица перевода id для 1.20.1 (`t[0]`) или 1.19.4 (`t[1]`), строится лениво.
+fn remap_for<'a>(
+    t: &'a [Remap; 2],
+    from: [&'static [&'static str]; 2],
+    to: &'static [&'static str],
+) -> &'a [Option<u32>] {
+    let k = usize::from(is_1_19_4());
+    t[k].get_or_init(|| ezzmc_protocol::version::build_remap(from[k], to))
+}
+
 fn item_map() -> &'static [Option<u32>] {
-    static T: std::sync::OnceLock<Vec<Option<u32>>> = std::sync::OnceLock::new();
-    T.get_or_init(|| {
-        ezzmc_protocol::version::build_remap(
+    static T: [Remap; 2] = [Remap::new(), Remap::new()];
+    remap_for(
+        &T,
+        [
             ezzmc_protocol::version::V1_20_1.item,
-            ezzmc_protocol::version::CANON.item,
-        )
-    })
+            ezzmc_protocol::version::V1_19_4.item,
+        ],
+        ezzmc_protocol::version::CANON.item,
+    )
 }
 
 fn menu_map() -> &'static [Option<u32>] {
-    static T: std::sync::OnceLock<Vec<Option<u32>>> = std::sync::OnceLock::new();
-    T.get_or_init(|| {
-        ezzmc_protocol::version::build_remap(
+    static T: [Remap; 2] = [Remap::new(), Remap::new()];
+    remap_for(
+        &T,
+        [
             ezzmc_protocol::generated::r1_20_1::MENU,
-            ezzmc_protocol::generated::r26_3::MENU,
-        )
-    })
+            ezzmc_protocol::generated::r1_19_4::MENU,
+        ],
+        ezzmc_protocol::generated::r26_3::MENU,
+    )
 }
 
 /// Тип меню сервера 1.20.1 → канон: ванильное 26.3 по имени, модовое — `MOD_MENU_BASE + id`.
@@ -851,12 +921,14 @@ fn hashed_to_nbt_stack(r: &mut Reader, w: &mut Writer, v1204: bool) -> ProtocolR
     for _ in 0..r.length("hashed removed", 256)? {
         r.var_int()?;
     }
-    static BACK: std::sync::OnceLock<Vec<Option<u32>>> = std::sync::OnceLock::new();
-    let back = BACK.get_or_init(|| {
-        ezzmc_protocol::version::build_remap(
-            ezzmc_protocol::version::CANON.item,
+    static BACK: [Remap; 2] = [Remap::new(), Remap::new()];
+    let k = usize::from(is_1_19_4());
+    let back = BACK[k].get_or_init(|| {
+        let to = [
             ezzmc_protocol::version::V1_20_1.item,
-        )
+            ezzmc_protocol::version::V1_19_4.item,
+        ];
+        ezzmc_protocol::version::build_remap(ezzmc_protocol::version::CANON.item, to[k])
     });
     let modded = u32::try_from(item)
         .ok()
@@ -887,13 +959,15 @@ static PLAYER_TYPE: std::sync::LazyLock<Option<usize>> = std::sync::LazyLock::ne
 });
 
 fn entity_type_map() -> &'static [Option<u32>] {
-    static T: std::sync::OnceLock<Vec<Option<u32>>> = std::sync::OnceLock::new();
-    T.get_or_init(|| {
-        ezzmc_protocol::version::build_remap(
+    static T: [Remap; 2] = [Remap::new(), Remap::new()];
+    remap_for(
+        &T,
+        [
             ezzmc_protocol::version::V1_20_1.entity_type,
-            ezzmc_protocol::version::CANON.entity_type,
-        )
-    })
+            ezzmc_protocol::version::V1_19_4.entity_type,
+        ],
+        ezzmc_protocol::version::CANON.entity_type,
+    )
 }
 
 /// VANILLA: LpVec3#write (канон 26.3), масштаб ≤ 3 без продолжения.
@@ -944,6 +1018,12 @@ pub fn play_from_canon(id: i32, body: &[u8]) -> ProtocolResult<Vec<(i32, Vec<u8>
     let mut r = Reader::new(body);
     let mut w = Writer::new();
     match name {
+        // VANILLA: ServerboundSignUpdatePacket (1.19.4): pos, 4 строки — без bool isFrontText.
+        "sign_update" if is_1_19_4() => {
+            w.i64(r.i64()?);
+            r.bool()?;
+            w.bytes(r.rest());
+        }
         // flags (бит0 onGround, бит1 horizontalCollision) → bool onGround
         "move_player_pos"
         | "move_player_pos_rot"
@@ -1131,6 +1211,13 @@ pub(crate) fn heightmap_id(name: &str) -> Option<i32> {
 
 /// Белый список clientbound-пакетов Play 1.20.1 → тело канона (`None` — отбросить).
 pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
+    let conv;
+    let body = if is_1_19_4() {
+        conv = from_1_19_4(name, body)?;
+        conv.as_deref().unwrap_or(body)
+    } else {
+        body
+    };
     let mut r = Reader::new(body);
     let mut w = Writer::new();
     match name {

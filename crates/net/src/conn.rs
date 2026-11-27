@@ -157,7 +157,7 @@ impl Connection {
 
     pub fn send(&mut self, id: i32, body: &[u8]) -> NetResult<()> {
         // Сервер 1.20.1: клиент собирает пакеты в каноне — переводим перед отправкой.
-        if self.state == State::Play && ezzmc_protocol::version::current().protocol == 763 {
+        if self.state == State::Play && ezzmc_protocol::version::current().is_pre_config() {
             for (i, b) in crate::v1201::play_from_canon(id, body)? {
                 self.send_raw(i, &b)?;
             }
