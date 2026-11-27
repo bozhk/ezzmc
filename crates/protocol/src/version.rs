@@ -156,6 +156,19 @@ pub const V1_20_4: Version = Version {
     particle_type: generated::r1_20_4::PARTICLE_TYPE,
 };
 
+/// 1.20.2 (протокол 764): как 1.20.4, но текст в пакетах JSON-строкой, старые set_score/explode,
+/// пакеты ресурсов без UUID; реестры без экспериментальных блоков/предметов 1.20.3.
+pub const V1_20_2: Version = Version {
+    name: "1.20.2",
+    protocol: 764,
+    packets: generated::v1_20_2::PACKETS,
+    item: generated::r1_20_2::ITEM,
+    block: generated::r1_20_2::BLOCK,
+    entity_type: generated::r1_20_2::ENTITY_TYPE,
+    sound_event: generated::r1_20_2::SOUND_EVENT,
+    particle_type: generated::r1_20_2::PARTICLE_TYPE,
+};
+
 /// Forge/ваниль 1.20.1 (протокол 763): нет Configuration-фазы, реестры внутри Play `login`.
 pub const V1_20_1: Version = Version {
     name: "1.20.1",
@@ -173,7 +186,7 @@ pub const CANON: Version = V26_3;
 
 pub const SUPPORTED: &[Version] = &[
     V26_3, V1_21_11, V1_21_10, V1_21_8, V1_21_6, V1_21_5, V1_21_4, V1_21_3, V1_21_1, V1_20_6,
-    V1_20_4, V1_20_1,
+    V1_20_4, V1_20_2, V1_20_1,
 ];
 
 /// Версия по protocol number из Status-ответа.
@@ -197,9 +210,9 @@ impl Version {
         self.protocol == CANON.protocol
     }
 
-    /// 1.20.3–1.21.11: переводятся одним путём (`legacy::clientbound_1_21_11`).
+    /// 1.20.2–1.21.11: переводятся одним путём (`legacy::clientbound_1_21_11`).
     pub fn is_1_21_late(&self) -> bool {
-        matches!(self.protocol, 765..=774)
+        matches!(self.protocol, 764..=774)
     }
 }
 

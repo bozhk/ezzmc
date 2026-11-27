@@ -427,7 +427,8 @@ fn item_to_canon(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
     stack_to_canon(id, count, tag, item_map(), w)
 }
 
-/// ItemStack 1.20.2–1.20.4 (bool, id, byte count, сетевой NBT без имени) → канон.
+/// ItemStack 1.20.2–1.20.4 (bool, id, byte count, сетевой NBT без имени) → канон
+/// (id по реестру версии соединения).
 /// VANILLA: FriendlyByteBuf#writeItem (1.20.4).
 pub(crate) fn item_to_canon_1_20_4(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
     if !r.bool()? {
@@ -437,12 +438,11 @@ pub(crate) fn item_to_canon_1_20_4(r: &mut Reader, w: &mut Writer) -> ProtocolRe
     let id = r.var_int()?;
     let count = r.i8()?;
     let tag = nbt::read_network(r)?;
-    static T: std::sync::OnceLock<Vec<Option<u32>>> = std::sync::OnceLock::new();
-    let map = T.get_or_init(|| {
-        ezzmc_protocol::version::build_remap(
-            ezzmc_protocol::version::V1_20_4.item,
-            ezzmc_protocol::version::CANON.item,
-        )
+    static T: [std::sync::OnceLock<Vec<Option<u32>>>; 2] =
+        [const { std::sync::OnceLock::new() }; 2];
+    let (k, items) = nbt_era_items();
+    let map = T[k].get_or_init(|| {
+        ezzmc_protocol::version::build_remap(items, ezzmc_protocol::version::CANON.item)
     });
     stack_to_canon(id, count, tag, map, w)
 }
@@ -820,13 +820,22 @@ pub(crate) fn untrusted_to_1_20_4(r: &mut Reader, w: &mut Writer) -> ProtocolRes
 }
 
 fn back_1_20_4() -> &'static [Option<u32>] {
-    static BACK: std::sync::OnceLock<Vec<Option<u32>>> = std::sync::OnceLock::new();
-    BACK.get_or_init(|| {
-        ezzmc_protocol::version::build_remap(
-            ezzmc_protocol::version::CANON.item,
-            ezzmc_protocol::version::V1_20_4.item,
-        )
+    static BACK: [std::sync::OnceLock<Vec<Option<u32>>>; 2] =
+        [const { std::sync::OnceLock::new() }; 2];
+    let (k, items) = nbt_era_items();
+    BACK[k].get_or_init(|| {
+        ezzmc_protocol::version::build_remap(ezzmc_protocol::version::CANON.item, items)
     })
+}
+
+/// Реестр предметов версии соединения 1.20.2 (0) или 1.20.3/1.20.4 (1): в 1.20.3 добавлены
+/// предметы экспериментального набора 1.21 (crafter, туф, медь и т. п.), id сдвинуты.
+fn nbt_era_items() -> (usize, &'static [&'static str]) {
+    if ezzmc_protocol::version::current().protocol == 764 {
+        (0, ezzmc_protocol::version::V1_20_2.item)
+    } else {
+        (1, ezzmc_protocol::version::V1_20_4.item)
+    }
 }
 
 fn hashed_to_nbt_stack(r: &mut Reader, w: &mut Writer, v1204: bool) -> ProtocolResult<()> {
@@ -1086,7 +1095,7 @@ fn json_to_tag(v: &serde_json::Value) -> Tag {
 }
 
 /// JSON-строка компонента (1.20.1) → NBT-байты канона.
-fn json_component(s: &str) -> Vec<u8> {
+pub(crate) fn json_component(s: &str) -> Vec<u8> {
     let v = serde_json::from_str::<serde_json::Value>(s)
         .unwrap_or_else(|_| serde_json::Value::String(s.to_owned()));
     nbt_bytes(&json_to_tag(&v))

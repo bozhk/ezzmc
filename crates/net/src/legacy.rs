@@ -6,8 +6,8 @@ use ezzmc_protocol::item::{
 };
 use ezzmc_protocol::translate::Translator;
 use ezzmc_protocol::version::{
-    build_remap, Version, CANON, V1_20_4, V1_20_6, V1_21_1, V1_21_10, V1_21_11, V1_21_3, V1_21_4,
-    V1_21_5, V1_21_8,
+    build_remap, Version, CANON, V1_20_2, V1_20_4, V1_20_6, V1_21_1, V1_21_10, V1_21_11, V1_21_3,
+    V1_21_4, V1_21_5, V1_21_8,
 };
 use ezzmc_protocol::wire::{Reader, Writer};
 use ezzmc_protocol::{Direction, ProtocolResult, State};
@@ -22,9 +22,11 @@ use std::sync::{Mutex, OnceLock};
 /// 4 — 1.21.4 (769: форматы 1.21.5 плюс отличия ниже), 5 — 1.21.2/1.21.3 (768: как 1.21.4
 /// плюс свои отличия), 6 — 1.21/1.21.1 (767: как 1.21.3 плюс отличия до 1.21.2), 7 — 1.20.5/1.20.6
 /// (766: как 1.21.1 плюс отличия до 1.21), 8 — 1.20.3/1.20.4 (765: как 1.20.6 плюс отличия до
-/// 1.20.5: предметы с NBT, нет компонентов).
+/// 1.20.5: предметы с NBT, нет компонентов), 9 — 1.20.2 (764: как 1.20.4, но текст JSON-строкой
+/// и прочие отличия до 1.20.3 — `from_1_20_2`).
 fn ver() -> usize {
     match ezzmc_protocol::version::current().protocol {
+        764 => 9,
         765 => 8,
         766 => 7,
         767 => 6,
@@ -36,28 +38,29 @@ fn ver() -> usize {
         _ => 2,
     }
 }
-const VERSIONS: [&Version; 9] = [
+const VERSIONS: [&Version; 10] = [
     &V1_21_8, &V1_21_10, &V1_21_11, &V1_21_5, &V1_21_4, &V1_21_3, &V1_21_1, &V1_20_6, &V1_20_4,
+    &V1_20_2,
 ];
 
 /// Форматы до 1.21.9 (1.21.5–1.21.8): скорости short, BlockPos спавна без измерения и т. п.
 fn pre_1_21_9(k: usize) -> bool {
-    matches!(k, 0 | 3..=8)
+    matches!(k, 0 | 3..=9)
 }
 
 /// Форматы до 1.21.6 (1.21–1.21.5): PRESS/RELEASE_SHIFT_KEY, нет HangingEntity#DATA_DIRECTION.
 fn pre_1_21_6(k: usize) -> bool {
-    matches!(k, 3..=8)
+    matches!(k, 3..=9)
 }
 
 /// Форматы до 1.21.5 (1.21–1.21.4): add_experience_orb, showInTooltip, NBT-карты высот и т. п.
 fn pre_1_21_5(k: usize) -> bool {
-    matches!(k, 4..=8)
+    matches!(k, 4..=9)
 }
 
 /// Форматы до 1.21.2 (1.20.5–1.21.1): id контейнеров байтом, старые позиция/телепорт/взрыв.
 fn pre_1_21_2(k: usize) -> bool {
-    matches!(k, 6..=8)
+    matches!(k, 6..=9)
 }
 
 /// Форматы до 1.21 (1.20.5/1.20.6): модификаторы атрибутов с UUID, use_item без поворота.
@@ -65,9 +68,14 @@ fn pre_1_21(k: usize) -> bool {
     k >= 7
 }
 
-/// 1.20.3/1.20.4: до компонентов предметов (1.20.5).
+/// 1.20.2–1.20.4: до компонентов предметов (1.20.5).
 fn pre_1_20_5(k: usize) -> bool {
-    k == 8
+    k >= 8
+}
+
+/// 1.20.2: текст JSON-строкой, старые set_score/explode/resource_pack (до 1.20.3).
+fn pre_1_20_3(k: usize) -> bool {
+    k == 9
 }
 
 /// Стек предмета сервера → канон: 1.20.4 — NBT, новее — компоненты через `Translator`.
@@ -88,7 +96,7 @@ fn particle(
     ty: Option<i32>,
     spell: Option<u32>,
 ) -> ProtocolResult<bool> {
-    if !matches!(ver(), 6..=8) {
+    if !matches!(ver(), 6..=9) {
         return tr().value(r, w, particle_src(), &PARTICLE);
     }
     let ty = match ty {
@@ -187,7 +195,7 @@ fn particle(
 }
 
 fn particle_src() -> &'static Shape {
-    if matches!(ver(), 5..=8) {
+    if matches!(ver(), 5..=9) {
         &PARTICLE_1_21_3
     } else {
         &PARTICLE_1_21_11
@@ -195,7 +203,7 @@ fn particle_src() -> &'static Shape {
 }
 
 fn entity_type_map() -> &'static [Option<u32>] {
-    static T: [OnceLock<Vec<Option<u32>>>; 9] = [const { OnceLock::new() }; 9];
+    static T: [OnceLock<Vec<Option<u32>>>; 10] = [const { OnceLock::new() }; 10];
     let k = ver();
     T[k].get_or_init(|| {
         let mut t = build_remap(VERSIONS[k].entity_type, CANON.entity_type);
@@ -223,9 +231,10 @@ fn entity_type_map() -> &'static [Option<u32>] {
 /// Реестр block_entity_type версии соединения → канон (в 26.x убран `bed`, добавлен `potent_sulfur`).
 fn block_entity_type(id: i32) -> Option<i32> {
     use ezzmc_protocol::generated::{
-        r1_20_4, r1_20_6, r1_21_1, r1_21_10, r1_21_11, r1_21_3, r1_21_4, r1_21_5, r1_21_8, r26_3,
+        r1_20_2, r1_20_4, r1_20_6, r1_21_1, r1_21_10, r1_21_11, r1_21_3, r1_21_4, r1_21_5, r1_21_8,
+        r26_3,
     };
-    const SRC: [&[&str]; 9] = [
+    const SRC: [&[&str]; 10] = [
         r1_21_8::BLOCK_ENTITY_TYPE,
         r1_21_10::BLOCK_ENTITY_TYPE,
         r1_21_11::BLOCK_ENTITY_TYPE,
@@ -235,8 +244,9 @@ fn block_entity_type(id: i32) -> Option<i32> {
         r1_21_1::BLOCK_ENTITY_TYPE,
         r1_20_6::BLOCK_ENTITY_TYPE,
         r1_20_4::BLOCK_ENTITY_TYPE,
+        r1_20_2::BLOCK_ENTITY_TYPE,
     ];
-    static T: [OnceLock<Vec<Option<u32>>>; 9] = [const { OnceLock::new() }; 9];
+    static T: [OnceLock<Vec<Option<u32>>>; 10] = [const { OnceLock::new() }; 10];
     let k = ver();
     T[k].get_or_init(|| build_remap(SRC[k], r26_3::BLOCK_ENTITY_TYPE))
         .get(usize::try_from(id).ok()?)
@@ -698,6 +708,9 @@ fn entity_data_value(r: &mut Reader, w: &mut Writer, ser: &str) -> ProtocolResul
         "STRING" => {
             w.string(&r.string(32767)?);
         }
+        // VANILLA: EntityDataSerializers.COMPONENT (1.20.2) — FriendlyByteBuf#readComponent (JSON).
+        "COMPONENT" if pre_1_20_3(ver()) => json_text(r, w)?,
+        "OPTIONAL_COMPONENT" if pre_1_20_3(ver()) => opt_json_text(r, w)?,
         "COMPONENT" => return same(r, w, &Shape::Nbt),
         "OPTIONAL_COMPONENT" => return same(r, w, &Shape::Optional(&Shape::Nbt)),
         "ITEM_STACK" => stack(r, w)?,
@@ -1006,6 +1019,7 @@ fn set_entity_data(r: &mut Reader, w: &mut Writer, k: usize) -> ProtocolResult<(
         SERIALIZERS_1_21_4,
         SERIALIZERS_1_21_4,
         SERIALIZERS_1_20_4,
+        SERIALIZERS_1_20_4,
     ][k];
     // VANILLA: HangingEntity#DATA_DIRECTION (#8) появился в 1.21.6 — поля рамок/картин 1.21.5
     // с #8 сдвигаются на 1 (направление приходит в add_entity, как и в 1.21.6).
@@ -1265,7 +1279,7 @@ fn serverbound_body(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
         // VANILLA: ServerboundPlayerCommandPacket.Action (1.21.5): перед STOP_SLEEPING ещё
         // PRESS_SHIFT_KEY, RELEASE_SHIFT_KEY.
         // VANILLA: ServerboundMoveVehiclePacket (1.21.4) дописал onGround; в 1.21.3 его нет.
-        "move_vehicle" if matches!(ver(), 5..=8) => {
+        "move_vehicle" if matches!(ver(), 5..=9) => {
             let Some((_, head)) = body.split_last() else {
                 return Ok(None);
             };
@@ -1510,11 +1524,316 @@ pub fn to_canon(name: Option<&str>, body: Vec<u8>) -> ProtocolResult<Option<Vec<
         };
     }
     let Some(n) = name else { return Ok(Some(body)) };
+    let (n, body) = if v.protocol == 764 {
+        let canon = canon_name_1_20_2(n, &body);
+        match from_1_20_2(n, &body)? {
+            Some(b) if b.is_empty() => return Ok(None),
+            Some(b) => (canon, b),
+            None => (canon, body),
+        }
+    } else {
+        (n, body)
+    };
     match clientbound_1_21_11(n, &body)? {
         Some(b) if b.is_empty() && !body.is_empty() => Ok(None),
         Some(b) => Ok(Some(b)),
         None => Ok(Some(body)),
     }
+}
+
+/// Имя пакета 1.20.2 в каноне (тело переводит `from_1_20_2`).
+/// VANILLA: ClientboundSetScorePacket (1.20.2) — метод REMOVE; в 1.20.3 — ClientboundResetScorePacket.
+pub fn canon_name_1_20_2<'a>(name: &'a str, body: &[u8]) -> &'a str {
+    if name != "set_score" {
+        return name;
+    }
+    let mut r = Reader::new(body);
+    match r.string(32767).and_then(|_| r.var_int()) {
+        Ok(1) => "reset_score",
+        _ => name,
+    }
+}
+
+/// Текст FriendlyByteBuf#readComponent 1.20.2 (JSON-строка) → сетевой NBT 1.20.3+.
+fn json_text(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    let s = r.string(262_144)?;
+    w.bytes(&crate::v1201::json_component(&s));
+    Ok(())
+}
+
+fn opt_json_text(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    let some = r.bool()?;
+    w.bool(some);
+    if some {
+        json_text(r, w)?;
+    }
+    Ok(())
+}
+
+/// ItemStack 1.20.2–1.20.4 без перевода (bool, id, байт count, сетевой NBT).
+fn copy_nbt_stack(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    let start = r.pos();
+    if r.bool()? {
+        r.var_int()?;
+        r.u8()?;
+        ezzmc_protocol::nbt::read_network(r)?;
+    }
+    w.bytes(r.since(start));
+    Ok(())
+}
+
+/// Тело пакета сервера 1.20.2 (764) → формат 1.20.4 (765); дальше — общий путь
+/// `clientbound_1_21_11`. `None` — тело совпадает; пустое — отбросить.
+/// VANILLA: 1.20.3 перевёл текст в пакетах с JSON (readComponent) на NBT (readComponentTrusted),
+/// добавил формат чисел счёта, частицы и звук взрыва, UUID пакетов ресурсов.
+fn from_1_20_2(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
+    let mut r = Reader::new(body);
+    let mut w = Writer::new();
+    match name {
+        "disconnect"
+        | "system_chat"
+        | "set_action_bar_text"
+        | "set_title_text"
+        | "set_subtitle_text"
+        | "server_data" => json_text(&mut r, &mut w)?,
+        "tab_list" => {
+            json_text(&mut r, &mut w)?;
+            json_text(&mut r, &mut w)?;
+        }
+        "player_combat_kill" => {
+            w.var_int(r.var_int()?);
+            json_text(&mut r, &mut w)?;
+        }
+        // VANILLA: ChatType.BoundNetwork (1.20.2): chatType varint, name, nullable targetName.
+        "disguised_chat" => {
+            json_text(&mut r, &mut w)?;
+            w.var_int(r.var_int()?);
+            json_text(&mut r, &mut w)?;
+            opt_json_text(&mut r, &mut w)?;
+        }
+        // VANILLA: ClientboundPlayerChatPacket (1.20.2): sender, index, nullable подпись (256),
+        // SignedMessageBody.Packed (content, timestamp, salt, LastSeenMessages.Packed),
+        // nullable unsignedContent, FilterMask, ChatType.BoundNetwork.
+        "player_chat" => {
+            let start = r.pos();
+            r.bytes(16)?;
+            r.var_int()?;
+            if r.bool()? {
+                r.bytes(256)?;
+            }
+            r.string(256)?;
+            r.bytes(16)?;
+            for _ in 0..r.length("last seen", 20)? {
+                if r.var_int()? == 0 {
+                    r.bytes(256)?;
+                }
+            }
+            w.bytes(r.since(start));
+            opt_json_text(&mut r, &mut w)?;
+            let start = r.pos();
+            // VANILLA: FilterMask#write — тип (PASS_THROUGH, FULLY_FILTERED, PARTIALLY_FILTERED),
+            // у PARTIALLY_FILTERED — BitSet (long[]).
+            if r.var_int()? == 2 {
+                let n = r.length("filter mask", 1 << 16)?;
+                r.bytes(n * 8)?;
+            }
+            w.bytes(r.since(start));
+            w.var_int(r.var_int()?);
+            json_text(&mut r, &mut w)?;
+            opt_json_text(&mut r, &mut w)?;
+        }
+        // VANILLA: MenuType (1.20.3) — crafter_3x3 (#7) вставлен после generic_3x3.
+        "open_screen" => {
+            w.var_int(r.var_int()?);
+            let menu = r.var_int()?;
+            w.var_int(if menu >= 7 { menu + 1 } else { menu });
+            json_text(&mut r, &mut w)?;
+        }
+        // VANILLA: ClientboundBossEventPacket.Operation: ADD(0) name, ..; UPDATE_NAME(3) name.
+        "boss_event" => {
+            w.bytes(r.bytes(16)?);
+            let op = r.var_int()?;
+            w.var_int(op);
+            if matches!(op, 0 | 3) {
+                json_text(&mut r, &mut w)?;
+            }
+        }
+        // VANILLA: ClientboundSetObjectivePacket (1.20.3) — nullable NumberFormat после renderType.
+        "set_objective" => {
+            w.string(&r.string(32767)?);
+            let method = r.u8()?;
+            w.u8(method);
+            if matches!(method, 0 | 2) {
+                json_text(&mut r, &mut w)?;
+                w.var_int(r.var_int()?).bool(false);
+            }
+        }
+        // VANILLA: ClientboundSetScorePacket (1.20.2): owner, Method (CHANGE/REMOVE), objective
+        // ("" — все), score при CHANGE. 1.20.3: owner, objective, score, nullable display,
+        // nullable numberFormat; REMOVE → ClientboundResetScorePacket(owner, nullable objective).
+        "set_score" => {
+            let owner = r.string(32767)?;
+            let method = r.var_int()?;
+            let objective = r.string(32767)?;
+            w.string(&owner);
+            if method == 1 {
+                w.bool(!objective.is_empty());
+                if !objective.is_empty() {
+                    w.string(&objective);
+                }
+            } else {
+                w.string(&objective)
+                    .var_int(r.var_int()?)
+                    .bool(false)
+                    .bool(false);
+            }
+            return Ok(Some(w.into_vec()));
+        }
+        "set_player_team" => {
+            w.string(&r.string(32767)?);
+            let method = r.u8()?;
+            w.u8(method);
+            if matches!(method, 0 | 2) {
+                json_text(&mut r, &mut w)?;
+                w.u8(r.u8()?);
+                w.string(&r.string(40)?).string(&r.string(40)?);
+                w.var_int(r.var_int()?);
+                json_text(&mut r, &mut w)?;
+                json_text(&mut r, &mut w)?;
+            }
+        }
+        // VANILLA: ClientboundPlayerInfoUpdatePacket.Action (1.20.2): ADD_PLAYER, INITIALIZE_CHAT,
+        // UPDATE_GAME_MODE, UPDATE_LISTED, UPDATE_LATENCY, UPDATE_DISPLAY_NAME (EnumSet — 1 байт).
+        "player_info_update" => {
+            let actions = r.u8()?;
+            w.u8(actions);
+            let n = r.length("player info", 1 << 16)?;
+            w.var_int(n as i32);
+            for _ in 0..n {
+                let start = r.pos();
+                r.bytes(16)?;
+                if actions & 1 != 0 {
+                    r.string(16)?;
+                    for _ in 0..r.length("properties", 1 << 8)? {
+                        r.string(32767)?;
+                        r.string(32767)?;
+                        if r.bool()? {
+                            r.string(32767)?;
+                        }
+                    }
+                }
+                if actions & 2 != 0 && r.bool()? {
+                    r.bytes(16 + 8)?;
+                    let k = r.length("public key", 512)?;
+                    r.bytes(k)?;
+                    let k = r.length("key signature", 4096)?;
+                    r.bytes(k)?;
+                }
+                if actions & 4 != 0 {
+                    r.var_int()?;
+                }
+                if actions & 8 != 0 {
+                    r.bool()?;
+                }
+                if actions & 16 != 0 {
+                    r.var_int()?;
+                }
+                w.bytes(r.since(start));
+                if actions & 32 != 0 {
+                    opt_json_text(&mut r, &mut w)?;
+                }
+            }
+        }
+        // VANILLA: ClientboundMapItemDataPacket (1.20.2): декорации — тип, x, y, rot, nullable name.
+        "map_item_data" => {
+            w.var_int(r.var_int()?).u8(r.u8()?).bool(r.bool()?);
+            let some = r.bool()?;
+            w.bool(some);
+            if some {
+                let n = r.length("map decorations", 1 << 16)?;
+                w.var_int(n as i32);
+                for _ in 0..n {
+                    w.var_int(r.var_int()?).bytes(r.bytes(3)?);
+                    opt_json_text(&mut r, &mut w)?;
+                }
+            }
+        }
+        "command_suggestions" => {
+            w.var_int(r.var_int()?)
+                .var_int(r.var_int()?)
+                .var_int(r.var_int()?);
+            let n = r.length("suggestions", 1 << 16)?;
+            w.var_int(n as i32);
+            for _ in 0..n {
+                w.string(&r.string(32767)?);
+                opt_json_text(&mut r, &mut w)?;
+            }
+        }
+        // VANILLA: Advancement#write / DisplayInfo#serializeToNetwork (1.20.2): title и description
+        // JSON; остальное как в 1.20.4.
+        "update_advancements" => {
+            w.bool(r.bool()?);
+            let n = r.length("advancements", 1 << 16)?;
+            w.var_int(n as i32);
+            for _ in 0..n {
+                w.string(&r.string(32767)?);
+                let parent = r.bool()?;
+                w.bool(parent);
+                if parent {
+                    w.string(&r.string(32767)?);
+                }
+                let display = r.bool()?;
+                w.bool(display);
+                if display {
+                    json_text(&mut r, &mut w)?;
+                    json_text(&mut r, &mut w)?;
+                    copy_nbt_stack(&mut r, &mut w)?;
+                    w.var_int(r.var_int()?);
+                    let flags = r.i32()?;
+                    w.i32(flags);
+                    if flags & 1 != 0 {
+                        w.string(&r.string(32767)?);
+                    }
+                    w.bytes(r.bytes(8)?);
+                }
+                let groups = r.length("requirements", 1 << 16)?;
+                w.var_int(groups as i32);
+                for _ in 0..groups {
+                    let k = r.length("requirement", 1 << 16)?;
+                    w.var_int(k as i32);
+                    for _ in 0..k {
+                        w.string(&r.string(32767)?);
+                    }
+                }
+                w.bool(r.bool()?);
+            }
+        }
+        // VANILLA: ClientboundExplodePacket (1.20.3) дописал BlockInteraction, малую и большую
+        // частицы, звук. В 1.20.2 клиент создаёт Explosion с DESTROY, частицы explosion /
+        // explosion_emitter и звук entity.generic.explode (Explosion#finalizeExplosion).
+        "explode" => {
+            w.bytes(r.bytes(24)?);
+            w.f32(r.f32()?);
+            let n = r.length("explosion blocks", 1 << 16)?;
+            w.var_int(n as i32).bytes(r.bytes(n * 3)?);
+            w.bytes(r.bytes(12)?);
+            let types = VERSIONS[ver()].particle_type;
+            let pid = |n: &str| types.iter().position(|t| *t == n).map(|i| i as i32);
+            let (Some(small), Some(large)) = (pid("explosion"), pid("explosion_emitter")) else {
+                return Ok(Some(Vec::new()));
+            };
+            // Explosion.BlockInteraction: KEEP, DESTROY, DESTROY_WITH_DECAY, TRIGGER_BLOCK;
+            // звук — SoundEvent#writeToNetwork (1.20.4): ResourceLocation, Optional<Float>.
+            w.var_int(1).var_int(small).var_int(large);
+            w.string("minecraft:entity.generic.explode").bool(false);
+            return Ok(Some(w.into_vec()));
+        }
+        // Пакеты ресурсов в Play клиент не обрабатывает (как resource_pack_push 1.20.3+).
+        "resource_pack" => return Ok(Some(Vec::new())),
+        _ => return Ok(None),
+    }
+    w.bytes(r.rest());
+    Ok(Some(w.into_vec()))
 }
 
 /// Сервер 1.20.1: БЕЛЫЙ список переведённых пакетов; всё остальное отбрасываем
@@ -2075,7 +2394,7 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
             } else {
                 None
             };
-            let flags: &[u8] = if matches!(ver(), 5..=8) {
+            let flags: &[u8] = if matches!(ver(), 5..=9) {
                 &[r.u8()?, 0]
             } else {
                 r.bytes(2)?
@@ -2140,7 +2459,31 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
                 return Ok(Some(Vec::new()));
             }
             w.bytes(&part.into_vec());
-            if !tr().value(&mut r, &mut w, &SOUND, &SOUND)? {
+            // VANILLA: SoundEvent#writeToNetwork (1.20.4) — ResourceLocation и Optional<Float>
+            // без holder; 1.20.5+ — SoundEvent.STREAM_CODEC (Holder: id+1 или 0 и прямой звук).
+            let holder;
+            let mut sr = if pre_1_20_5(ver()) {
+                let loc = r.string(32767)?;
+                let range = if r.bool()? { Some(r.f32()?) } else { None };
+                let key = loc.strip_prefix("minecraft:").unwrap_or(&loc);
+                let mut h = Writer::new();
+                match VERSIONS[ver()].sound_event.iter().position(|s| *s == key) {
+                    Some(i) => {
+                        h.var_int(i as i32 + 1);
+                    }
+                    None => {
+                        h.var_int(0).string(&loc).bool(range.is_some());
+                        if let Some(v) = range {
+                            h.f32(v);
+                        }
+                    }
+                }
+                holder = h.into_vec();
+                Reader::new(&holder)
+            } else {
+                std::mem::replace(&mut r, Reader::new(&[]))
+            };
+            if !tr().value(&mut sr, &mut w, &SOUND, &SOUND)? {
                 return Ok(Some(Vec::new()));
             }
             w.var_int(0).bool(true);
@@ -2204,7 +2547,12 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
                 let raw = if pre_1_20_5(ver()) {
                     let name = r.string(32767)?;
                     let name = name.strip_prefix("minecraft:").unwrap_or(&name);
-                    ezzmc_protocol::generated::r1_20_4::ATTRIBUTE
+                    let names = if pre_1_20_3(ver()) {
+                        ezzmc_protocol::generated::r1_20_2::ATTRIBUTE
+                    } else {
+                        ezzmc_protocol::generated::r1_20_4::ATTRIBUTE
+                    };
+                    names
                         .iter()
                         .position(|n| *n == name)
                         .map_or(-1, |i| i as i32)

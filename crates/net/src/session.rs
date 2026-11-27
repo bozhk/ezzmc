@@ -147,10 +147,17 @@ pub enum ConfigOutcome {
 /// Component из причины отключения Configuration/Play (сетевой NBT).
 fn disconnect_text(body: &[u8]) -> String {
     let mut r = Reader::new(body);
-    let comp = nbt::read_network(&mut r)
-        .ok()
-        .flatten()
-        .and_then(|t| Component::from_nbt(&t).ok());
+    // VANILLA: ClientboundDisconnectPacket (1.20.2) — текст JSON-строкой; с 1.20.3 — NBT.
+    let comp = if ezzmc_protocol::version::current().protocol <= 764 {
+        r.string(262_144)
+            .ok()
+            .and_then(|s| Component::from_json_str(&s).ok())
+    } else {
+        nbt::read_network(&mut r)
+            .ok()
+            .flatten()
+            .and_then(|t| Component::from_nbt(&t).ok())
+    };
     comp.map(|c| c.to_plain(&|_| None))
         .unwrap_or_else(|| "<нечитаемая причина>".into())
 }
@@ -430,6 +437,15 @@ pub fn configure(
                 for action in [3, 0] {
                     let mut w = Writer::new();
                     w.uuid(id).var_int(action);
+                    conn.send(ids.get(ST, S, "resource_pack")?, &w.buf)?;
+                }
+            }
+            // VANILLA: ClientboundResourcePackPacket (1.20.2) — без UUID; ответ
+            // ServerboundResourcePackPacket — только Action (ACCEPTED=3, SUCCESSFULLY_LOADED=0).
+            "resource_pack" => {
+                for action in [3, 0] {
+                    let mut w = Writer::new();
+                    w.var_int(action);
                     conn.send(ids.get(ST, S, "resource_pack")?, &w.buf)?;
                 }
             }
