@@ -904,6 +904,8 @@ fn read_login(body: &[u8]) -> ProtocolResult<LoginBody> {
 /// записи по возрастанию `id`.
 fn parse_login_registries(body: &[u8]) -> ProtocolResult<Vec<RegistryData>> {
     let l = read_login(body)?;
+    // свой игрок не приходит в add_player; id — первое поле пакета
+    crate::entity_data::track_player(Reader::new(body).i32()?);
     let mut out = registries_from_codec(&l.registries);
     // У 1.20.1 зачарований в кодеке нет — подсказкам нужен реестр (TODO-508c).
     out.push(enchant_registry());
@@ -1073,7 +1075,7 @@ pub fn login_to_canon(body: &[u8]) -> ProtocolResult<Vec<u8>> {
 }
 
 /// 1.20.1 ItemStack (bool, id, byte count, NBT) → канон (count, id, патч из NBT, TODO-508c).
-fn item_to_canon(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+pub(crate) fn item_to_canon(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
     if !r.bool()? {
         w.var_int(0);
         return Ok(());
@@ -2242,6 +2244,7 @@ pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>>
             pos.iter().for_each(|v| {
                 w.f64(*v);
             });
+            crate::entity_data::track(id, canon);
             lp_vec3(&mut w, vel);
             w.u8(x_rot as u8)
                 .u8(y_rot as u8)
@@ -2259,10 +2262,12 @@ pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>>
             pos.iter().for_each(|v| {
                 w.f64(*v);
             });
+            crate::entity_data::track_player(id);
             lp_vec3(&mut w, [0.0; 3]);
             w.u8(x_rot as u8).u8(y_rot as u8).u8(y_rot as u8).var_int(0)
         }
         "remove_entities" | "rotate_head" | "entity_event" | "animate" => w.bytes(body),
+        "set_entity_data" => return crate::entity_data::to_canon(era(), body),
         // 1.20.1 совпадает с 1.21.11
         "move_entity_pos" | "move_entity_pos_rot" | "move_entity_rot" => {
             return crate::legacy::clientbound_1_21_11(name, body);

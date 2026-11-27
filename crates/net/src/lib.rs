@@ -2,6 +2,8 @@
 pub mod chunkbatch;
 pub mod conn;
 pub mod crypt;
+mod entity_data;
+mod entity_data_gen;
 pub mod error;
 pub mod frame;
 pub mod legacy;

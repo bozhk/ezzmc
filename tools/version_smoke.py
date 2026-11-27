@@ -3,6 +3,10 @@
 
     cargo build --profile fast -p ezzmc-client
     python3 tools/version_smoke.py 1.16.2 [1.17.1 ...]
+    python3 tools/version_smoke.py --only entity_data,entity_spawn 1.14.4
+
+`--only` runs join + teleport (world setup) and the listed checks; use it while fixing one
+area. The full run is for changes in shared packet code, on a couple of eras.
 
 For every version: starts `cargo xtask server <ver>`, joins with ezzmc through the control
 socket, runs the checks (client actions are verified on the server, server actions on the
@@ -312,6 +316,21 @@ def c_entity_spawn(s, ver):
         until(f"entity {kind}", lambda: (kind in entity_types(), entity_types()))
 
 
+def c_entity_data(s, ver):
+    """Метаданные: стек выпавшего предмета, флаг baby, огонь."""
+    s.run(f"summon item 1004.5 {Y} 1012.5 {{Item:{{id:\"minecraft:diamond\",Count:3b,count:3}},PickupDelay:32767s}}",
+          f"summon pig 1008.5 {Y} 1013.5 {{NoAI:1b,Age:-24000,Fire:2000s}}")
+
+    def seen():
+        es = cmd("entities", max_dist=32, limit=60)["entities"]
+        stack = any(e.get("item") == {"item": "diamond", "count": 3} for e in es)
+        baby = any(e["type"] == "pig" and e.get("baby") and e.get("on_fire") for e in es)
+        return stack and baby, [e for e in es if e["type"] in ("item", "pig")]
+
+    until("entity metadata", seen)
+    s.run("kill @e[type=minecraft:item]", "kill @e[type=minecraft:pig,x=1008,y=119,z=1013,distance=..4]")
+
+
 def c_entity_remove(s, ver):
     s.run("kill @e[type=minecraft:pig]", "kill @e[type=minecraft:armor_stand]")
     until("entities gone", lambda: (not {"pig", "armor_stand"} & set(entity_types()), entity_types()))
@@ -443,10 +462,19 @@ def smoke(ver_name):
 
 
 def main():
-    if len(sys.argv) < 2:
+    global CHECKS
+    args = sys.argv[1:]
+    if args[:1] == ["--only"] and len(args) > 1:
+        wanted = set(args[1].split(","))
+        unknown = wanted - {n for n, _ in CHECKS}
+        if unknown:
+            sys.exit(f"unknown checks {sorted(unknown)}; known: {[n for n, _ in CHECKS]}")
+        CHECKS = [c for c in CHECKS if c[0] in wanted | {"join", "teleport"}]
+        args = args[2:]
+    if not args:
         sys.exit(__doc__)
     summary = []
-    for ver in sys.argv[1:]:
+    for ver in args:
         try:
             results = smoke(ver)
         except Fail as e:

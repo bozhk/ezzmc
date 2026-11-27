@@ -327,6 +327,46 @@ pub fn from_1_14_4(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
     Ok(Some(w.into_vec()))
 }
 
+/// Внутренние id пакетов, на которые разворачиваются `add_mob`/`add_player` 1.14.
+pub const ADD_MOB_ID: i32 = 0x1001;
+pub const ADD_PLAYER_ID: i32 = 0x1002;
+pub const ENTITY_DATA_ID: i32 = 0x1003;
+
+/// VANILLA: ClientboundAddMobPacket / AddPlayerPacket (1.14.4) несут метаданные в хвосте
+/// (в 1.15 — отдельный `set_entity_data`) → пара (id, тело). `None` — хвоста нет.
+pub fn expand_1_14(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<crate::legacy::Packet>>> {
+    let (add, fixed) = match name {
+        // uuid, varint тип, xyz, 3 угла, скорость
+        "add_mob" => (ADD_MOB_ID, None),
+        // uuid, xyz, 2 угла
+        "add_player" => (ADD_PLAYER_ID, Some(16 + 24 + 2)),
+        _ => return Ok(None),
+    };
+    let mut r = Reader::new(body);
+    let id = r.var_int()?;
+    match fixed {
+        Some(n) => {
+            r.bytes(n)?;
+        }
+        None => {
+            r.bytes(16)?;
+            r.var_int()?;
+            r.bytes(24 + 3 + 6)?;
+        }
+    }
+    let head = r.since(0);
+    let tail = r.rest();
+    if tail.is_empty() {
+        return Ok(None);
+    }
+    let mut data = Writer::new();
+    data.var_int(id).bytes(tail);
+    Ok(Some(vec![
+        (add, head.to_vec()),
+        (ENTITY_DATA_ID, data.into_vec()),
+    ]))
+}
+
 /// Тело serverbound-пакета формата 1.16 → 1.15.2.
 pub(crate) fn to_1_15_2(name: &str, body: &mut Vec<u8>) {
     match name {
@@ -365,6 +405,16 @@ mod tests {
         assert_eq!(out.len(), 4096);
         // ячейка x=1 z=2 → столбец x=6 z=10
         assert_eq!(out[(2 * 4 + 1) * 4 + 3], 10 * 16 + 6);
+    }
+
+    #[test]
+    fn add_player_metadata_splits_once() {
+        let mut b = Writer::new();
+        b.var_int(5).bytes(&[0; 42]).u8(0xFF);
+        let parts = expand_1_14("add_player", &b.buf).unwrap().unwrap();
+        assert_eq!(parts[0].1.len(), 43);
+        assert_eq!(parts[1].1, [5, 0xFF]);
+        assert!(expand_1_14("add_player", &parts[0].1).unwrap().is_none());
     }
 
     #[test]

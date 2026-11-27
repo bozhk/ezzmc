@@ -948,6 +948,9 @@ fn run(
             let pid = p.id;
             let pname = match p.id {
                 ezzmc_net::v1165::SECTION_UPDATE_ID => Some("section_blocks_update"),
+                ezzmc_net::v1152::ADD_MOB_ID => Some("add_mob"),
+                ezzmc_net::v1152::ADD_PLAYER_ID => Some("add_player"),
+                ezzmc_net::v1152::ENTITY_DATA_ID => Some("set_entity_data"),
                 id => ids
                     .name_of(State::Play, Direction::Clientbound, id)
                     .map(ezzmc_net::v1152::alias),
