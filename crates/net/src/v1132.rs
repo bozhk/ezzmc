@@ -50,7 +50,7 @@ pub fn internal_name(id: i32) -> Option<&'static str> {
 }
 
 /// `x<<38 | y<<26 | z` (1.13) → `x<<38 | z<<12 | y` (1.14).
-fn pos_to_1_14(v: i64) -> i64 {
+pub(crate) fn pos_to_1_14(v: i64) -> i64 {
     let v = v as u64;
     let (x, y, z) = (v >> 38, (v >> 26) & 0xFFF, v & 0x3FF_FFFF);
     ((x << 38) | (z << 12) | y) as i64
@@ -148,7 +148,7 @@ fn item_from_1_13_2(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
 
 /// Вид объекта в `add_entity` 1.13 → имя типа сущности (у вагонеток вид уточняет `data`).
 /// VANILLA: ClientPlayNetworkHandler#onEntitySpawn (1.13.2).
-fn object_name(object: u8, data: i32) -> Option<&'static str> {
+pub(crate) fn object_name(object: u8, data: i32) -> Option<&'static str> {
     Some(match object {
         1 => "boat",
         2 => "item",
@@ -413,6 +413,20 @@ pub fn expand(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<Packet>>> {
 
 /// Тело клиентского пакета 1.13.x → формат 1.14.4.
 pub fn from_1_13(name: &str, body: &[u8]) -> ProtocolResult<Pre18> {
+    if current() != 340 {
+        return from_1_13_2(name, body);
+    }
+    match crate::v1122::to_1_13_2(name, body)? {
+        Pre18::Keep => from_1_13_2(name, body),
+        Pre18::Replace(new) => Ok(match from_1_13_2(name, &new)? {
+            Pre18::Keep => Pre18::Replace(new),
+            other => other,
+        }),
+        Pre18::Drop => Ok(Pre18::Drop),
+    }
+}
+
+fn from_1_13_2(name: &str, body: &[u8]) -> ProtocolResult<Pre18> {
     let mut r = Reader::new(body);
     let mut w = Writer::with_capacity(body.len() + 16);
     match name {

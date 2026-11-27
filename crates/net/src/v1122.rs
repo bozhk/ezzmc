@@ -1,17 +1,55 @@
 //! Отличия протокола 1.12.2 (340) от 1.13.2: чанк и предметы приводятся к формату 1.13.2, дальше идут
 //! путём `v1132`. Id состояний блоков остаются `id<<4 | meta` (переводит `world::legacy`).
 
+use std::collections::HashMap;
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+
 use ezzmc_protocol::generated::r1_13_2::ITEM;
 use ezzmc_protocol::nbt::{self, Tag};
 use ezzmc_protocol::wire::{Reader, Writer};
-use ezzmc_protocol::ProtocolResult;
+use ezzmc_protocol::{ProtocolError, ProtocolResult};
 use ezzmc_world::generated::flattening::ITEMS;
+
+use crate::entity_data_gen::REMAP_1_12;
+use crate::v1122_gen::{ENTITIES, SOUND_RENAMES};
+use crate::v1201::Pre18;
 
 const SECTION_BLOCKS: usize = 4096;
 const LIGHT_BYTES: usize = 2048;
 const BIOMES: usize = 256;
 const FILLED_MAP: u16 = 358;
 const SPAWN_EGG: u16 = 383;
+
+/// Названия картин 1.12.2 в порядке id 1.13.2. VANILLA: PaintingEntity.PaintingMotive (1.12.2),
+/// Painting (1.13.2).
+const PAINTINGS: [&str; 26] = [
+    "Kebab",
+    "Aztec",
+    "Alban",
+    "Aztec2",
+    "Bomb",
+    "Plant",
+    "Wasteland",
+    "Pool",
+    "Courbet",
+    "Sea",
+    "Sunset",
+    "Creebet",
+    "Wanderer",
+    "Graham",
+    "Match",
+    "Bust",
+    "Stage",
+    "Void",
+    "SkullAndRoses",
+    "Wither",
+    "Fighters",
+    "Pointer",
+    "Pigscene",
+    "BurningSkull",
+    "Skeleton",
+    "DonkeyKong",
+];
 
 /// Числовые id зачарований 1.12.2. VANILLA: Enchantment#register (1.12.2).
 const ENCHANTMENTS: &[(i16, &str)] = &[
@@ -47,18 +85,358 @@ const ENCHANTMENTS: &[(i16, &str)] = &[
     (71, "vanishing_curse"),
 ];
 
-/// Пакеты, формат которых отличается и пока не переводится (сущности, plugin-каналы).
+/// Пакеты, формат которых отличается и пока не переводится.
 pub(crate) fn is_untranslated(name: &str) -> bool {
     matches!(
         name,
-        "add_entity"
-            | "add_mob"
-            | "add_player"
-            | "add_painting"
-            | "add_experience_orb"
-            | "set_entity_data"
+        "award_stats"
+            | "command_suggestions"
             | "custom_payload"
+            | "map_item_data"
+            | "recipe"
+            | "set_objective"
+            | "set_player_team"
+            | "update_advancements"
     )
+}
+
+/// id сущности → тип 1.13.2 (из спавна) — для индексов метаданных.
+fn kinds() -> MutexGuard<'static, HashMap<i32, &'static str>> {
+    static M: OnceLock<Mutex<HashMap<i32, &'static str>>> = OnceLock::new();
+    M.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Состояние блока в пакетах сущностей и событий (`id | meta << 12`) → `id << 4 | meta`.
+/// VANILLA: Block#getByBlockState (1.12.2).
+fn state(v: i32) -> i32 {
+    ((v & 0xFFF) << 4) | ((v >> 12) & 15)
+}
+
+fn index_of(list: &[&str], name: &str) -> Option<i32> {
+    let at = list
+        .iter()
+        .position(|n| n.trim_start_matches("minecraft:") == name)?;
+    i32::try_from(at).ok()
+}
+
+/// Метаданные 1.12.2 → 1.13.2: индексы по типу сущности, сериализаторы с id 5 сдвинуты на 1
+/// (новый OptionalText), имя строкой → компонент.
+/// VANILLA: DataTracker#writeEntryToPacket, TrackedDataHandlerRegistry (1.12.2).
+fn metadata(kind: &str, r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    let map = REMAP_1_12
+        .binary_search_by_key(&kind, |(n, _)| *n)
+        .ok()
+        .and_then(|at| REMAP_1_12.get(at))
+        .map(|(_, m)| *m)
+        .unwrap_or_default();
+    loop {
+        let idx = r.u8()?;
+        if idx == 0xFF {
+            break;
+        }
+        let ser = r.var_int()?;
+        let mut v = Writer::new();
+        let mut new_ser = if ser >= 5 { ser + 1 } else { ser };
+        match ser {
+            0 | 6 => {
+                v.u8(r.u8()?);
+            }
+            1 | 10 => {
+                v.var_int(r.var_int()?);
+            }
+            2 => {
+                v.bytes(r.bytes(4)?);
+            }
+            3 if idx == 2 => {
+                new_ser = 5;
+                let name = r.string(32767)?;
+                v.bool(!name.is_empty());
+                if !name.is_empty() {
+                    v.string(&serde_json::json!({ "text": name }).to_string());
+                }
+            }
+            3 | 4 => {
+                v.string(&r.string(262144)?);
+            }
+            // предмет остаётся в формате 1.12.2: его переводит общий путь по версии сервера
+            5 => {
+                let at = r.pos();
+                if r.i16()? >= 0 {
+                    r.bytes(3)?;
+                    nbt::read_named(r)?;
+                }
+                v.bytes(r.since(at));
+            }
+            7 => {
+                v.bytes(r.bytes(12)?);
+            }
+            8 => {
+                v.bytes(r.bytes(8)?);
+            }
+            9 | 11 => {
+                let some = r.bool()?;
+                v.bool(some);
+                if some {
+                    v.bytes(r.bytes(if ser == 9 { 8 } else { 16 })?);
+                }
+            }
+            12 => {
+                let s = r.var_int()?;
+                v.var_int(if s == 0 { 0 } else { state(s) });
+            }
+            13 => {
+                let at = r.pos();
+                nbt::read_named(r)?;
+                v.bytes(r.since(at));
+            }
+            _ => {
+                return Err(ProtocolError::InvalidValue {
+                    what: "1.12 entity data serializer",
+                    value: ser.into(),
+                })
+            }
+        }
+        // поле без пары в 1.13 прочитано и отброшено
+        match map.get(usize::from(idx)) {
+            Some(&new) if new != 0xFF => {
+                w.u8(new).var_int(new_ser).bytes(&v.into_vec());
+            }
+            _ => {}
+        }
+    }
+    w.u8(0xFF);
+    Ok(())
+}
+
+/// Частица 1.12.2 по числовому id → имя 1.13.2 (`None` — в 1.13 её нет).
+/// VANILLA: ParticleType (1.12.2), ParticleTypes (1.13.2).
+fn particle_name(id: i32) -> Option<&'static str> {
+    const NAMES: [&str; 49] = [
+        "poof",
+        "explosion",
+        "explosion_emitter",
+        "firework",
+        "bubble",
+        "splash",
+        "fishing",
+        "underwater",
+        "",
+        "crit",
+        "enchanted_hit",
+        "smoke",
+        "large_smoke",
+        "effect",
+        "instant_effect",
+        "entity_effect",
+        "ambient_entity_effect",
+        "witch",
+        "dripping_water",
+        "dripping_lava",
+        "angry_villager",
+        "happy_villager",
+        "mycelium",
+        "note",
+        "portal",
+        "enchant",
+        "flame",
+        "lava",
+        "",
+        "cloud",
+        "dust",
+        "item_snowball",
+        "poof",
+        "item_slime",
+        "heart",
+        "barrier",
+        "item",
+        "block",
+        "block",
+        "rain",
+        "",
+        "elder_guardian",
+        "dragon_breath",
+        "end_rod",
+        "damage_indicator",
+        "sweep_attack",
+        "falling_dust",
+        "totem_of_undying",
+        "spit",
+    ];
+    let name = NAMES.get(usize::try_from(id).ok()?)?;
+    (!name.is_empty()).then_some(*name)
+}
+
+/// VANILLA: ParticleS2CPacket#read (1.12.2 / 1.13.2). Цвет `dust` в 1.12.2 — смещения при
+/// нулевом счётчике (RedstoneParticle), иначе красный.
+fn particles(r: &mut Reader, w: &mut Writer) -> ProtocolResult<bool> {
+    let id = r.i32()?;
+    let long = r.u8()?;
+    let mut floats = [0.0f32; 7]; // x, y, z, смещения, скорость
+    for f in &mut floats {
+        *f = r.f32()?;
+    }
+    let count = r.i32()?;
+    let version = ezzmc_protocol::version::current();
+    let Some(name) = particle_name(id) else {
+        return Ok(false);
+    };
+    let Some(new) = index_of(version.particle_type, name) else {
+        return Ok(false);
+    };
+    w.i32(new).u8(long);
+    for f in floats {
+        w.f32(f);
+    }
+    w.i32(count);
+    match name {
+        "block" | "falling_dust" => {
+            w.var_int(state(r.var_int()?));
+        }
+        "item" => {
+            let (item, damage) = (r.var_int()?, r.var_int()?);
+            let mut old = Writer::new();
+            old.i16(i16::try_from(item).unwrap_or(-1));
+            old.u8(1).i16(i16::try_from(damage).unwrap_or(0)).u8(0);
+            item_to_1_13_2(&mut Reader::new(&old.into_vec()), w)?;
+        }
+        "dust" => {
+            let [.., ox, oy, oz, speed] = floats;
+            let mut color = [1.0, 0.0, 0.0];
+            if count == 0 {
+                color = [ox * speed, oy * speed, oz * speed];
+                if color[0] == 0.0 {
+                    color[0] = 1.0;
+                }
+            }
+            for c in color {
+                w.f32(c);
+            }
+            w.f32(1.0);
+        }
+        _ => {}
+    }
+    Ok(true)
+}
+
+/// Тело клиентского пакета 1.12.2 → формат 1.13.2.
+pub(crate) fn to_1_13_2(name: &str, body: &[u8]) -> ProtocolResult<Pre18> {
+    let mut r = Reader::new(body);
+    let mut w = Writer::with_capacity(body.len() + 16);
+    let version = ezzmc_protocol::version::current();
+    match name {
+        // VANILLA: MobSpawnS2CPacket (1.12.2): id, uuid, varint тип, xyz, 3 угла, скорость,
+        // метаданные. Хвост метаданных к этому месту уже отделён в `set_entity_data`
+        // (`v1152::expand_1_14`).
+        "add_mob" => {
+            let id = r.var_int()?;
+            w.var_int(id).bytes(r.bytes(16)?);
+            let old = r.var_int()?;
+            let kind = ENTITIES
+                .binary_search_by_key(&old, |(i, _)| *i)
+                .ok()
+                .and_then(|at| ENTITIES.get(at))
+                .map(|(_, n)| *n);
+            let Some((kind, new)) = kind.and_then(|k| Some((k, index_of(version.entity_type, k)?)))
+            else {
+                return Ok(Pre18::Drop);
+            };
+            kinds().insert(id, kind);
+            w.var_int(new).bytes(r.bytes(24 + 3 + 6)?);
+            if r.remaining() > 0 {
+                metadata(kind, &mut r, &mut w)?;
+            }
+        }
+        "add_player" => {
+            let id = r.var_int()?;
+            kinds().insert(id, "player");
+            w.var_int(id).bytes(r.bytes(16 + 24 + 2)?);
+            if r.remaining() > 0 {
+                metadata("player", &mut r, &mut w)?;
+            }
+        }
+        // VANILLA: ClientPlayNetworkHandler#onEntitySpawn (1.12.2): data падающего блока —
+        // состояние, рамки — горизонтальное направление.
+        "add_entity" => {
+            let id = r.var_int()?;
+            w.var_int(id).bytes(r.bytes(16)?);
+            let object = r.u8()?;
+            w.u8(object).bytes(r.bytes(24 + 2)?);
+            let data = r.i32()?;
+            if let Some(kind) = crate::v1132::object_name(object, data) {
+                kinds().insert(id, kind);
+            }
+            let data = match object {
+                70 => state(data & 0xFFFF),
+                // Direction.fromHorizontal (юг, запад, север, восток) → Direction.getById
+                71 => [3, 4, 2, 5][(data & 3) as usize],
+                _ => data,
+            };
+            w.i32(data).bytes(r.rest());
+        }
+        // VANILLA: PaintingSpawnS2CPacket (1.12.2): название строкой → id картины.
+        "add_painting" => {
+            w.var_int(r.var_int()?).bytes(r.bytes(16)?);
+            let title = r.string(13)?;
+            let Some(motive) = PAINTINGS.iter().position(|p| *p == title) else {
+                return Ok(Pre18::Drop);
+            };
+            w.var_int(motive as i32).bytes(r.rest());
+        }
+        "set_entity_data" => {
+            let id = r.var_int()?;
+            let Some(kind) = kinds().get(&id).copied() else {
+                return Ok(Pre18::Drop);
+            };
+            w.var_int(id);
+            metadata(kind, &mut r, &mut w)?;
+        }
+        // VANILLA: WorldEventS2CPacket (1.12.2): 2001 — состояние блока, 1010 — id пластинки.
+        "level_event" => {
+            let event = r.i32()?;
+            w.i32(event).bytes(r.bytes(8)?);
+            let mut data = r.i32()?;
+            if event == 2001 {
+                data = state(data);
+            } else if event == 1010 && data != 0 {
+                data = u16::try_from(data)
+                    .ok()
+                    .and_then(|id| ITEMS.binary_search_by_key(&(id, 0), |e| (e.0, e.1)).ok())
+                    .map_or(0, |i| i32::from(ITEMS[i].2));
+            }
+            w.i32(data).bytes(r.rest());
+        }
+        // VANILLA: BlockActionS2CPacket (1.12.2): числовой id блока → id реестра.
+        "block_event" => {
+            w.bytes(r.bytes(8 + 2)?);
+            let old = r.var_int()?;
+            let canon = ezzmc_world::legacy::state_to_canon(state(old & 0xFFF) as u32);
+            let block = ezzmc_world::block::BlockState(canon).name();
+            let Some(new) = index_of(version.block, block.trim_start_matches("minecraft:")) else {
+                return Ok(Pre18::Drop);
+            };
+            w.var_int(new);
+        }
+        "level_particles" => {
+            if !particles(&mut r, &mut w)? {
+                return Ok(Pre18::Drop);
+            }
+        }
+        // VANILLA: PlaySoundNameS2CPacket: имя звука строкой — переименования 1.13.
+        "custom_sound" => {
+            let old = r.string(256)?;
+            let path = old.trim_start_matches("minecraft:");
+            let new = SOUND_RENAMES
+                .binary_search_by_key(&path, |(a, _)| *a)
+                .ok()
+                .and_then(|at| SOUND_RENAMES.get(at))
+                .map_or(old.as_str(), |(_, b)| *b);
+            w.string(new).bytes(r.rest());
+        }
+        _ => return Ok(Pre18::Keep),
+    }
+    Ok(Pre18::Replace(w.into_vec()))
 }
 
 /// `level_chunk` 1.12.2 → 1.13.2: у прямой палитры убирается пустой счётчик, биомы byte → int.
@@ -305,6 +683,43 @@ mod tests {
         let name = item_name(r.var_int().unwrap()).unwrap().to_owned();
         r.u8().unwrap();
         (name, read_tag(&mut r).unwrap())
+    }
+
+    /// Все имена, в которые переводятся типы и частицы, есть в регистрах 1.13.2.
+    #[test]
+    fn names_exist_in_1_13_2() {
+        use ezzmc_protocol::generated::r1_13_2::{ENTITY_TYPE, PARTICLE_TYPE};
+        for (_, name) in ENTITIES {
+            assert!(index_of(ENTITY_TYPE, name).is_some(), "{name}");
+        }
+        for id in 0..49 {
+            if let Some(name) = particle_name(id) {
+                assert!(index_of(PARTICLE_TYPE, name).is_some(), "{name}");
+            }
+        }
+        assert!(REMAP_1_12.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(SOUND_RENAMES.windows(2).all(|w| w[0].0 < w[1].0));
+    }
+
+    #[test]
+    fn zombie_metadata_name_and_block_state() {
+        // имя (строка, #2), состояние в руке эндермена и неизвестный тип поля
+        let mut b = Writer::new();
+        b.u8(2).var_int(3).string("Bob");
+        b.u8(12).var_int(6).u8(1).u8(0xFF);
+        let mut out = Writer::new();
+        metadata("zombie", &mut Reader::new(&b.buf), &mut out).unwrap();
+        let out = out.into_vec();
+        let mut r = Reader::new(&out);
+        assert_eq!((r.u8().unwrap(), r.var_int().unwrap()), (2, 5));
+        assert!(r.bool().unwrap());
+        assert_eq!(r.string(100).unwrap(), r#"{"text":"Bob"}"#);
+        assert_eq!((r.u8().unwrap(), r.var_int().unwrap()), (12, 7));
+        // трава (id 2) с метой 0
+        assert_eq!(state(2), 32);
+        assert_eq!(state(35 | (14 << 12)), (35 << 4) | 14);
+        let bad = [0u8, 20, 0xFF];
+        assert!(metadata("zombie", &mut Reader::new(&bad), &mut Writer::new()).is_err());
     }
 
     #[test]

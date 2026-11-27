@@ -1560,11 +1560,12 @@ pub static MOB_EFFECT: &[&str] = &[
     "dolphins_grace",
 ];
 
-/// `minecraft:particle_type` (46 записей)
+/// `minecraft:particle_type` (50 записей)
 pub static PARTICLE_TYPE: &[&str] = &[
     "ambient_entity_effect",
     "angry_villager",
     "barrier",
+    "block",
     "bubble",
     "cloud",
     "crit",
@@ -1572,6 +1573,7 @@ pub static PARTICLE_TYPE: &[&str] = &[
     "dragon_breath",
     "dripping_lava",
     "dripping_water",
+    "dust",
     "effect",
     "elder_guardian",
     "enchanted_hit",
@@ -1580,12 +1582,14 @@ pub static PARTICLE_TYPE: &[&str] = &[
     "entity_effect",
     "explosion_emitter",
     "explosion",
+    "falling_dust",
     "firework",
     "fishing",
     "flame",
     "happy_villager",
     "heart",
     "instant_effect",
+    "item",
     "item_slime",
     "item_snowball",
     "large_smoke",

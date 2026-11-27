@@ -71,6 +71,10 @@ pub(crate) fn to_canon(era: usize, body: &[u8]) -> ProtocolResult<Option<Vec<u8>
             })?;
         let mut v = Writer::new();
         let keep = value(era, ser, &mut r, &mut v)?;
+        // 1.13: позиция блока ещё в старой раскладке бит.
+        if old && matches!(ser, &"BLOCK_POS" | &"OPTIONAL_BLOCK_POS") {
+            pos_to_1_14(&mut v);
+        }
         let idx = match remap {
             Some(map) => map.get(usize::from(idx)).copied().unwrap_or(0xFF),
             None => idx,
@@ -85,6 +89,17 @@ pub(crate) fn to_canon(era: usize, body: &[u8]) -> ProtocolResult<Option<Vec<u8>
     }
     w.u8(0xFF);
     Ok(Some(w.into_vec()))
+}
+
+/// Позиция в конце значения (после признака наличия) → раскладка 1.14.
+fn pos_to_1_14(v: &mut Writer) {
+    let Some(at) = v.buf.len().checked_sub(8) else {
+        return;
+    };
+    if let Ok(old) = <[u8; 8]>::try_from(&v.buf[at..]) {
+        let new = crate::v1132::pos_to_1_14(i64::from_be_bytes(old));
+        v.buf[at..].copy_from_slice(&new.to_be_bytes());
+    }
 }
 
 /// Значение старой версии → формат 26.3. `false` — перевести нечем (прочитано целиком).

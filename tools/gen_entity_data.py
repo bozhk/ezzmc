@@ -7,6 +7,8 @@ import difflib
 import re
 from pathlib import Path
 
+import gen_v1122
+
 # порядок = v1201::era()
 ERAS = ["1.20.1", "1.19.4", "1.19.3", "1.19.2", "1.19", "1.18.2", "1.17.1", "1.16.5", "1.16.1", "1.15.2", "1.14.4"]
 CANON = "26.3"
@@ -91,8 +93,8 @@ YARN_SER = {"INTEGER": "INT", "TEXT_COMPONENT": "COMPONENT", "field_21650": "OPT
             "field_21651": "PARTICLE", "OPTIONAL_BLOCK_STATE": "BLOCK_STATE"}
 
 
-def load_113():
-    base = Path("reference/1.13.2/client/net/minecraft")
+def load_yarn(v):
+    base = Path("reference") / v / "client/net/minecraft"
     parent, fields = {}, {}
     for f in sorted(base.rglob("*.java")):
         src = f.read_text()
@@ -101,7 +103,11 @@ def load_113():
         for m in re.finditer(r"registerData\(\s*(\w+)\.class,\s*TrackedDataHandlerRegistry\.(\w+)", src):
             fields.setdefault(m[1], []).append(YARN_SER.get(m[2], m[2]))
     decl = (base / "entity/EntityType.java").read_text()
-    reg = {m[1]: m[2] for m in re.finditer(r'register\(\s*"(\w+)",\s*(?:EntityType\.)?EntityBuilder\.\w+\(\s*(\w+)\.class', decl)}
+    if v == "1.12.2":
+        reg = {name: cls for _, name, cls in gen_v1122.entities()}
+        reg.setdefault("fishing_bobber", "FishingBobberEntity")
+    else:
+        reg = {m[1]: m[2] for m in re.finditer(r'register\(\s*"(\w+)",\s*(?:EntityType\.)?EntityBuilder\.\w+\(\s*(\w+)\.class', decl)}
     reg.setdefault("player", "PlayerEntity")
 
     def chain(cls):
@@ -114,7 +120,7 @@ def load_113():
     return {name: chain(cls) for name, cls in reg.items()}
 
 
-old = load_113()
+old = load_yarn("1.13.2")
 new, _ = load("1.14.4")
 remaps = []
 for name, a in sorted(old.items()):
@@ -135,6 +141,29 @@ for name, a in sorted(old.items()):
         print("1.13: поля без пары", name, [(i, a[i]) for i, v in enumerate(idx) if v == 255])
     remaps.append((key, idx))
 
+# 1.12.2 → индексы 1.13.2 тем же выравниванием; имя в 1.12.2 было строкой, а не компонентом.
+older = load_yarn("1.12.2")
+remaps_112 = []
+for name, a in sorted(older.items()):
+    b = old.get(name)
+    if b is None:
+        print("1.12: нет типа в 1.13:", name)
+        continue
+    a = list(a)
+    assert a[2] == "STRING", (name, a)
+    a[2] = "OPTIONAL_COMPONENT"
+    idx = [255] * len(a)
+    for i, j, n in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
+        for k in range(n):
+            idx[i + k] = j + k
+    moved = [(i, a[i], v) for i, v in enumerate(idx) if v != i]
+    if moved or len(a) != len(b):
+        print("1.12:", name, len(a), "->", len(b), moved)
+    # зомби-житель: «лечится» — поле 16 в 1.13 (15 занято превращением в утопленника)
+    if name == "zombie_villager":
+        idx[15] = 16
+    remaps_112.append((name, idx))
+
 o = ["//! Сгенерировано `tools/gen_entity_data.py` из `reference/`. Не править руками.", "",
      "/// Поля по старому индексу: (индекс 26.3 или 255 — поля нет, id сериализатора 26.3).",
      "pub type Fields = &'static [(u8, u8)];", ""]
@@ -150,6 +179,10 @@ o += ["];", ""]
 o += ["/// 1.13.x: (тип сущности 26.3, индекс 1.14.4 по индексу 1.13 или 255), отсортировано по имени.",
       "pub const REMAP_1_13: &[(&str, &[u8])] = &["]
 o += [f'    ("{k}", &{v}),' for k, v in sorted(remaps)]
+o += ["];", ""]
+o += ["/// 1.12.2: (тип сущности 1.13.2, индекс 1.13.2 по индексу 1.12.2 или 255), отсортировано по имени.",
+      "pub const REMAP_1_12: &[(&str, &[u8])] = &["]
+o += [f'    ("{k}", &{v}),' for k, v in sorted(remaps_112)]
 o += ["];", ""]
 Path("crates/net/src/entity_data_gen.rs").write_text("\n".join(o))
 print("lists", len(lists), "types", [len(r) for r in eras])

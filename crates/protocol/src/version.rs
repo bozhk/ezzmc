@@ -357,11 +357,12 @@ pub const V1_13: Version = Version {
     ..V1_13_2
 };
 
-/// 1.12.2 (340): предметы и чанк приводятся к формату 1.13.2, регистры тоже 1.13.2.
+/// 1.12.2 (340): тела пакетов приводятся к формату 1.13.2, регистры тоже 1.13.2, кроме звуков.
 pub const V1_12_2: Version = Version {
     name: "1.12.2",
     protocol: 340,
     packets: generated::v1_12_2::PACKETS,
+    sound_event: generated::sounds_1_12_2::SOUND_EVENT,
     ..V1_13_2
 };
 

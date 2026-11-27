@@ -13,6 +13,7 @@ pub mod session;
 pub mod srv;
 pub mod status;
 pub mod v1122;
+mod v1122_gen;
 pub mod v1132;
 pub mod v1152;
 pub mod v1165;
