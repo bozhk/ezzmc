@@ -89,6 +89,7 @@ def launch(args):
     cmd = [BIN, "--control", f"127.0.0.1:{PORT}", "--name", name]
     if args.get("addr"):
         cmd += ["--connect", args["addr"]]
+    cmd += os.environ.get("EZZMC_CLIENT_ARGS", "").split()  # debugging, e.g. --log-packets
     cmd = list(args.get("wrap") or []) + cmd  # e.g. a headless compositor
     env = dict(os.environ, **session_env, **{k: str(v) for k, v in (args.get("env") or {}).items()})
     proc = subprocess.Popen(cmd, cwd=ROOT, stdout=open(LOG, "w"), stderr=subprocess.STDOUT, env=env, start_new_session=True)
@@ -178,7 +179,7 @@ TOOLS = {
     "game_launch": ("Start ezzmc with a control socket (or attach to a running one). addr joins a server right away, e.g. 127.0.0.1:25611; name is the offline nickname. online=true logs in with the licensed account selected in the launcher (needed for online-mode servers like eu.loyisa.cn); default is offline.", S(addr=STR, name=STR, online={"type": "boolean"}, env={"type": "object"}), launch),
     "game_observe": ("BEST FIRST CALL: state + crosshair target + nearby entities + ASCII slice (floor/feet/head layers) in one answer. radius (default 6), entity_dist (20).", S(radius=INT, entity_dist=N), observe),
     "game_stop": ("Quit the game.", S(), stop),
-    "game_state": ("Screen (menu/play/inventory/chat/pause/dialog), joined, pos/block_pos, facing, yaw/pitch, health/food/xp, held/offhand/armor, in_water, world (dimension, day_time, weather, loaded chunks), target (crosshair), running task, chat lines, effects, fps, particles (count, firework_starters, vault_connection, vaults).", S(), "state"),
+    "game_state": ("Screen (menu/play/inventory/chat/pause/dialog), joined, pos/block_pos, facing, yaw/pitch, health/food/xp, held/offhand/armor, in_water, world (dimension, day_time, weather, loaded chunks), target (crosshair), running task, chat lines, effects, fps, particles (count, firework_starters, vault_connection, vaults), sounds (last 24 world sounds: [event, [x,y,z]]).", S(), "state"),
     "game_join_server": ("Join a server, e.g. 127.0.0.1:25611, then call game_wait_joined.", S(addr=STR), "join_server"),
     "game_wait_joined": ("Wait until the world is joined and the position is known.", S(timeout_ms=INT), "wait_joined"),
     "game_dialog_button": ("Press a server dialog button by index (state.dialog.buttons; grid first, then footer).", S(index={"type": "integer"}), "dialog_button"),
@@ -203,7 +204,7 @@ TOOLS = {
     "game_chat_open": ("Open the chat screen (text='/' like the command key).", S(text=STR), "chat_open"),
     "game_chat_type": ("Chat screen open: type text into the input box.", S(text=STR), "chat_type"),
     "game_chat_send": ("Send a chat line or /command (opens the screen if needed; text replaces the input). Recent lines are in game_state.chat.", S(text=STR), "chat_send"),
-    "game_chat_key": ("Chat screen: key = up/down (history), pageup/pagedown (scroll), esc (close).", S(key=STR), "chat_key"),
+    "game_chat_key": ("Chat screen: key = tab (command suggestions, listed in state.chat.suggestions), up/down (history), pageup/pagedown (scroll), esc (close).", S(key=STR), "chat_key"),
     "game_chat_click": ("Chat screen: left-click at GUI px x,y (Leave Bed button: x gw/2-100..+100, y gh-40..gh-20).", S(x=N, y=N), "chat_click"),
     "game_click": ("Click a mouse button for ms milliseconds (default 100): left attacks/breaks, right uses/places.", S(button=STR, ms=INT), "click"),
     "game_visible": ("List entities inside the current camera view (type, dist (to centre), reach_dist (to nearest hitbox point), in_reach (<=3.0, can be hit), screen x/y 0..1; filters max_dist=24, type substring, items=false, limit=25; no block-occlusion). Call BEFORE game_screenshot to aim: if count_in_view is 0 or the target is missing, turn/move first instead of taking an empty screenshot.", S(max_dist=N, type=STR, items={"type": "boolean"}, limit=N), "visible"),
@@ -214,7 +215,7 @@ TOOLS = {
     "game_gui_type": ("Type text and/or press one key (enter/up/down/left/right/backspace/escape) in the open book/sign edit screen.", S(text=STR, key=STR), "gui_type"),
     "game_option": ("Read or set an options.txt key (e.g. key=showSubtitles value=true); omit value to read. Saved to disk: restore after tests.", S(key=STR, value=STR), "option"),
     "game_adv_screen": ("Advancements screen (key L): action=open|close|tab(id)|scroll(dx,dy GUI px). state.screen=='advancements', state.adv_screen has tabs/selected/widgets. Tab clicks are RIGHT mouse button in vanilla 26.3.", S(action=STR, id=STR, dx=N, dy=N), "adv_screen"),
-    "game_stats_screen": ("Statistics screen (pause menu button): action=open|close|tab(tab 0 General,1 Items,2 Mobs)|sort(col 0..5 = mined,broken,crafted,used,picked_up,dropped)|scroll(dy wheel notches). state.screen=='stats', state.stats_screen has tab/rows/scroll/sort_col/sort_order/received.", S(action=STR, tab=INT, col=INT, dy=N), "stats_screen"),
+    "game_stats_screen": ("Statistics screen (pause menu button): action=open|close|tab(tab 0 General,1 Items,2 Mobs)|sort(col 0..5 = mined,broken,crafted,used,picked_up,dropped)|scroll(dy wheel notches). state.screen=='stats', state.stats_screen has tab/rows/scroll/sort_col/sort_order/received/values ({'mined:stone': 1}).", S(action=STR, tab=INT, col=INT, dy=N), "stats_screen"),
     "game_social": ("Hide/show chat messages of a player (PlayerSocialManager, memory only): action=open|hide|show|list, name=tab-list player name. open shows the P screen (state.screen=='social'). Returns hidden names.", S(action=STR, name=STR), "social"),
     "game_sound": ("Play a sound event (e.g. block.stone.break) at the listener; state.audio.started/active shows engine activity, state.audio.music the current music track key.", S(event=STR, volume=N, pitch=N), "sound"),
     "game_inventory": ("Non-empty inventory slots with item names and counts.", S(), "inventory"),
