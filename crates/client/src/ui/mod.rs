@@ -505,7 +505,7 @@ impl Gui {
                 book_out: None,
             },
             lang: Lang::load(lang_json),
-            opts: Options::load(&dir.join("options.txt")),
+            opts: Options::load(&options::path_in(dir)),
             mx: 0.0,
             my: 0.0,
             click: false,

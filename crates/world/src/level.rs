@@ -643,6 +643,14 @@ impl Level {
                             unpack_degrees(head),
                         );
                         let mut e = Entity::new(id, uuid, ty, pos, yaw, pitch, head);
+                        // Пакет несёт блок рамки; сущность стоит в центре своего бокса у стены.
+                        if let Some(v) = crate::entities::take_spawn_motive(id) {
+                            e.ints.push((9, v));
+                        }
+                        if crate::entities::is_frame(ty) {
+                            e.pos = crate::entities::hanging_center(pos, data);
+                            e.prev_pos = e.pos;
+                        }
                         e.vel = vel;
                         // VANILLA: AbstractArrow#recreateFromPacket — data = id владельца.
                         e.owner = data;

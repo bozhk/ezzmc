@@ -285,6 +285,7 @@ impl App {
                 "vaults": vaults,
             });
             s["joined"] = json!(v.joined && v.have_pos);
+            s["sounds"] = json!(crate::audio::recent());
             s["pos"] = json!(v.player.pos);
             s["vel"] = json!(v.player.vel);
             s["on_ground"] = json!(v.player.on_ground);
@@ -383,6 +384,7 @@ impl App {
                 s["stats_screen"] = json!({
                     "tab": tab, "rows": rows, "scroll": scroll,
                     "sort_col": sort_col, "sort_order": sort_order, "received": received,
+                    "values": v.stats.named(),
                 });
             }
             s["boss_darken"] = json!(v.boss_darken(1.0));
@@ -416,6 +418,7 @@ impl App {
             "open": self.chat.open,
             "input": self.chat.edit.text,
             "lines": self.chat.plain_lines(10),
+            "suggestions": if self.chat.sg.shown { &self.chat.sg.items[..] } else { &[] },
         });
         if self.inv_open && self.inv_creative {
             s["creative"] = json!({
@@ -499,7 +502,7 @@ impl App {
         Some(match cmd {
             "ping" => ok(json!({"pong": true})),
             // Чат: chat_open {text} открывает экран; chat_type {text} печатает в поле;
-            // chat_send {text?} отправляет (как Enter); chat_key {key: up|down|pageup|pagedown|esc}.
+            // chat_send {text?} отправляет (как Enter); chat_key {key: tab|up|down|pageup|pagedown|esc}.
             "chat_open" => {
                 self.open_chat(c["text"].as_str().unwrap_or(""));
                 ok(json!({}))
@@ -531,6 +534,7 @@ impl App {
                             self.chat.edit.set(&t);
                         }
                     }
+                    "tab" if self.chat.open => self.chat_tab(false),
                     "pageup" => self.chat.page(true, &cfg),
                     "pagedown" => self.chat.page(false, &cfg),
                     "esc" if self.in_bed => self.stop_sleeping(),

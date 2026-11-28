@@ -336,6 +336,8 @@ pub struct Player {
     piston_time: i64,
     no_jump_delay: u8,
     jump_trigger_time: u8,
+    /// Был ли в этом тике прыжок от земли (статистика ≤1.6.4).
+    pub jumped: bool,
     sprint_trigger_time: u8,
     /// VANILLA: Options#sprintWindow (по умолчанию 7, 0 — двойное нажатие выключено).
     pub sprint_window: u8,
@@ -412,6 +414,7 @@ impl Player {
             piston_time: i64::MIN,
             no_jump_delay: 0,
             jump_trigger_time: 0,
+            jumped: false,
             sprint_trigger_time: 0,
             sprint_window: 7,
             was_jump: false,
@@ -614,6 +617,7 @@ impl Player {
         self.last_yaw = yaw;
         self.last_move = input.move_vector();
         self.prev_pos = self.pos;
+        self.jumped = false;
         self.update_fluid_state(w);
         // ClientAvatarState#tick + AbstractClientPlayer#updateBob
         self.walk_dist_o = self.walk_dist;
@@ -1082,7 +1086,7 @@ impl Player {
 
     /// VANILLA: LivingEntity#onClimbable (тег `climbable`; люки-«лестницы» не учтены).
     // VANILLA-UNSURE: TrapDoorBlock#trapdoorUsableAsLadder нужен blockstate (open/facing).
-    fn on_climbable(&self, w: &dyn Collider) -> bool {
+    pub(crate) fn on_climbable(&self, w: &dyn Collider) -> bool {
         let p = block_pos(self.pos);
         !self.flying
             && matches!(
@@ -1122,6 +1126,7 @@ impl Player {
         if power <= 1.0e-5 {
             return;
         }
+        self.jumped = true;
         self.vel[1] = f64::from(power).max(self.vel[1]);
         if sprinting {
             let a = yaw * (std::f32::consts::PI / 180.0);

@@ -77,7 +77,7 @@ const VANILLA: &[(&str, &str, i32, i32)] = &[
 /// Заполняет реестр из registry_data: NBT записи или ванильная таблица по имени.
 pub fn set_registry(entries: &[(String, Option<ezzmc_protocol::nbt::Tag>)]) {
     use ezzmc_protocol::nbt::Tag;
-    let v = entries
+    let v: Vec<Variant> = entries
         .iter()
         .map(|(name, nbt)| {
             let short = name.strip_prefix("minecraft:").unwrap_or(name);
@@ -117,6 +117,7 @@ pub fn set_registry(entries: &[(String, Option<ezzmc_protocol::nbt::Tag>)]) {
             })
         })
         .collect();
+    ezzmc_world::entities::set_painting_sizes(v.iter().map(|x| (x.width, x.height)).collect());
     if let Ok(mut g) = PAINTING_REG.lock() {
         *g = v;
     }
@@ -281,7 +282,9 @@ pub fn bake(level: &Level, cam: [f64; 3], mobs: &mut crate::mobs::Mobs) {
         if e.ty != ty {
             continue;
         }
-        let p = e.pos;
+        let Some((p, ..)) = e.painting_shape() else {
+            continue;
+        };
         let d = [p[0] - cam[0], p[1] - cam[1], p[2] - cam[2]];
         if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 64.0 * 64.0 {
             continue;

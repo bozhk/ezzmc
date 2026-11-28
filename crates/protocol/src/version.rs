@@ -29,6 +29,30 @@ pub const V26_3: Version = Version {
     particle_type: generated::r26_3::PARTICLE_TYPE,
 };
 
+/// 26.2 (протокол 776): формат пакетов между 1.21.11 и 26.3 — тот же путь `legacy`.
+pub const V26_2: Version = Version {
+    name: "26.2",
+    protocol: 776,
+    packets: generated::v26_2::PACKETS,
+    item: generated::r26_2::ITEM,
+    block: generated::r26_2::BLOCK,
+    entity_type: generated::r26_2::ENTITY_TYPE,
+    sound_event: generated::r26_2::SOUND_EVENT,
+    particle_type: generated::r26_2::PARTICLE_TYPE,
+};
+
+/// 26.1 (протокол 775): формат пакетов между 1.21.11 и 26.3 — тот же путь `legacy`.
+pub const V26_1: Version = Version {
+    name: "26.1",
+    protocol: 775,
+    packets: generated::v26_1::PACKETS,
+    item: generated::r26_1::ITEM,
+    block: generated::r26_1::BLOCK,
+    entity_type: generated::r26_1::ENTITY_TYPE,
+    sound_event: generated::r26_1::SOUND_EVENT,
+    particle_type: generated::r26_1::PARTICLE_TYPE,
+};
+
 pub const V1_21_11: Version = Version {
     name: "1.21.11",
     protocol: 774,
@@ -366,6 +390,134 @@ pub const V1_12_2: Version = Version {
     ..V1_13_2
 };
 
+/// 1.12.1 (338): отличается от 1.12.2 только телом keep_alive.
+pub const V1_12_1: Version = Version {
+    name: "1.12.1",
+    protocol: 338,
+    packets: generated::v1_12_1::PACKETS,
+    ..V1_12_2
+};
+
+/// 1.12 (335): как 1.12.1, но с другими рецептурными пакетами.
+pub const V1_12: Version = Version {
+    name: "1.12",
+    protocol: 335,
+    packets: generated::v1_12::PACKETS,
+    ..V1_12_2
+};
+
+/// 1.11.1/1.11.2 (316): тела переводятся в формат 1.12 (`net::v1112`), звуки — свой порядок.
+pub const V1_11_2: Version = Version {
+    name: "1.11.2",
+    protocol: 316,
+    packets: generated::v1_11_2::PACKETS,
+    sound_event: generated::sounds_1_11_2::SOUND_EVENT,
+    ..V1_12_2
+};
+
+/// 1.11 (315): провод и реестры как у 1.11.2 (1.11.1 только добавил предметы).
+pub const V1_11: Version = Version {
+    name: "1.11",
+    protocol: 315,
+    ..V1_11_2
+};
+
+/// 1.10–1.10.2 (210): тела → формат 1.11 (`net::v1102`), свои звуки.
+pub const V1_10_2: Version = Version {
+    name: "1.10.2",
+    protocol: 210,
+    packets: generated::v1_10_2::PACKETS,
+    sound_event: generated::sounds_1_10_2::SOUND_EVENT,
+    ..V1_11_2
+};
+
+/// 1.9.4 (110): таблица пакетов 1.10, тела → формат 1.10 (`net::v194`), свои звуки.
+pub const V1_9_4: Version = Version {
+    name: "1.9.4",
+    protocol: 110,
+    sound_event: generated::sounds_1_9_4::SOUND_EVENT,
+    ..V1_10_2
+};
+
+/// 1.9.1–1.9.2 (108–109): таблица со старым `update_sign`, тела → 1.9.4 (`net::v194`).
+pub const V1_9_2: Version = Version {
+    name: "1.9.2",
+    protocol: 109,
+    packets: generated::v1_9_2::PACKETS,
+    ..V1_9_4
+};
+pub const V1_9_1: Version = Version {
+    name: "1.9.1",
+    protocol: 108,
+    ..V1_9_2
+};
+/// 1.9 (107): ещё и byte-измерение во входе, звуки без `item.elytra.flying`.
+pub const V1_9: Version = Version {
+    name: "1.9",
+    protocol: 107,
+    sound_event: generated::sounds_1_9::SOUND_EVENT,
+    ..V1_9_2
+};
+
+/// 1.8–1.8.9 (протокол 47): своя таблица пакетов, тела переводит `net::v18` в формат 1.9.
+/// Звуки 1.8 — только по имени, таблица id не используется.
+pub const V1_8: Version = Version {
+    name: "1.8.9",
+    protocol: 47,
+    packets: generated::v1_8::PACKETS,
+    ..V1_9
+};
+
+/// 1.7.6–1.7.10 (протокол 5): порядок пакетов — начало таблицы 1.8, тела переводит `net::v17`
+/// в формат 1.8.
+pub const V1_7_10: Version = Version {
+    name: "1.7.10",
+    protocol: 5,
+    ..V1_8
+};
+
+/// 1.7.2–1.7.5 (протокол 4): как 1.7.10, но спавн игрока без свойств профиля.
+pub const V1_7_2: Version = Version {
+    name: "1.7.2",
+    protocol: 4,
+    ..V1_7_10
+};
+
+/// Pre-Netty версии (до 1.7) хранят протокол как `провод - PRE_NETTY` (отрицательный): номера
+/// pre-Netty (61–78) пересекаются с Netty, а сравнения `protocol < N` должны считать их старше 1.7.
+pub const PRE_NETTY: i32 = 1000;
+
+/// 1.6.4 (pre-Netty, протокол 78): пакеты переводит `net::v16` в формат 1.7.10.
+pub const V1_6_4: Version = Version {
+    name: "1.6.4",
+    protocol: 78 - PRE_NETTY,
+    ..V1_7_10
+};
+
+/// 1.6.2 (pre-Netty, протокол 74): пакеты совпадают с 1.6.4.
+pub const V1_6_2: Version = Version {
+    name: "1.6.2",
+    protocol: 74 - PRE_NETTY,
+    ..V1_6_4
+};
+
+/// 1.6.1 (pre-Netty, протокол 73): у `0x2C` нет модификаторов атрибутов (`net::v16`).
+pub const V1_6_1: Version = Version {
+    name: "1.6.1",
+    protocol: 73 - PRE_NETTY,
+    ..V1_6_4
+};
+
+/// 1.5.2 (pre-Netty, протокол 61): отличия от 1.6.4 правит `net::v16` (`is_1_5`).
+pub const V1_5_2: Version = Version {
+    name: "1.5.2",
+    protocol: 61 - PRE_NETTY,
+    ..V1_6_4
+};
+
+/// Самый старый протокол, переводимый цепочкой `net::v1201` (через 1.12.2 → 1.13.2).
+pub const OLDEST_LEGACY: i32 = V1_5_2.protocol;
+
 /// 1.17 (протокол 755): регистры и состояния блоков совпадают с 1.17.1.
 pub const V1_17: Version = Version {
     name: "1.17",
@@ -429,11 +581,18 @@ pub const V1_19_3: Version = Version {
 pub const CANON: Version = V26_3;
 
 pub const SUPPORTED: &[Version] = &[
-    V26_3, V1_21_11, V1_21_10, V1_21_8, V1_21_6, V1_21_5, V1_21_4, V1_21_3, V1_21_1, V1_20_6,
-    V1_20_4, V1_20_2, V1_20_1, V1_19_4, V1_19_3, V1_19_2, V1_19, V1_18_2, V1_18_1, V1_17_1, V1_17,
-    V1_16_5, V1_16_3, V1_16_2, V1_16_1, V1_16, V1_15_2, V1_15_1, V1_15, V1_14_4, V1_14_3, V1_14_2,
-    V1_14_1, V1_14, V1_13_2, V1_13_1, V1_13, V1_12_2,
+    V26_3, V26_2, V26_1, V1_21_11, V1_21_10, V1_21_8, V1_21_6, V1_21_5, V1_21_4, V1_21_3, V1_21_1,
+    V1_20_6, V1_20_4, V1_20_2, V1_20_1, V1_19_4, V1_19_3, V1_19_2, V1_19, V1_18_2, V1_18_1,
+    V1_17_1, V1_17, V1_16_5, V1_16_3, V1_16_2, V1_16_1, V1_16, V1_15_2, V1_15_1, V1_15, V1_14_4,
+    V1_14_3, V1_14_2, V1_14_1, V1_14, V1_13_2, V1_13_1, V1_13, V1_12_2, V1_12_1, V1_12, V1_11_2,
+    V1_11, V1_10_2, V1_9_4, V1_9_2, V1_9_1, V1_9, V1_8, V1_7_10, V1_7_2, V1_6_4, V1_6_2, V1_6_1,
+    V1_5_2,
 ];
+
+/// Pre-Netty версия по протоколу из ответа legacy-пинга (0xFE).
+pub fn by_pre_netty_protocol(wire: i32) -> Option<Version> {
+    by_protocol(wire - PRE_NETTY).filter(Version::is_pre_netty)
+}
 
 /// Версия по protocol number из Status-ответа.
 pub fn by_protocol(protocol: i32) -> Option<Version> {
@@ -458,12 +617,54 @@ impl Version {
 
     /// 1.18–1.20.1: без Configuration-фазы, реестры в Play `login`; один путь (`v1201`).
     pub fn is_pre_config(&self) -> bool {
-        matches!(self.protocol, 340..=763)
+        matches!(self.protocol, OLDEST_LEGACY..=763)
     }
 
-    /// 1.20.2–1.21.11: переводятся одним путём (`legacy::clientbound_1_21_11`).
+    /// До 1.7: поток без кадров (`net::v16`).
+    pub fn is_pre_netty(&self) -> bool {
+        self.protocol < 0
+    }
+
+    /// Номер протокола на проводе.
+    pub fn wire_protocol(&self) -> i32 {
+        if self.is_pre_netty() {
+            self.protocol + PRE_NETTY
+        } else {
+            self.protocol
+        }
+    }
+
+    /// 26.1+: `fluidCount` в секции чанка, `attack` отдельным пакетом, новый `interact`.
+    // VANILLA: LevelChunkSection#write, ServerboundInteractPacket, ServerboundAttackPacket (26.1).
+    pub fn since_26_1(&self) -> bool {
+        self.protocol >= V26_1.protocol
+    }
+
+    /// 1.20.2–26.2: переводятся одним путём (`legacy::clientbound_1_21_11`).
     pub fn is_1_21_late(&self) -> bool {
-        matches!(self.protocol, 764..=774)
+        matches!(self.protocol, 764..=776)
+    }
+}
+
+#[cfg(test)]
+mod legacy_packet_tests {
+    use super::*;
+    use crate::{Direction, State};
+
+    #[test]
+    fn packet_ids_of_1_12_family() {
+        let id = |v: Version, name: &str| {
+            v.packets
+                .iter()
+                .find(|p| {
+                    p.state == State::Play && p.dir == Direction::Serverbound && p.name == name
+                })
+                .map(|p| p.id)
+        };
+        assert_eq!(id(V1_12, "keep_alive"), Some(0x0C));
+        assert_eq!(id(V1_12_1, "keep_alive"), id(V1_12_2, "keep_alive"));
+        assert_eq!(id(V1_12, "prepare_crafting_grid"), Some(1));
+        assert_eq!(id(V1_12, "place_recipe"), None);
     }
 }
 

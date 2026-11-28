@@ -200,7 +200,16 @@ pub fn login(conn: &mut Connection, ids: &PacketIds, name: &str) -> NetResult<Jo
             _ => {}
         }
     };
-    // Login → Play напрямую (нет Configuration).
+    finish_login(conn, ids, profile)
+}
+
+/// Вход после профиля: Login → Play напрямую (нет Configuration), ждать Play `login`.
+pub fn finish_login(
+    conn: &mut Connection,
+    ids: &PacketIds,
+    profile: GameProfile,
+) -> NetResult<Joined> {
+    use Direction::Clientbound as C;
     conn.set_state_raw(State::Play);
     // Ждём `login`; всё, что пришло раньше (Forge custom_payload), — в очередь приёма.
     let mut early = Vec::new();
@@ -211,21 +220,25 @@ pub fn login(conn: &mut Connection, ids: &PacketIds, name: &str) -> NetResult<Jo
         }
         early.push(p);
     };
+    // 1.9–1.10: тело входа сначала к формату 1.11. В очередь приёма уходит исходное тело:
+    // приём сам переводит свежие пакеты (`legacy::to_1_11`), повторный перевод его испортит.
+    let login11 = crate::legacy::to_1_11(Some("login"), &login_pkt.body)?;
+    let login_body11 = login11.as_deref().unwrap_or(&login_pkt.body);
     let login13 = if is_1_13() {
-        match crate::v1132::from_1_13("login", &login_pkt.body)? {
+        match crate::v1132::from_1_13("login", login_body11)? {
             Pre18::Replace(b) => Some(b),
             _ => None,
         }
     } else {
         None
     };
-    let login_body13 = login13.as_ref().unwrap_or(&login_pkt.body);
+    let login_body13 = login13.as_deref().unwrap_or(login_body11);
     let login14 = if is_1_14() {
         crate::v1152::from_1_14_4("login", login_body13)?
     } else {
         None
     };
-    let login_body14 = login14.as_ref().unwrap_or(login_body13);
+    let login_body14 = login14.as_deref().unwrap_or(login_body13);
     let login15 = if is_1_15() {
         crate::v1152::from_1_15_2("login", login_body14)?
     } else {
@@ -427,7 +440,35 @@ fn chunk_1_17_to_1_18(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
         biome_container(cells, &mut out);
     }
     let out = out.into_vec();
-    w.var_int(out.len() as i32).bytes(&out).var_int(0);
+    w.var_int(out.len() as i32).bytes(&out);
+    block_entities_1_17(r, w)
+}
+
+/// VANILLA: ClientboundLevelChunkPacket (1.17.1) — блок-сущности списком NBT с `id`, `x`, `y`, `z`;
+/// 1.18: упакованные x/z, short y, номер типа, NBT.
+fn block_entities_1_17(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    let n = r.length("block entities", 1 << 16)?;
+    let protocol = ezzmc_protocol::version::current().protocol;
+    let mut list = Writer::new();
+    let mut kept = 0;
+    for _ in 0..n {
+        let from = r.pos();
+        let Some((_, tag)) = nbt::read_named(r)? else {
+            continue;
+        };
+        let at = |k: &str| tag.get(k).and_then(Tag::as_i64).map(|v| v as i32);
+        let (Some(x), Some(y), Some(z)) = (at("x"), at("y"), at("z")) else {
+            continue;
+        };
+        if let Some(ty) = crate::block_entity::server_id(protocol, &tag) {
+            list.u8((((x & 15) << 4) | (z & 15)) as u8)
+                .i16(y as i16)
+                .var_int(ty)
+                .bytes(r.since(from));
+            kept += 1;
+        }
+    }
+    w.var_int(kept).bytes(&list.into_vec());
     Ok(())
 }
 
@@ -635,7 +676,7 @@ pub fn from_1_18_2(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
         }
         // VANILLA: ClientboundAddPaintingPacket (1.18.2): id, uuid, varint motive, BlockPos,
         // byte направление (2D) → add_entity (1.19) painting, data = направление 3D.
-        // VANILLA-UNSURE: motive не переносится (в 1.19 — PAINTING_VARIANT в entity data).
+        // Мотив (id реестра) в 1.19 — PAINTING_VARIANT в entity data: передаётся миру отдельно.
         "add_painting" => {
             let Some(ty) = ezzmc_protocol::version::current()
                 .entity_type
@@ -646,7 +687,8 @@ pub fn from_1_18_2(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
             };
             let id = r.var_int()?;
             let uuid = r.bytes(16)?;
-            r.var_int()?;
+            let motive = r.var_int()?;
+            ezzmc_world::entities::set_spawn_motive(id, motive.saturating_add(1));
             let (x, y, z) = r.block_pos()?;
             // Direction#get2DDataValue: south 0, west 1, north 2, east 3 → 3D: north 2, south 3, west 4, east 5
             let dir = match r.u8()? & 3 {
@@ -695,6 +737,7 @@ fn rename_1_19_2<'a>(name: &'a str, body: &[u8]) -> &'a str {
     match name {
         "player_info" if Reader::new(body).var_int().is_ok_and(|a| a == 4) => "player_info_remove",
         "player_info" => "player_info_update",
+        "custom_sound" => "sound",
         n => n,
     }
 }
@@ -704,6 +747,23 @@ pub fn from_1_19_2(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
     let mut r = Reader::new(body);
     let mut w = Writer::with_capacity(body.len());
     match name {
+        // VANILLA: ClientboundSoundPacket (1.19.2): varint id реестра → 1.19.3: Holder (id + 1).
+        "sound" | "sound_entity" => {
+            w.var_int(r.var_int()?.saturating_add(1)).bytes(r.rest());
+        }
+        // VANILLA: ClientboundCustomSoundPacket (1.19.2): имя, … → прямая запись Holder без
+        // фиксированной дальности.
+        "custom_sound" => {
+            let sound = r.string(32767)?;
+            w.var_int(0).string(&sound).bool(false).bytes(r.rest());
+        }
+        // VANILLA: ClientboundExplodePacket (1.19.2): центр float → double.
+        "explode" => {
+            for _ in 0..3 {
+                w.f64(f64::from(r.f32()?));
+            }
+            w.bytes(r.rest());
+        }
         // VANILLA: ClientboundRespawnPacket (1.19.2): bool keepAllPlayerData в конце (вместо
         // byte dataToKeep). ClientPacketListener#handleRespawn (1.19.2): entity data копируется
         // всегда, атрибуты — по флагу → KEEP_ENTITY_DATA | (flag ? KEEP_ATTRIBUTES : 0).
@@ -918,6 +978,7 @@ fn parse_login_registries(body: &[u8]) -> ProtocolResult<Vec<RegistryData>> {
     let mut out = registries_from_codec(&l.registries);
     // У 1.20.1 зачарований в кодеке нет — подсказкам нужен реестр (TODO-508c).
     out.push(enchant_registry());
+    out.push(painting_registry());
     Ok(out)
 }
 
@@ -1081,6 +1142,67 @@ pub fn login_to_canon(body: &[u8]) -> ProtocolResult<Vec<u8>> {
     w.var_int(l.portal_cooldown).var_int(63); // sea_level (VANILLA: по умолчанию 63)
     w.bool(false); // enforces_secure_chat
     Ok(w.into_vec())
+}
+
+/// VANILLA: ClientboundUpdateAdvancementsPacket, Advancement.Builder#serializeToNetwork (1.12.2–
+/// 1.20.1): имена критериев перед требованиями, x/y внутри DisplayInfo, sendsTelemetryEvent с 1.20;
+/// флага showAdvancements нет — toast'ы показываются, если пакет не сбрасывает дерево
+/// (ClientAdvancements#update).
+fn advancements_to_canon(r: &mut Reader, w: &mut Writer, telemetry: bool) -> ProtocolResult<()> {
+    let reset = r.bool()?;
+    w.bool(reset);
+    let n = r.length("advancements", 1 << 16)?;
+    w.var_int(n as i32);
+    for _ in 0..n {
+        w.string(&r.string(32767)?);
+        let parent = r.bool()?;
+        w.bool(parent);
+        if parent {
+            w.string(&r.string(32767)?);
+        }
+        let display = r.bool()?;
+        w.bool(display);
+        let mut xy = (0.0, 0.0);
+        if display {
+            w.bytes(&json_component(&r.string(262_144)?));
+            w.bytes(&json_component(&r.string(262_144)?));
+            let mut stack = Writer::new();
+            item_to_canon(r, &mut stack)?;
+            let stack = stack.into_vec();
+            let mut s = Reader::new(&stack);
+            // Канонический стек (count, item, патч) → ItemStackTemplate (item, count, патч).
+            let count = s.var_int()?;
+            if count > 0 {
+                w.var_int(s.var_int()?).var_int(count).bytes(s.rest());
+            } else {
+                w.var_int(0).var_int(1).var_int(0).var_int(0);
+            }
+            w.var_int(r.var_int()?);
+            let flags = r.i32()?;
+            w.i32(flags);
+            if flags & 1 != 0 {
+                w.string(&r.string(32767)?);
+            }
+            xy = (r.f32()?, r.f32()?);
+        }
+        for _ in 0..r.length("criteria", 1 << 16)? {
+            r.string(32767)?;
+        }
+        let groups = r.length("requirements", 1 << 16)?;
+        w.var_int(groups as i32);
+        for _ in 0..groups {
+            let k = r.length("requirement", 1 << 16)?;
+            w.var_int(k as i32);
+            for _ in 0..k {
+                w.string(&r.string(32767)?);
+            }
+        }
+        w.bool(telemetry && r.bool()?);
+        w.f32(xy.0).f32(xy.1);
+    }
+    // removed и progress совпадают.
+    w.bytes(r.rest()).bool(!reset);
+    Ok(())
 }
 
 /// 1.20.1 ItemStack (bool, id, byte count, NBT) → канон (count, id, патч из NBT, TODO-508c).
@@ -1252,6 +1374,18 @@ fn enchant_holder(name: &str) -> Option<u32> {
         .map(|i| i as u32)
 }
 
+/// Картины ≤1.20.1 — встроенный реестр: порядок = id в метаданных и пакете спавна.
+/// VANILLA: PaintingVariants#bootstrap (1.19–1.20.1); до 1.19 мотивы в том же порядке.
+fn painting_registry() -> RegistryData {
+    RegistryData {
+        registry: "minecraft:painting_variant".into(),
+        entries: ezzmc_protocol::generated::r1_19::PAINTING_VARIANT
+            .iter()
+            .map(|n| (format!("minecraft:{n}"), None))
+            .collect(),
+    }
+}
+
 /// Синтетический `registry_data minecraft:enchantment` для подсказок (имена + max_level).
 fn enchant_registry() -> RegistryData {
     enchant_registry_of(enchant_names())
@@ -1318,6 +1452,12 @@ fn nbt_to_components(t: &Tag, book: bool) -> Vec<(u32, Vec<u8>)> {
                 put(c, w.into_vec());
             }
         }
+    }
+    // VANILLA: ItemStackComponentizationFix — map → map_id (0 — настоящий номер, не умолчание).
+    if let Some(v) = int("map").and_then(|v| i32::try_from(v).ok()) {
+        let mut w = Writer::new();
+        w.var_int(v);
+        put("map_id", w.into_vec());
     }
     if int("Unbreakable").is_some_and(|v| v != 0) {
         put("unbreakable", Vec::new());
@@ -1406,52 +1546,82 @@ fn nbt_to_components(t: &Tag, book: bool) -> Vec<(u32, Vec<u8>)> {
 
 /// Сервер 1.17–1.19.4 (755–762): тот же путь, тела сначала переводятся в формат 1.20.1.
 fn is_1_19_4() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 340..=762)
+    matches!(
+        ezzmc_protocol::version::current().protocol,
+        ezzmc_protocol::version::OLDEST_LEGACY..=762
+    )
 }
 
 /// Сервер 1.17–1.19.2 (755–760): тела сначала переводятся в формат 1.19.3 (`from_1_19_2`).
 fn is_1_19_2() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 340..=760)
+    matches!(
+        ezzmc_protocol::version::current().protocol,
+        ezzmc_protocol::version::OLDEST_LEGACY..=760
+    )
 }
 
 /// Сервер 1.17–1.19 (755–759): тела сначала переводятся в формат 1.19.2 (`from_1_19`).
 fn is_1_19() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 340..=759)
+    matches!(
+        ezzmc_protocol::version::current().protocol,
+        ezzmc_protocol::version::OLDEST_LEGACY..=759
+    )
 }
 
 /// Сервер 1.17–1.18.2 (755–758): тела сначала переводятся в формат 1.19 (`from_1_18_2`).
 fn is_1_18() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 340..=758)
+    matches!(
+        ezzmc_protocol::version::current().protocol,
+        ezzmc_protocol::version::OLDEST_LEGACY..=758
+    )
 }
 
 /// Сервер 1.17/1.17.1 (755/756): тела сначала переводятся в формат 1.18.2 (`from_1_17_1`).
 /// 1.15.2–1.16.5 (`v1165`).
 pub(crate) fn is_1_16() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 340..=754)
+    matches!(
+        ezzmc_protocol::version::current().protocol,
+        ezzmc_protocol::version::OLDEST_LEGACY..=754
+    )
 }
 
 /// 1.16/1.16.1: вход, респаун и чанк отличаются от 1.16.2.
 pub(crate) fn is_1_16_1() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 340..=736)
+    matches!(
+        ezzmc_protocol::version::current().protocol,
+        ezzmc_protocol::version::OLDEST_LEGACY..=736
+    )
 }
 
 /// 1.12.2–1.13.x: тела сначала переводятся в формат 1.14.4 (`v1132::from_1_13`).
 pub(crate) fn is_1_13() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 340..=404)
+    matches!(
+        ezzmc_protocol::version::current().protocol,
+        ezzmc_protocol::version::OLDEST_LEGACY..=404
+    )
 }
 
 /// 1.14.x и старше: тела переводятся в формат 1.15.2 (`v1152::from_1_14_4`).
 pub(crate) fn is_1_14() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 340..=498)
+    matches!(
+        ezzmc_protocol::version::current().protocol,
+        ezzmc_protocol::version::OLDEST_LEGACY..=498
+    )
 }
 
 /// 1.14–1.15.2: тела сначала переводятся в формат 1.16.1 (`v1152`).
 pub(crate) fn is_1_15() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 340..=578)
+    matches!(
+        ezzmc_protocol::version::current().protocol,
+        ezzmc_protocol::version::OLDEST_LEGACY..=578
+    )
 }
 
 fn is_1_17() -> bool {
-    matches!(ezzmc_protocol::version::current().protocol, 340..=756)
+    matches!(
+        ezzmc_protocol::version::current().protocol,
+        ezzmc_protocol::version::OLDEST_LEGACY..=756
+    )
 }
 
 /// Индекс версии для таблиц: 0 — 1.20.1, 1 — 1.19.4, 2 — 1.19.3, 3 — 1.19.2, 4 — 1.19, 5 — 1.18–1.18.2,
@@ -1470,7 +1640,7 @@ fn era() -> usize {
         735 | 736 => 8,
         573..=578 => 9,
         477..=498 => 10,
-        340..=404 => 11,
+        ezzmc_protocol::version::OLDEST_LEGACY..=404 => 11,
         _ => 0,
     }
 }
@@ -1597,13 +1767,41 @@ pub fn canon_name<'a>(name: &'a str, body: &[u8]) -> &'a str {
     };
     match name {
         // 1.15.2: молния — отдельный пакет (тело переводит v1152).
-        "add_global_entity" => "add_entity",
+        // ≤1.20.1: игрок — отдельный пакет add_player (тело переводит `play_to_canon`).
+        "add_global_entity" | "add_player" | "add_experience_orb" => "add_entity",
+        // VANILLA: ClientboundSetBorderPacket.Type (≤1.16.5).
+        "set_border" => match body.first() {
+            Some(0) => "set_border_size",
+            Some(1) => "set_border_lerp_size",
+            Some(2) => "set_border_center",
+            Some(3) => "initialize_border",
+            Some(4) => "set_border_warning_delay",
+            Some(5) => "set_border_warning_distance",
+            _ => name,
+        },
+        "set_spawn_position" => "set_default_spawn_position",
+        "player_combat" => "player_combat_kill",
+        // ≤1.16.5: один пакет титров, первое поле — действие (тело здесь исходное: до 1.11 нет
+        // ACTIONBAR, см. `v1102`).
+        "set_titles" => match body.first().map(|&a| {
+            let no_action_bar = ezzmc_protocol::version::current().protocol < 315;
+            a.saturating_add(u8::from(no_action_bar && a >= 2))
+        }) {
+            Some(0) => "set_title_text",
+            Some(1) => "set_subtitle_text",
+            Some(2) => "set_action_bar_text",
+            Some(3) => "set_titles_animation",
+            _ => "clear_titles",
+        },
+        "set_score" => crate::legacy::canon_name_1_20_2(name, body),
         // Forge NetworkHooks.openScreen → ванильный open_screen (см. play_to_canon).
         "custom_payload" if is_fml_open_container(body) => "open_screen",
         "player_chat" | "disguised_chat" => "system_chat",
         "set_carried_item" => "set_held_slot",
-        // окно -1 в container_set_slot → курсор (тело уже без окна: см. play_to_canon)
-        "container_set_slot" if body.first().is_some_and(|b| *b == 0xFF) => "set_cursor_item",
+        // VANILLA: ClientPacketListener#handleContainerSetSlot (1.20.1) — окно -1 курсор,
+        // -2 инвентарь игрока; тело без окна переводит play_to_canon.
+        "container_set_slot" if body.first() == Some(&0xFF) => "set_cursor_item",
+        "container_set_slot" if body.first() == Some(&0xFE) => "set_player_inventory",
         n => n,
     }
 }
@@ -1710,6 +1908,12 @@ fn hashed_to_nbt_stack(r: &mut Reader, w: &mut Writer, v1204: bool) -> ProtocolR
     }
     Ok(())
 }
+
+static EXPERIENCE_ORB_TYPE: std::sync::LazyLock<Option<usize>> = std::sync::LazyLock::new(|| {
+    ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+        .iter()
+        .position(|n| *n == "experience_orb")
+});
 
 static PLAYER_TYPE: std::sync::LazyLock<Option<usize>> = std::sync::LazyLock::new(|| {
     ezzmc_protocol::generated::r26_3::ENTITY_TYPE
@@ -1838,6 +2042,20 @@ pub fn play_from_canon(id: i32, body: &[u8]) -> ProtocolResult<Vec<(i32, Vec<u8>
         | "paddle_boat" => {
             w.bytes(body);
         }
+        "place_recipe" if crate::recipes::supported() => {
+            if !crate::recipes::place_from_canon(&mut r, &mut w)? {
+                return Ok(Vec::new());
+            }
+        }
+        "recipe_book_seen_recipe" if crate::recipes::supported() => {
+            if !crate::recipes::seen_from_canon(&mut r, &mut w)? {
+                return Ok(Vec::new());
+            }
+        }
+        // 1.16.2–1.20.1 — как в каноне; `recipe_book_update` (≤1.16.1) собран в `recipes`.
+        "recipe_book_change_settings" | "recipe_book_update" => {
+            w.bytes(body);
+        }
         // канон + bool onGround в конце; 1.20.1 — без него
         "move_vehicle" => {
             w.bytes(&body[..body.len().saturating_sub(1)]);
@@ -1851,7 +2069,13 @@ pub fn play_from_canon(id: i32, body: &[u8]) -> ProtocolResult<Vec<(i32, Vec<u8>
         }
         // VANILLA: ServerboundChatPacket (1.18.2): только строка (команда — с `/`).
         "chat" if is_1_18() => {
-            w.string(&r.string(256)?);
+            let msg = r.string(256)?;
+            // VANILLA: ChatScreen (1.10.2) — поле ввода до 100 символов, сервер длиннее не примет.
+            let limit = if ezzmc_protocol::version::current().protocol < 315 { 100 } else { 256 };
+            match msg.char_indices().nth(limit) {
+                Some((at, _)) => w.string(&msg[..at]),
+                None => w.string(&msg),
+            };
         }
         // VANILLA: ServerboundChatPacket/ServerboundChatCommandPacket (1.19): строка, instant,
         // SaltSignaturePair | ArgumentSignatures (оба: long salt, затем byte[] / map), bool preview.
@@ -1881,7 +2105,7 @@ pub fn play_from_canon(id: i32, body: &[u8]) -> ProtocolResult<Vec<(i32, Vec<u8>
             } else if is_1_16() {
                 let mut out = w.into_vec();
                 out.pop();
-                return Ok(vec![(id, out)]);
+                return crate::v18::to_1_8(id, name, out, id_of);
             }
         }
         "player_command" => {
@@ -1964,7 +2188,7 @@ pub fn play_from_canon(id: i32, body: &[u8]) -> ProtocolResult<Vec<(i32, Vec<u8>
     if is_1_13() {
         crate::v1132::to_1_13(name, &mut out)?;
     }
-    Ok(vec![(id, out)])
+    crate::v18::to_1_8(id, name, out, id_of)
 }
 
 // ---------- прочие пакеты clientbound ----------
@@ -1975,8 +2199,21 @@ fn nbt_bytes(t: &Tag) -> Vec<u8> {
     out
 }
 
+/// map_item_data 1.13.2–1.16.5 → 1.17. VANILLA: ClientboundMapItemDataPacket: до 1.17 —
+/// scale, trackingPosition, locked (с 1.14), значки; в 1.17 — scale, locked, bool «значки есть».
+/// Формат самих значков и цветов не менялся.
+fn map_to_1_17(body: &[u8], protocol: i32) -> ProtocolResult<Vec<u8>> {
+    let mut r = Reader::new(body);
+    let mut w = Writer::with_capacity(body.len() + 2);
+    w.var_int(r.var_int()?).u8(r.u8()?);
+    r.bool()?; // trackingPosition
+    let locked = protocol > 404 && r.bool()?;
+    w.bool(locked).bool(true).bytes(r.rest());
+    Ok(w.into_vec())
+}
+
 /// JSON-компонент → NBT-тег канона (смешанные списки оборачиваются в `{text:..}`).
-pub(crate) fn json_to_tag(v: &serde_json::Value) -> Tag {
+pub fn json_to_tag(v: &serde_json::Value) -> Tag {
     use serde_json::Value as J;
     match v {
         J::String(s) => Tag::String(s.clone()),
@@ -2043,6 +2280,46 @@ pub(crate) fn heightmap_id(name: &str) -> Option<i32> {
         "MOTION_BLOCKING_NO_LEAVES" => 5,
         _ => return None,
     })
+}
+
+/// VANILLA: ClientboundUpdateAttributesPacket (1.20.1): сущность, список (ключ, база, список
+/// (UUID, величина, байт операции)); до 1.17 длина списка атрибутов — int. Канон: id реестра.
+fn attributes_to_canon<'w>(r: &mut Reader, w: &'w mut Writer) -> ProtocolResult<&'w mut Writer> {
+    let entity = r.var_int()?;
+    let n = if ezzmc_protocol::version::current().protocol <= 754 {
+        usize::try_from(r.i32()?).unwrap_or(0).min(1024)
+    } else {
+        r.length("attributes", 1024)?
+    };
+    let mut list = Writer::new();
+    let mut kept = 0;
+    for _ in 0..n {
+        let key = r.string(256)?;
+        let base = r.f64()?;
+        let m = r.length("attribute modifiers", 1024)?;
+        // "minecraft:generic.max_health" → "max_health"
+        let short = key.rsplit([':', '.']).next().unwrap_or_default();
+        let id = ezzmc_protocol::generated::r26_3::ATTRIBUTE
+            .iter()
+            .position(|a| *a == short);
+        let mut modifiers = Writer::new();
+        for _ in 0..m {
+            let uuid = r.uuid()?;
+            let (amount, op) = (r.f64()?, r.u8()?);
+            modifiers
+                .string(&format!("minecraft:{uuid:032x}"))
+                .f64(amount)
+                .var_int(i32::from(op));
+        }
+        if let Some(id) = id {
+            list.var_int(id as i32)
+                .f64(base)
+                .var_int(m as i32)
+                .bytes(&modifiers.into_vec());
+            kept += 1;
+        }
+    }
+    Ok(w.var_int(entity).var_int(kept).bytes(&list.into_vec()))
 }
 
 /// Белый список clientbound-пакетов Play 1.20.1 → тело канона (`None` — отбросить).
@@ -2150,6 +2427,21 @@ pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>>
     match name {
         "login" => return Ok(Some(login_to_canon(body)?)),
         "keep_alive" => w.bytes(body),
+        // Книга рецептов 1.13–1.20.1 (`recipes`): список запоминается, остальное — в канон.
+        "update_recipes" if crate::recipes::supported() => {
+            crate::recipes::update(body)?;
+            return Ok(None);
+        }
+        "recipe" if crate::recipes::supported() => {
+            return Ok(Some(crate::recipes::recipe_to_canon(body)?))
+        }
+        "place_ghost_recipe" if crate::recipes::supported() => {
+            return crate::recipes::ghost_to_canon(body)
+        }
+        "sound" | "sound_entity" | "stop_sound" | "level_particles" | "level_event"
+        | "block_event" | "block_destruction" | "explode" => {
+            return crate::v1201_fx::to_canon(name, body)
+        }
         // VANILLA: ClientboundUpdateMobEffectPacket (1.20.1): varint entity, varint id (1-based),
         // byte amplifier, varint duration, byte flags, Nullable FactorData (NBT) → 26.3: varint
         // entity, Holder<MobEffect> (id реестра), varint amplifier, varint duration, byte flags
@@ -2201,14 +2493,22 @@ pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>>
             }
             let n = r.length("chunk buffer", 2 * 1024 * 1024)?;
             w.var_int(n as i32).bytes(r.bytes(n)?);
-            // VANILLA-UNSURE: BE-типы 1.20.1 ≠ канон (реестр block_entity_type) — пока без них.
             let be = r.length("block entities", 65536)?;
+            let protocol = ezzmc_protocol::version::current().protocol;
+            let mut list = Writer::new();
+            let mut kept = 0;
             for _ in 0..be {
-                r.bytes(3)?; // packedXZ, y
-                r.var_int()?;
-                nbt::read_named(&mut r)?;
+                let head = r.bytes(3)?; // packedXZ, y
+                let ty = r.var_int()?;
+                let Some((_, tag)) = nbt::read_named(&mut r)? else {
+                    continue;
+                };
+                if let Some((ty, tag)) = crate::block_entity::to_canon(protocol, ty, tag) {
+                    list.bytes(head).var_int(ty).bytes(&nbt_bytes(&tag));
+                    kept += 1;
+                }
             }
-            w.var_int(0);
+            w.var_int(kept).bytes(&list.into_vec());
             light_to_canon(&mut r, &mut w)?;
             return Ok(Some(w.into_vec()));
         }
@@ -2311,7 +2611,57 @@ pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>>
             lp_vec3(&mut w, [0.0; 3]);
             w.u8(x_rot as u8).u8(y_rot as u8).u8(y_rot as u8).var_int(0)
         }
+        // VANILLA: ClientboundAddExperienceOrbPacket (1.20.1): id, x, y, z, short value;
+        // ClientPacketListener#handleAddExperienceOrb. В каноне — add_entity(experience_orb).
+        // Номинал (DATA_VALUE) отдельным пакетом не передаётся.
+        "add_experience_orb" => {
+            let id = r.var_int()?;
+            let pos = r.bytes(24)?;
+            let Some(ty) = *EXPERIENCE_ORB_TYPE else {
+                return Ok(None);
+            };
+            crate::entity_data::track(id, ty as u32);
+            w.var_int(id).i64(0).i64(i64::from(id)).var_int(ty as i32);
+            w.bytes(pos);
+            lp_vec3(&mut w, [0.0; 3]);
+            w.bytes(&[0, 0, 0]).var_int(0)
+        }
+        // VANILLA: ClientboundSetBorderPacket (≤1.16.5): первое поле — действие, дальше тело
+        // соответствующего пакета 1.17+ (имя выбирает `canon_name`).
+        "set_border" => {
+            r.u8()?;
+            w.bytes(r.rest())
+        }
+        "initialize_border"
+        | "set_border_center"
+        | "set_border_lerp_size"
+        | "set_border_size"
+        | "set_border_warning_delay"
+        | "set_border_warning_distance" => w.bytes(body),
+        // VANILLA: ClientboundBlockEntityDataPacket — до 1.18: BlockPos, byte действие, NBT с
+        // `id`; 1.18+: BlockPos, номер типа, NBT.
+        "block_entity_data" => {
+            let protocol = ezzmc_protocol::version::current().protocol;
+            let mut pos = r.i64()?;
+            if is_1_13() {
+                pos = crate::v1132::pos_to_1_14(pos);
+            }
+            let entity = if protocol < 757 {
+                r.u8()?;
+                nbt::read_named(&mut r)?.and_then(|(_, t)| crate::block_entity::named_to_canon(t))
+            } else {
+                let ty = r.var_int()?;
+                nbt::read_named(&mut r)?
+                    .and_then(|(_, t)| crate::block_entity::to_canon(protocol, ty, t))
+            };
+            let Some((ty, tag)) = entity else {
+                return Ok(None);
+            };
+            w.i64(pos).var_int(ty).bytes(&nbt_bytes(&tag))
+        }
         "remove_entities" | "rotate_head" | "entity_event" | "animate" => w.bytes(body),
+        // VANILLA: клиент читает только id (и yaw) — начало тела 1.19.4–1.20.1 совпадает с каноном.
+        "damage_event" | "hurt_animation" => w.bytes(body),
         "set_entity_data" => return crate::entity_data::to_canon(era(), body),
         // 1.20.1 совпадает с 1.21.11
         "move_entity_pos" | "move_entity_pos_rot" | "move_entity_rot" => {
@@ -2442,12 +2792,15 @@ pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>>
             let win = r.u8()?;
             let state = r.var_int()?;
             let slot = r.i16()?;
-            // окно -1 — курсор (в каноне отдельный пакет set_cursor_item); -2 — не переводим
+            // окна -1 и -2 в каноне — отдельные пакеты set_cursor_item и set_player_inventory
             match win {
                 0xFF => {
                     item_to_canon(&mut r, &mut w)?;
                 }
-                0xFE => return Ok(None),
+                0xFE => {
+                    w.var_int(i32::from(slot));
+                    item_to_canon(&mut r, &mut w)?;
+                }
                 _ => {
                     w.var_int(i32::from(win)).var_int(state).i16(slot);
                     item_to_canon(&mut r, &mut w)?;
@@ -2499,6 +2852,11 @@ pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>>
             }
             w.bytes(&[])
         }
+        "update_advancements" => {
+            let telemetry = ezzmc_protocol::version::current().protocol >= 763;
+            advancements_to_canon(&mut r, &mut w, telemetry)?;
+            &mut w
+        }
         "system_chat" => {
             let s = r.string(262144)?;
             w.bytes(&json_component(&s)).bool(r.bool()?)
@@ -2521,6 +2879,79 @@ pub fn play_to_canon(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>>
             };
             w.var_int(portal).var_int(63).u8(keep)
         }
+        // тело совпадает с каноном
+        "ping"
+        | "block_changed_ack"
+        | "take_item_entity"
+        | "set_passengers"
+        // id реестров переводит `crate::stats::to_canon`.
+        | "award_stats"
+        | "select_advancements_tab"
+        | "set_titles_animation"
+        | "clear_titles"
+        | "set_display_objective" => w.bytes(body),
+        "set_action_bar_text"
+        | "set_title_text"
+        | "set_subtitle_text"
+        | "tab_list"
+        | "boss_event"
+        | "set_objective"
+        | "set_score"
+        | "set_player_team"
+        | "command_suggestions" => return crate::legacy::text_from_1_20_1(name, body),
+        "map_item_data" => {
+            let protocol = ezzmc_protocol::version::current().protocol;
+            if protocol > 754 {
+                return crate::legacy::text_from_1_20_1(name, body);
+            }
+            let body = map_to_1_17(body, protocol)?;
+            return crate::legacy::text_from_1_20_1(name, &body);
+        }
+        // VANILLA: ClientboundSetTitlesPacket (1.16.5): TITLE, SUBTITLE, ACTIONBAR, TIMES, CLEAR,
+        // RESET.
+        "set_titles" => match r.var_int()? {
+            0..=2 => w.bytes(&json_component(&r.string(262144)?)),
+            3 => w.bytes(r.rest()),
+            action => w.bool(action == 5),
+        },
+        // VANILLA: ClientboundPlayerCombatKillPacket: varint игрок, до 1.20 — int убийца, Component.
+        "player_combat_kill" => {
+            let id = r.var_int()?;
+            if ezzmc_protocol::version::current().protocol <= 762 {
+                r.i32()?;
+            }
+            w.var_int(id).bytes(&json_component(&r.string(262144)?))
+        }
+        // VANILLA: ClientboundPlayerCombatPacket (1.16.5): событие 2 — смерть игрока.
+        "player_combat" => {
+            if r.var_int()? != 2 {
+                return Ok(None);
+            }
+            let id = r.var_int()?;
+            r.i32()?;
+            w.var_int(id).bytes(&json_component(&r.string(262144)?))
+        }
+        // VANILLA: ClientboundOpenSignEditorPacket: до 1.20 без стороны таблички.
+        "open_sign_editor" => w.bytes(r.bytes(8)?).u8(r.u8().unwrap_or(1)),
+        // VANILLA: ClientboundSetDefaultSpawnPositionPacket (1.20.1): BlockPos, угол (с 1.17);
+        // измерение — обычный мир.
+        "set_default_spawn_position" | "set_spawn_position" => {
+            w.string("minecraft:overworld").bytes(r.bytes(8)?);
+            w.f32(r.f32().unwrap_or(0.0)).f32(0.0)
+        }
+        // VANILLA: ClientboundCooldownPacket: id предмета версии → группа (имя предмета).
+        "cooldown" => {
+            let version = ezzmc_protocol::version::current();
+            let item = usize::try_from(r.var_int()?).ok();
+            let Some(name) = item
+                .filter(|_| version.protocol >= 393)
+                .and_then(|i| version.item.get(i))
+            else {
+                return Ok(None);
+            };
+            w.string(&format!("minecraft:{name}")).var_int(r.var_int()?)
+        }
+        "update_attributes" => attributes_to_canon(&mut r, &mut w)?,
         _ => return Ok(None),
     };
     Ok(Some(w.into_vec()))
@@ -2698,6 +3129,38 @@ mod tests {
         w.var_int(8).i64(0);
         let body = w.into_vec();
         assert_eq!(canon_name("custom_payload", &body), "open_screen");
+        assert_eq!(canon_name("add_player", &[]), "add_entity");
+        assert_eq!(
+            canon_name("container_set_slot", &[0xFE]),
+            "set_player_inventory"
+        );
+        // HUD-пакеты тоже: титры, табло, отряды, ответ античиту.
+        assert_eq!(canon_name("set_score", b"\x01a\x01\x01o"), "reset_score");
+        assert_eq!(canon_name("set_score", b"\x01a\x00\x01o\x05"), "set_score");
+        assert_eq!(canon_name("set_titles", &[0]), "set_title_text");
+        assert_eq!(
+            play_to_canon("ping", &[0, 0, 0, 7]).unwrap(),
+            Some(vec![0, 0, 0, 7])
+        );
+        for name in ["set_passengers", "block_changed_ack", "clear_titles"] {
+            assert_eq!(play_to_canon(name, &[1, 0]).unwrap(), Some(vec![1, 0]));
+        }
+        let title = play_to_canon("set_title_text", b"\x0c{\"text\":\"a\"}").unwrap();
+        assert!(title.is_some_and(|b| b.first() == Some(&10) || b.first() == Some(&8)));
+        // Отряд: видимость и столкновения — строки, цвет — после них.
+        let mut team = Writer::new();
+        team.string("t").u8(0).string("{\"text\":\"T\"}").u8(0);
+        team.string("always").string("always").var_int(12);
+        team.string("{\"text\":\"p\"}")
+            .string("{\"text\":\"s\"}")
+            .var_int(0);
+        assert!(play_to_canon("set_player_team", &team.into_vec())
+            .unwrap()
+            .is_some());
+        // Урон чужим и себе не должен теряться на ≤1.20.1.
+        for name in ["damage_event", "hurt_animation"] {
+            assert_eq!(play_to_canon(name, &[1, 2]).unwrap(), Some(vec![1, 2]));
+        }
         let out = play_to_canon("custom_payload", &body).unwrap().unwrap();
         let mut r = Reader::new(&out);
         assert_eq!(r.var_int().unwrap(), 3);

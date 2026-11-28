@@ -5,7 +5,7 @@ use crate::block::{decode_state, BlockInfo};
 use crate::generated::{
     b1_13, b1_13_2, b1_14_4, b1_15_2, b1_16_1, b1_16_5, b1_17_1, b1_18_2, b1_19, b1_19_2, b1_19_3,
     b1_19_4, b1_20_1, b1_20_2, b1_20_4, b1_21_1, b1_21_11, b1_21_3, b1_21_4, b1_21_5, b1_21_8,
-    b26_3, flattening,
+    b26_1, b26_2, b26_3, flattening,
 };
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -76,6 +76,16 @@ pub fn build_state_map(from: &'static [BlockInfo], to: &'static [BlockInfo]) -> 
         });
     }
     out
+}
+
+fn table_26_2() -> &'static [u32] {
+    static T: OnceLock<Vec<u32>> = OnceLock::new();
+    T.get_or_init(|| build_state_map(b26_2::BLOCKS, b26_3::BLOCKS))
+}
+
+fn table_26_1() -> &'static [u32] {
+    static T: OnceLock<Vec<u32>> = OnceLock::new();
+    T.get_or_init(|| build_state_map(b26_1::BLOCKS, b26_3::BLOCKS))
 }
 
 fn table_1_21_11() -> &'static [u32] {
@@ -229,7 +239,7 @@ pub fn state_to_canon(id: u32) -> u32 {
     // 1.21.5 — ещё и без dried_ghast.
     let t = match v.protocol {
         757 | 758 => table_1_18_2(),
-        335..=340 => table_1_12(),
+        ezzmc_protocol::version::OLDEST_LEGACY..=340 => table_1_12(),
         393 => table_1_13(),
         401 | 404 => table_1_13_2(),
         477..=498 => table_1_14_4(),
@@ -249,6 +259,8 @@ pub fn state_to_canon(id: u32) -> u32 {
         769 => table_1_21_4(),
         770 => table_1_21_5(),
         771 | 772 => table_1_21_8(),
+        775 => table_26_1(),
+        776 => table_26_2(),
         _ => table_1_21_11(),
     };
     t.get(id as usize).copied().unwrap_or(0)
@@ -259,6 +271,8 @@ pub fn state_to_canon(id: u32) -> u32 {
 pub fn state_from_canon(id: u32) -> u32 {
     static T8: OnceLock<Vec<u32>> = OnceLock::new();
     static T11: OnceLock<Vec<u32>> = OnceLock::new();
+    static T262: OnceLock<Vec<u32>> = OnceLock::new();
+    static T261: OnceLock<Vec<u32>> = OnceLock::new();
     static T5: OnceLock<Vec<u32>> = OnceLock::new();
     static T4: OnceLock<Vec<u32>> = OnceLock::new();
     static T3: OnceLock<Vec<u32>> = OnceLock::new();
@@ -299,6 +313,8 @@ pub fn state_from_canon(id: u32) -> u32 {
         769 => T4.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_21_4::BLOCKS)),
         770 => T5.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_21_5::BLOCKS)),
         771 | 772 => T8.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_21_8::BLOCKS)),
+        775 => T261.get_or_init(|| build_state_map(b26_3::BLOCKS, b26_1::BLOCKS)),
+        776 => T262.get_or_init(|| build_state_map(b26_3::BLOCKS, b26_2::BLOCKS)),
         _ => T11.get_or_init(|| build_state_map(b26_3::BLOCKS, b1_21_11::BLOCKS)),
     };
     t.get(id as usize).copied().unwrap_or(0)

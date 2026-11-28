@@ -109,7 +109,7 @@ pub fn encode_selected(sel: &[String]) -> String {
 /// Ресурсы игры + выбранные паки сверху (VANILLA: PackRepository#openAllSelected). Битые/пропавшие — пропускаются.
 pub fn build_resource_manager(install: &GameInstall) -> AssetResult<ResourceManager> {
     let mut rm = install.resource_manager()?;
-    let opts = crate::ui::options::Options::load(Path::new("./options.txt"));
+    let opts = crate::ui::options::Options::load(&crate::ui::options::path_in(Path::new(".")));
     let raw = opts.raw("resourcePacks").unwrap_or("[\"vanilla\"]");
     for id in parse_selected(raw).iter().filter(|i| *i != VANILLA) {
         match open(id) {

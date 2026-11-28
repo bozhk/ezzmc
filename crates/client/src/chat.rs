@@ -227,7 +227,7 @@ fn walk(c: &Component, lang: &Lang, parent: &Span, out: &mut Vec<Span>) {
             args,
         } => {
             let tpl = lang
-                .get(key)
+                .server(key)
                 .map(str::to_owned)
                 .or_else(|| fallback.clone())
                 .unwrap_or_else(|| key.clone());
@@ -480,7 +480,12 @@ impl Sugg {
         if !self.auto && !forced {
             return None;
         }
-        if edit.text == self.initial || !edit.text.starts_with('/') || edit.cursor < 1 {
+        // VANILLA: CommandSuggestions#updateCommandInfo — обычный текст дополняется только по Tab.
+        let message = !edit.text.starts_with('/');
+        if (edit.text == self.initial && !forced)
+            || (message && (!forced || edit.text.trim().is_empty()))
+            || edit.cursor < 1
+        {
             return None;
         }
         self.next_id += 1;

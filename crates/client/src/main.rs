@@ -54,6 +54,9 @@ mod itemdyn;
 mod itemicon;
 mod itemphys;
 mod keymap;
+mod legacy_be;
+mod legacy_shape;
+mod legacystats;
 mod levelsound;
 mod log;
 mod loomscreen;
@@ -1134,6 +1137,21 @@ impl App {
         self.close_chat();
     }
 
+    /// Tab в чате: следующая подсказка открытого списка, иначе запрос.
+    /// VANILLA: CommandSuggestions#keyPressed(Tab) → showSuggestions(true) при autoSuggestions=false.
+    fn chat_tab(&mut self, shift: bool) {
+        if self.chat.sg.shown
+            && self
+                .chat
+                .sg
+                .key(chat::SuggKey::Tab, shift, &mut self.chat.edit)
+        {
+            return;
+        }
+        self.chat.sg.force = true;
+        self.chat.sg.seen_reset();
+    }
+
     /// Клавиши ChatScreen. VANILLA: ChatScreen#keyPressed, EditBox#keyPressed.
     fn chat_key(&mut self, event: &winit::event::KeyEvent) {
         let PhysicalKey::Code(k) = event.physical_key else {
@@ -1146,23 +1164,18 @@ impl App {
         use editbox::Move;
         let cfg = self.chat_cfg;
         match k {
-            KeyCode::Escape | KeyCode::Tab | KeyCode::ArrowUp | KeyCode::ArrowDown
+            KeyCode::Tab => self.chat_tab(shift),
+            KeyCode::Escape | KeyCode::ArrowUp | KeyCode::ArrowDown
                 if self.chat.sg.shown
                     && self.chat.sg.key(
                         match k {
                             KeyCode::Escape => chat::SuggKey::Esc,
-                            KeyCode::Tab => chat::SuggKey::Tab,
                             KeyCode::ArrowUp => chat::SuggKey::Up,
                             _ => chat::SuggKey::Down,
                         },
                         shift,
                         &mut self.chat.edit,
                     ) => {}
-            KeyCode::Tab => {
-                // VANILLA: CommandSuggestions#keyPressed(Tab) → showSuggestions(true) при autoSuggestions=false.
-                self.chat.sg.force = true;
-                self.chat.sg.seen_reset();
-            }
             KeyCode::Escape if self.in_bed => self.stop_sleeping(),
             KeyCode::Escape => self.close_chat(),
             KeyCode::Enter | KeyCode::NumpadEnter => self.chat_submit(),
@@ -2099,7 +2112,7 @@ impl App {
 
     /// Собрать атлас и модели блоков в фоне (VANILLA: ресурсы грузятся при старте, не при входе).
     fn start_prewarm(&mut self) {
-        let cutout = ui::options::Options::load(std::path::Path::new("./options.txt"))
+        let cutout = ui::options::Options::load(&ui::options::path_in(std::path::Path::new(".")))
             .get(&ui::options::VIDEO[ui::options::CUTOUT_LEAVES])
             == "true";
         self.prewarm = std::thread::Builder::new()
@@ -2142,7 +2155,7 @@ impl App {
             .saturating_sub(2)
             .max(1);
         let mut ro = worldview::RenderOptions::from_env_args();
-        let o = ui::options::Options::load(std::path::Path::new("./options.txt"));
+        let o = ui::options::Options::load(&ui::options::path_in(std::path::Path::new(".")));
         ro.cutout_leaves = o.get(&ui::options::VIDEO[ui::options::CUTOUT_LEAVES]) == "true";
         ro.use_compute_renderer |=
             o.get(&ui::options::VIDEO[ui::options::COMPUTE_RENDERER]) == "true";
@@ -2216,6 +2229,9 @@ impl ApplicationHandler for App {
     }
 
     fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, ev: DeviceEvent) {
+        if input::test_input_off() {
+            return;
+        }
         if let (DeviceEvent::MouseMotion { delta: (dx, dy) }, true) = (ev, self.focus.active) {
             // Захват, сделанный без участия пользователя (запуск сразу на сервер), может не
             // действовать, пока нет реального ввода; Esc→выход его чинит (release + grab).
@@ -2232,6 +2248,22 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, ev: WindowEvent) {
+        if input::test_input_off()
+            && matches!(
+                ev,
+                WindowEvent::KeyboardInput { .. }
+                    | WindowEvent::ModifiersChanged(_)
+                    | WindowEvent::Ime(_)
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }
+                    | WindowEvent::CursorMoved { .. }
+                    | WindowEvent::CursorEntered { .. }
+                    | WindowEvent::Focused(_)
+                    | WindowEvent::DroppedFile(_)
+            )
+        {
+            return;
+        }
         match &ev {
             WindowEvent::ModifiersChanged(m) => self.alt_down = m.state().alt_key(),
             WindowEvent::KeyboardInput { event, .. }
@@ -2892,7 +2924,10 @@ impl ApplicationHandler for App {
                     let o = &gui.opts;
                     self.chat_vis = o.get(&CHAT[0]).parse().unwrap_or(0);
                     self.chat_colors = o.get(&CHAT[1]) == "true";
-                    self.chat.sg.auto = o.get(&CHAT[4]) == "true";
+                    // VANILLA: ChatScreen (≤1.12.2) шлёт запрос подсказок только по Tab.
+                    self.chat.sg.auto = o.get(&CHAT[4]) == "true"
+                        && ezzmc_protocol::version::current().protocol
+                            > legacy_shape::LAST_PROTOCOL;
                     self.chat_links = o.get(&CHAT[2]) == "true";
                     self.chat_links_prompt = o.raw("chatLinksPrompt") != Some("false");
                     self.show_subtitles = o.raw("showSubtitles") == Some("true");
@@ -2924,7 +2959,25 @@ impl ApplicationHandler for App {
                     }
                     if self.chat.open {
                         if let Some((id, text)) = self.chat.sg.on_edit(&self.chat.edit) {
-                            v.send(netthread::NetCmd::Suggest(id, text));
+                            // С 1.13 обычный чат дополняет клиент, раньше — сервер.
+                            let local = !text.starts_with('/')
+                                && ezzmc_protocol::version::current().protocol >= 393;
+                            if local {
+                                let word =
+                                    text.rsplit(char::is_whitespace).next().unwrap_or_default();
+                                let len = word.chars().count();
+                                let start = text.chars().count() - len;
+                                let items = v.tab.chat_completions(word);
+                                self.chat.sg.on_reply(
+                                    id,
+                                    start as i32,
+                                    len as i32,
+                                    items,
+                                    &self.chat.edit,
+                                );
+                            } else {
+                                v.send(netthread::NetCmd::Suggest(id, text));
+                            }
                         }
                     }
                     // VANILLA: LocalPlayer#openItemGui — перо в руке: экран правки книги (только клиент).
@@ -4337,6 +4390,7 @@ impl ApplicationHandler for App {
                                         gui.opts.save();
                                         gui.reset_title();
                                     }
+                                    leave_stats();
                                     self.view = None;
                                     self.connect = None;
                                     self.start_prewarm();
@@ -4649,6 +4703,7 @@ impl ApplicationHandler for App {
                                 ui::Action::Disconnect => {
                                     gui.opts.save();
                                     gui.reset_title();
+                                    leave_stats();
                                     self.view = None;
                                     self.connect = None;
                                     self.start_prewarm();
@@ -4783,6 +4838,12 @@ fn start_control() -> Option<control::Control> {
             None
         }
     }
+}
+
+/// Выход из игры кнопкой меню: счётчик и запись статистики ≤1.6.4.
+fn leave_stats() {
+    ezzmc_net::stats::add_local(ezzmc_net::stats::Local::LeaveGame, 1);
+    ezzmc_net::stats::save_totals(true);
 }
 
 fn main() {
@@ -4952,6 +5013,8 @@ fn main() {
     if let Err(e) = el.run_app(&mut app) {
         tracing::error!("event loop: {e}");
     }
+    // сетевой поток может не успеть завершиться до выхода процесса
+    ezzmc_net::stats::save_totals(true);
 }
 
 /// VANILLA: Mth#hsvToRgb.
@@ -4997,7 +5060,7 @@ fn build_lang(rm: &ezzmc_assets::pack::ResourceManager, code: &str) -> ui::lang:
             l.merge(&d);
         }
     }
-    l
+    l.with_code(code)
 }
 
 /// VANILLA: LanguageManager#extractLanguages — секция `language` из `pack.mcmeta` (индекс ассетов).

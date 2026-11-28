@@ -333,7 +333,12 @@ impl MoveTracker {
             Some(MoveKind::Pos)
         } else if rt {
             Some(MoveKind::Rot)
-        } else if self.last_ground != on_ground || self.last_hcol != hcol {
+        } else if self.last_ground != on_ground
+            || self.last_hcol != hcol
+            // VANILLA: ClientPlayerEntity#sendMovementPackets (1.8.9): PlayerMoveC2SPacket every
+            // tick; the 1.8 server ticks the player (portal cooldown, regeneration) per move packet.
+            || ezzmc_protocol::version::current().protocol < 107
+        {
             Some(MoveKind::StatusOnly)
         } else {
             None
@@ -430,7 +435,8 @@ impl PlayHandler {
                 }
             }
             Some("keep_alive") => {
-                conn.send(self.sid("keep_alive")?, &p.body)?;
+                let reply = crate::v1122::keep_alive_reply(&p.body)?;
+                conn.send(self.sid("keep_alive")?, &reply)?;
                 PlayEvent::Other(p)
             }
             // VANILLA: ClientPacketListener#handlePing — pong уходит с главного потока в порядке пакетов
@@ -626,7 +632,7 @@ impl PlayHandler {
         loc: [f64; 3],
         secondary: bool,
     ) -> NetResult<()> {
-        if !ezzmc_protocol::version::current().is_canon() {
+        if !ezzmc_protocol::version::current().since_26_1() {
             // VANILLA (1.21.11): MultiPlayerGameMode#interactAt → INTERACT_AT(float x,y,z, hand), затем INTERACT(hand).
             let mut w = Writer::new();
             w.var_int(entity_id).var_int(2);
@@ -647,7 +653,7 @@ impl PlayHandler {
     /// VANILLA: ServerboundAttackPacket(entityId).
     pub fn send_attack(&self, conn: &mut Connection, entity_id: i32) -> NetResult<()> {
         let mut w = Writer::new();
-        if !ezzmc_protocol::version::current().is_canon() {
+        if !ezzmc_protocol::version::current().since_26_1() {
             // VANILLA (1.21.11): ServerboundInteractPacket.createAttackPacket: ActionType.ATTACK, secondary=false.
             w.var_int(entity_id).var_int(1).bool(false);
             return conn.send(self.sid("interact")?, &w.buf);
@@ -817,6 +823,11 @@ impl PlayHandler {
         w.var_int(container);
         w.var_int(recipe);
         w.bool(use_max);
+        // VANILLA: в 1.12 (335) пакета нет: клиент сам переносит предметы и шлёт
+        // «Prepare Crafting Grid», это пока не сделано — клик по рецепту ничего не делает.
+        if ezzmc_protocol::version::current().protocol == 335 {
+            return Ok(());
+        }
         conn.send(self.sid("place_recipe")?, &w.buf)
     }
 
@@ -828,6 +839,15 @@ impl PlayHandler {
         open: bool,
         filtering: bool,
     ) -> NetResult<()> {
+        let version = ezzmc_protocol::version::current();
+        if version.is_pre_config() && version.protocol <= 736 {
+            // До 1.12 книги рецептов нет.
+            if !crate::recipes::supported() {
+                return Ok(());
+            }
+            let body = crate::recipes::settings_update(book_type, open, filtering);
+            return conn.send(self.sid("recipe_book_update")?, &body);
+        }
         let mut w = Writer::new();
         w.var_int(book_type);
         w.bool(open);
@@ -1019,6 +1039,34 @@ impl PlayHandler {
         let mut w = Writer::new();
         info.write(&mut w);
         conn.send(self.sid("client_information")?, &w.buf)
+    }
+
+    /// Вход на сервер без стадии Configuration (≤1.20.1): настройки клиента и brand.
+    /// VANILLA: ClientPacketListener#handleLogin (1.8.9–1.20.1) — `broadcastOptions`, затем канал
+    /// `minecraft:brand` (до 1.13 — `MC|Brand`); 1.6.4/1.7.10 пишут имя без префикса длины,
+    /// 1.5.2 brand не шлёт.
+    pub fn send_join_info(
+        &self,
+        conn: &mut Connection,
+        info: &crate::session::ClientInformation,
+    ) -> NetResult<()> {
+        self.send_client_information(conn, info)?;
+        let version = ezzmc_protocol::version::current();
+        if version.is_pre_netty() && version.wire_protocol() < 73 {
+            return Ok(());
+        }
+        let mut w = Writer::new();
+        if version.protocol <= 340 {
+            w.string("MC|Brand");
+        } else {
+            w.string("minecraft:brand");
+        }
+        if version.protocol <= 5 {
+            w.bytes(b"vanilla");
+        } else {
+            w.string("vanilla");
+        }
+        conn.send(self.sid("custom_payload")?, &w.buf)
     }
 
     /// VANILLA: ServerboundPongPacket (ответ на ClientboundPingPacket, тело — то же 4-байтное id).

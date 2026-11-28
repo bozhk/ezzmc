@@ -183,6 +183,10 @@ fn value(era: usize, ser: &str, r: &mut Reader, w: &mut Writer) -> ProtocolResul
                 w.string(&r.string(32767)?).bytes(r.bytes(8)?);
             }
         }
+        // VANILLA: ≤1.20.1 шлёт id реестра, в 26.3 — Holder (id + 1).
+        "PAINTING_VARIANT" => {
+            w.var_int(r.var_int()?.saturating_add(1));
+        }
         // INT, DIRECTION, OPTIONAL_UNSIGNED_INT, варианты и состояния — VarInt.
         _ => {
             w.var_int(r.var_int()?);
@@ -257,6 +261,14 @@ mod tests {
         for era in 0..TYPES.len() {
             assert_eq!(player(era)[6].0, 6);
         }
+    }
+
+    #[test]
+    fn painting_variant_becomes_holder() {
+        let mut out = Writer::new();
+        let keep = value(0, "PAINTING_VARIANT", &mut Reader::new(&[3]), &mut out).unwrap();
+        assert!(keep);
+        assert_eq!(out.into_vec(), vec![4]);
     }
 
     #[test]

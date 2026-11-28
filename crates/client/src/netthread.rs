@@ -299,6 +299,7 @@ pub fn spawn(addr: String, name: String) -> NetHandle {
             if let Err(e) = run(&addr, &name, &tx, &lv, &pp, &tg, &cmd_rx) {
                 let _ = tx.send(NetEvt::Disconnected(e));
             }
+            ezzmc_net::stats::save_totals(true);
         });
     NetHandle {
         rx,
@@ -376,16 +377,43 @@ fn send_tick_action(h: &mut PlayHandler, c: &mut Connection, cmd: NetCmd) -> Res
 
 /// Protocol number из `version.protocol` ответа Status → известная версия, иначе канон.
 fn detect_version(addr: &str) -> ezzmc_protocol::version::Version {
-    use ezzmc_protocol::version::{by_protocol, CANON};
-    let Ok(r) = ezzmc_net::status::ping_server(addr, CANON.protocol) else {
-        return CANON;
-    };
-    serde_json::from_str::<serde_json::Value>(&r.json)
+    use ezzmc_protocol::version::{by_pre_netty_protocol, by_protocol, CANON};
+    let netty = ezzmc_net::status::ping_server(addr, CANON.protocol)
         .ok()
+        .and_then(|r| serde_json::from_str::<serde_json::Value>(&r.json).ok())
         .and_then(|v| v["version"]["protocol"].as_i64())
-        .and_then(|p| i32::try_from(p).ok())
-        .and_then(by_protocol)
-        .unwrap_or(CANON)
+        .and_then(|p| i32::try_from(p).ok());
+    match netty {
+        // Pre-Netty сервер за Netty-совместимым пингом (плагин/прокси) отдаёт старый номер (61–78).
+        Some(p) => by_protocol(p).or_else(|| by_pre_netty_protocol(p)),
+        // Pre-Netty сервер (до 1.7) не понимает Netty-пинг (или отвечает мусором): legacy-пинг 0xFE.
+        // CraftBukkit 1.5–1.6 (`connection-throttle`, 4 с по умолчанию) рвёт повторное
+        // подключение с того же адреса раньше срока, кроме 127.0.0.1: выжидаем перед пингом и
+        // перед входом.
+        None => {
+            throttle_pause(addr);
+            let v = ezzmc_net::v16::ping(addr)
+                .ok()
+                .and_then(by_pre_netty_protocol);
+            if v.is_some() {
+                throttle_pause(addr);
+            }
+            v
+        }
+    }
+    .unwrap_or(CANON)
+}
+
+/// Пауза между подключениями к pre-Netty серверу (см. `detect_version`); loopback — без паузы.
+fn throttle_pause(addr: &str) {
+    let (host, _) = ezzmc_net::srv::parse_address(addr);
+    let local = host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    if !local {
+        std::thread::sleep(std::time::Duration::from_millis(4100));
+    }
 }
 
 fn run(
@@ -406,7 +434,11 @@ fn run(
     let (host, port) = ezzmc_net::srv::parse_address(addr);
     let mut c = Connection::connect(addr).map_err(|x| e(&x))?;
     let own_uuid;
-    let cfg = if ver.is_pre_config() {
+    let cfg = if ver.is_pre_netty() {
+        let joined = ezzmc_net::v16::login(&mut c, &ids, &host, port, name).map_err(|x| e(&x))?;
+        own_uuid = joined.profile.id;
+        Box::new(joined.cfg)
+    } else if ver.is_pre_config() {
         // 1.19.4/1.20.1 (в т. ч. Forge FML3 на 1.20.1): без Configuration, реестры из `login`.
         let fml_host = if ver.protocol == 763 {
             format!("{host}{}", ezzmc_net::v1201::FML3_SUFFIX)
@@ -432,7 +464,7 @@ fn run(
             &mut c,
             &ids,
             &crate::settings::client_info(&crate::ui::options::Options::load(
-                std::path::Path::new("./options.txt"),
+                &crate::ui::options::path_in(std::path::Path::new(".")),
             )),
         )
         .map_err(|x| e(&x))?
@@ -579,6 +611,8 @@ fn run(
         .or(ver.is_pre_config().then_some(0));
     let mut h = PlayHandler::new(ids);
     let mut loaded_sent = false;
+    // ≤1.12.2: NBT блок-энтити, от которого зависят состояния блоков.
+    let mut legacy_be = crate::legacy_be::Store::default();
     let mut cur_dim = String::new();
     // Локальный игрок мёртв (set_health ≤ 0 до Respawn): сервер шлёт forget_level_chunk, ваниль мир не сносит.
     let mut player_dead = false;
@@ -634,6 +668,7 @@ fn run(
                     flags,
                     gen,
                 } => {
+                    ezzmc_net::stats::save_totals(false);
                     // Действия, накопленные до этого тика, уходят перед его пакетом движения
                     // (VANILLA: ввод и клики тика раньше sendChanges). Иначе Grim `Post` флагует.
                     for a in deferred.drain(..) {
@@ -873,7 +908,19 @@ fn run(
                     r.map_err(|x| e(&x))?;
                 }
                 NetCmd::Respawn => h.send_respawn(&mut c).map_err(|x| e(&x))?,
-                NetCmd::RequestStats => h.send_request_stats(&mut c).map_err(|x| e(&x))?,
+                NetCmd::RequestStats => {
+                    // ≤1.6.4: сервер на запрос не отвечает, суммы накоплены на клиенте.
+                    match ezzmc_net::stats::local_snapshot()
+                        .and_then(|b| b.map(|b| crate::stats::parse(&b)).transpose())
+                    {
+                        Ok(Some(u)) => {
+                            let _ = tx.send(NetEvt::Stats(u));
+                        }
+                        Ok(None) => {}
+                        Err(x) => tracing::warn!("award_stats: {x}"),
+                    }
+                    h.send_request_stats(&mut c).map_err(|x| e(&x))?;
+                }
                 NetCmd::Swing => deferred.push(cmd),
                 NetCmd::UseItem { .. } => deferred.push(cmd),
                 NetCmd::UseItemOn { .. } => deferred.push(cmd),
@@ -934,15 +981,16 @@ fn run(
         }
         // Все уже буферизованные входящие пакеты за итерацию, а не один: иначе пейсинг движения
         // (sleep до 50 мс на пакет движения) растягивает приём чанков и чата на секунды.
-        let mut inbox = std::collections::VecDeque::from([polled]);
-        while matches!(inbox.back(), Some(Ok(Some(_)))) {
+        // `true` — пакет прямо из сокета, `false` — результат разворота (`legacy::expand`).
+        let mut inbox = std::collections::VecDeque::from([(true, polled)]);
+        while matches!(inbox.back(), Some((_, Ok(Some(_))))) {
             match c.poll(std::time::Duration::ZERO) {
                 Ok(None) => break,
-                r => inbox.push_back(r),
+                r => inbox.push_back((true, r)),
             }
         }
-        while let Some(polled) = inbox.pop_front() {
-            let Some(p) = polled.map_err(|x| e(&x))? else {
+        while let Some((fresh, polled)) = inbox.pop_front() {
+            let Some(mut p) = polled.map_err(|x| e(&x))? else {
                 continue;
             };
             let pid = p.id;
@@ -956,12 +1004,27 @@ fn run(
                         .map(ezzmc_net::v1152::alias)
                 }),
             };
+            if fresh {
+                // Для отчёта о покрытии (`tools/smoke_packets.py`): всё, что прислал сервер.
+                tracing::trace!(target: "packets", "recv play {pname:?}");
+                match ezzmc_net::legacy::to_1_11(pname, &p.body) {
+                    Ok(Some(body)) => p.body = body,
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!("{pname:?}: пакет 1.10 → 1.11: {err}");
+                        continue;
+                    }
+                }
+            }
             // Пакет старой версии без аналога в каноне → несколько пакетов той же версии.
             match ezzmc_net::legacy::expand(pname, &p.body) {
                 Ok(None) => {}
                 Ok(Some(more)) => {
+                    if more.is_empty() {
+                        tracing::trace!(target: "packets", "in play {pname:?} id={pid} отброшен разворотом");
+                    }
                     for (id, body) in more.into_iter().rev() {
-                        inbox.push_front(Ok(Some(ezzmc_net::frame::Packet { id, body })));
+                        inbox.push_front((false, Ok(Some(ezzmc_net::frame::Packet { id, body }))));
                     }
                     continue;
                 }
@@ -971,14 +1034,37 @@ fn run(
                 }
             }
             let pname = pname.map(ezzmc_net::v1132::after_expand);
+            if ver.protocol <= crate::legacy_shape::LAST_PROTOCOL {
+                let name = pname.unwrap_or_default();
+                match ezzmc_net::v1122::block_entities(name, &p.body) {
+                    Ok(Some(data)) => {
+                        let positions = legacy_be.feed(data);
+                        // Отдельное обновление накладывается сразу; из чанка — после его приёма.
+                        if name == "block_entity_data" {
+                            let Ok(mut g) = shared.lock() else { continue };
+                            let Some(level) = g.as_mut() else { continue };
+                            let changed = legacy_be.apply(&mut level.chunks, positions);
+                            drop(g);
+                            for p in &changed {
+                                let _ = tx.send(NetEvt::Level(LevelEvent::BlockEntityChanged(*p)));
+                            }
+                            let _ = tx.send(NetEvt::Level(LevelEvent::BlocksChanged(changed)));
+                            continue;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => tracing::warn!("{name}: блок-энтити 1.12: {err}"),
+                }
+            }
             // Сервер старой версии: тело → формат канона (глава 18).
             let canon_pname = match ver.protocol {
-                340..=763 => pname.map(|n| ezzmc_net::v1201::canon_name(n, &p.body)),
+                ezzmc_protocol::version::OLDEST_LEGACY..=763 => {
+                    pname.map(|n| ezzmc_net::v1201::canon_name(n, &p.body))
+                }
                 764 => pname.map(|n| ezzmc_net::legacy::canon_name_1_20_2(n, &p.body)),
                 766 | 767 => pname.map(|n| ezzmc_net::legacy::canon_name_1_21_1(n, &p.body)),
                 _ => None,
             };
-            let mut p = p;
             p.body = match ezzmc_net::legacy::to_canon(pname, std::mem::take(&mut p.body)) {
                 Ok(Some(b)) => b,
                 Ok(None) => {
@@ -1004,6 +1090,12 @@ fn run(
             let ev = h.handle(&mut c, p).map_err(|x| e(&x))?;
             if t_handle.elapsed() > STALL_LIMIT {
                 tracing::warn!(target: "stall", "netthread: обработка пакета {pname:?} заняла {} мс", t_handle.elapsed().as_millis());
+            }
+            if matches!(ev, PlayEvent::Login(_)) && ver.is_pre_config() {
+                let info = crate::settings::client_info(&crate::ui::options::Options::load(
+                    &crate::ui::options::path_in(std::path::Path::new(".")),
+                ));
+                h.send_join_info(&mut c, &info).map_err(|x| e(&x))?;
             }
             match ev {
                 PlayEvent::Login(_) | PlayEvent::Respawn { .. } => {
@@ -1057,6 +1149,7 @@ fn run(
                             if !changed {
                                 continue;
                             }
+                            legacy_be.clear();
                             (spawn.dimension_type, view_radius, spawn.is_flat)
                         }
                         _ => continue,
@@ -1267,12 +1360,17 @@ fn run(
                     }
                     if matches!(
                         pname,
-                        "player_info_update" | "player_info_remove" | "tab_list"
+                        "player_info_update"
+                            | "player_info_remove"
+                            | "tab_list"
+                            | "custom_chat_completions"
                     ) {
                         use crate::tablist::{self as tl, TabEvt};
                         let r = match pname {
                             "player_info_update" => tl::parse_update(&body).map(TabEvt::Update),
                             "player_info_remove" => tl::parse_remove(&body).map(TabEvt::Remove),
+                            "custom_chat_completions" => tl::parse_completions(&body)
+                                .map(|(action, list)| TabEvt::Completions(action, list)),
                             _ => tl::parse_header_footer(&body)
                                 .map(|(h, f)| TabEvt::HeaderFooter(Box::new((h, f)))),
                         };
@@ -1342,6 +1440,27 @@ fn run(
                         }
                         continue;
                     }
+                    if pname == "recipe" {
+                        // ≤1.20.1: настройки и изменение книги в одном пакете.
+                        use crate::recipebook as rb;
+                        let Some((settings, add, rest)) = ezzmc_net::recipes::split(&body) else {
+                            continue;
+                        };
+                        let change = if add {
+                            rb::parse_add(rest)
+                        } else {
+                            rb::parse_remove(rest)
+                        };
+                        for r in [rb::parse_settings(settings), change] {
+                            match r {
+                                Ok(u) => {
+                                    let _ = tx.send(NetEvt::RecipeBook(u));
+                                }
+                                Err(x) => tracing::warn!("recipe: {x}"),
+                            }
+                        }
+                        continue;
+                    }
                     if pname == "place_ghost_recipe" {
                         // VANILLA: ClientPacketListener#handlePlaceRecipe.
                         match crate::recipebook::parse_ghost(&body) {
@@ -1354,7 +1473,9 @@ fn run(
                     }
                     if pname == "award_stats" {
                         // VANILLA: ClientPacketListener#handleAwardStats.
-                        match crate::stats::parse(&body) {
+                        match ezzmc_net::stats::to_canon(&body)
+                            .and_then(|b| crate::stats::parse(&b))
+                        {
                             Ok(u) => {
                                 let _ = tx.send(NetEvt::Stats(u));
                             }
@@ -1492,12 +1613,35 @@ fn run(
                             let center = level.chunks.center();
                             if (center.x, center.z) != (x, z) {
                                 for (x, z) in level.chunks.set_center(x, z) {
+                                    if ver.protocol <= crate::legacy_shape::LAST_PROTOCOL {
+                                        crate::legacy_shape::fix_chunk(&mut level.chunks, x, z);
+                                    }
                                     let _ =
                                         tx.send(NetEvt::Level(LevelEvent::ChunkLoaded { x, z }));
                                 }
                             }
                         }
-                        let r = level.handle(pname, &body);
+                        let mut r = level.handle(pname, &body);
+                        // ≤1.12.2: соединения и формы блоков выводятся клиентом по соседям.
+                        if ver.protocol <= crate::legacy_shape::LAST_PROTOCOL {
+                            match &mut r {
+                                Ok(LevelEvent::ChunkLoaded { x, z }) => {
+                                    legacy_be.apply_column(&mut level.chunks, *x, *z);
+                                    crate::legacy_shape::fix_chunk(&mut level.chunks, *x, *z);
+                                }
+                                Ok(LevelEvent::BlocksChanged(v)) => {
+                                    // block_update вернул вариант по умолчанию — накладываем NBT.
+                                    legacy_be.apply(
+                                        &mut level.chunks,
+                                        v.iter().map(|p| [p.x, p.y, p.z]),
+                                    );
+                                    let more =
+                                        crate::legacy_shape::fix_around(&mut level.chunks, v);
+                                    v.extend(more);
+                                }
+                                _ => {}
+                            }
+                        }
                         if waited.as_millis() > 100 || t_hold.elapsed().as_millis() > 100 {
                             tracing::warn!(target: "stall", "DIAG-LOCK {pname}: ждали замок {} мс, держали {} мс", waited.as_millis(), t_hold.elapsed().as_millis());
                         }

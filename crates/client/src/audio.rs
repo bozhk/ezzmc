@@ -172,8 +172,25 @@ fn send(c: Cmd) {
     }
 }
 
+/// Последние звуки в мире (имя и точка) — для агента (`state.sounds`).
+static RECENT: std::sync::Mutex<std::collections::VecDeque<(String, [f64; 3])>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+const RECENT_LIMIT: usize = 24;
+
+pub fn recent() -> Vec<(String, [f64; 3])> {
+    RECENT
+        .lock()
+        .map_or_else(|_| Vec::new(), |g| g.iter().cloned().collect())
+}
+
 /// Звук в точке мира.
 pub fn play_at(event: &str, cat: Cat, x: f64, y: f64, z: f64, volume: f32, pitch: f32) {
+    if let Ok(mut g) = RECENT.lock() {
+        if g.len() == RECENT_LIMIT {
+            g.pop_front();
+        }
+        g.push_back((norm(event), [x, y, z]));
+    }
     send(Cmd::Play(Req {
         event: norm(event),
         cat,

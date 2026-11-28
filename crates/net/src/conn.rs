@@ -152,7 +152,15 @@ impl Connection {
 
     /// Включить AES/CFB8 (после Encryption Response): все следующие байты в обе стороны.
     pub fn enable_encryption(&mut self, secret: &[u8; 16]) {
-        self.cipher = Some(crate::crypt::CipherPair::new(secret));
+        let mut c = crate::crypt::CipherPair::new(secret);
+        // Байты, уже прочитанные после ответа сервера, тоже зашифрованы.
+        c.dec.decrypt(self.codec.pending_mut());
+        self.cipher = Some(c);
+    }
+
+    /// 1.6.x: поток без кадров (`v16`).
+    pub fn set_pre_netty(&mut self) {
+        self.codec.set_pre_netty();
     }
 
     pub fn send(&mut self, id: i32, body: &[u8]) -> NetResult<()> {

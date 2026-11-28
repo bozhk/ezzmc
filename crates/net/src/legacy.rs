@@ -7,7 +7,7 @@ use ezzmc_protocol::item::{
 use ezzmc_protocol::translate::Translator;
 use ezzmc_protocol::version::{
     build_remap, Version, CANON, V1_20_2, V1_20_4, V1_20_6, V1_21_1, V1_21_10, V1_21_11, V1_21_3,
-    V1_21_4, V1_21_5, V1_21_8,
+    V1_21_4, V1_21_5, V1_21_8, V26_1, V26_2,
 };
 use ezzmc_protocol::wire::{Reader, Writer};
 use ezzmc_protocol::{Direction, ProtocolResult, State};
@@ -16,6 +16,12 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicBool, AtomicI32};
 use std::sync::{Mutex, OnceLock};
 
+thread_local! {
+    /// Идёт перевод пакета 1.20.1 и старше через [`text_from_1_20_1`]: тело — формата 1.20.2,
+    /// а протокол сессии в таблицу [`ver`] не входит.
+    static FROM_1_20_1: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Версия соединения среди 1.21.5–1.21.11: 0 — 1.21.6–1.21.8 (771/772: пакеты, сущности и
 /// block_entity_type совпадают; предметы/звуки — в `Translator`), 1 — 1.21.9/1.21.10 (773),
 /// 2 — 1.21.11 (774), 3 — 1.21.5 (770: свои id пакетов и сущностей, форматы как у 1.21.8),
@@ -23,8 +29,12 @@ use std::sync::{Mutex, OnceLock};
 /// плюс свои отличия), 6 — 1.21/1.21.1 (767: как 1.21.3 плюс отличия до 1.21.2), 7 — 1.20.5/1.20.6
 /// (766: как 1.21.1 плюс отличия до 1.21), 8 — 1.20.3/1.20.4 (765: как 1.20.6 плюс отличия до
 /// 1.20.5: предметы с NBT, нет компонентов), 9 — 1.20.2 (764: как 1.20.4, но текст JSON-строкой
-/// и прочие отличия до 1.20.3 — `from_1_20_2`).
+/// и прочие отличия до 1.20.3 — `from_1_20_2`), 10 — 26.2 (776), 11 — 26.1 (775): формат 1.21.11
+/// кроме веток с [`is_26`].
 fn ver() -> usize {
+    if FROM_1_20_1.get() {
+        return 9;
+    }
     match ezzmc_protocol::version::current().protocol {
         764 => 9,
         765 => 8,
@@ -35,13 +45,20 @@ fn ver() -> usize {
         770 => 3,
         771 | 772 => 0,
         773 => 1,
+        775 => 11,
+        776 => 10,
         _ => 2,
     }
 }
-const VERSIONS: [&Version; 10] = [
+const VERSIONS: [&Version; 12] = [
     &V1_21_8, &V1_21_10, &V1_21_11, &V1_21_5, &V1_21_4, &V1_21_3, &V1_21_1, &V1_20_6, &V1_20_4,
-    &V1_20_2,
+    &V1_20_2, &V26_2, &V26_1,
 ];
+
+/// 26.1/26.2: пакеты в формате 1.21.11 с отличиями (время, SlotDisplay, шаблоны предметов).
+fn is_26(k: usize) -> bool {
+    matches!(k, 10 | 11)
+}
 
 /// Форматы до 1.21.9 (1.21.5–1.21.8): скорости short, BlockPos спавна без измерения и т. п.
 fn pre_1_21_9(k: usize) -> bool {
@@ -65,12 +82,12 @@ fn pre_1_21_2(k: usize) -> bool {
 
 /// Форматы до 1.21 (1.20.5/1.20.6): модификаторы атрибутов с UUID, use_item без поворота.
 fn pre_1_21(k: usize) -> bool {
-    k >= 7
+    matches!(k, 7..=9)
 }
 
 /// 1.20.2–1.20.4: до компонентов предметов (1.20.5).
 fn pre_1_20_5(k: usize) -> bool {
-    k >= 8
+    matches!(k, 8 | 9)
 }
 
 /// 1.20.2: текст JSON-строкой, старые set_score/explode/resource_pack (до 1.20.3).
@@ -79,7 +96,7 @@ fn pre_1_20_3(k: usize) -> bool {
 }
 
 /// Стек предмета сервера → канон: 1.20.4 — NBT, новее — компоненты через `Translator`.
-fn stack(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+pub(crate) fn stack(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
     if pre_1_20_5(ver()) {
         crate::v1201::item_to_canon_1_20_4(r, w)
     } else {
@@ -195,7 +212,10 @@ fn particle(
 }
 
 fn particle_src() -> &'static Shape {
-    if matches!(ver(), 5..=9) {
+    if is_26(ver()) {
+        // VANILLA: ItemParticleOption (26.1) — ItemStackTemplate, как в 26.3.
+        &PARTICLE
+    } else if matches!(ver(), 5..=9) {
         &PARTICLE_1_21_3
     } else {
         &PARTICLE_1_21_11
@@ -203,7 +223,7 @@ fn particle_src() -> &'static Shape {
 }
 
 fn entity_type_map() -> &'static [Option<u32>] {
-    static T: [OnceLock<Vec<Option<u32>>>; 10] = [const { OnceLock::new() }; 10];
+    static T: [OnceLock<Vec<Option<u32>>>; 12] = [const { OnceLock::new() }; 12];
     let k = ver();
     T[k].get_or_init(|| {
         let mut t = build_remap(VERSIONS[k].entity_type, CANON.entity_type);
@@ -232,9 +252,9 @@ fn entity_type_map() -> &'static [Option<u32>] {
 fn block_entity_type(id: i32) -> Option<i32> {
     use ezzmc_protocol::generated::{
         r1_20_2, r1_20_4, r1_20_6, r1_21_1, r1_21_10, r1_21_11, r1_21_3, r1_21_4, r1_21_5, r1_21_8,
-        r26_3,
+        r26_1, r26_2, r26_3,
     };
-    const SRC: [&[&str]; 10] = [
+    const SRC: [&[&str]; 12] = [
         r1_21_8::BLOCK_ENTITY_TYPE,
         r1_21_10::BLOCK_ENTITY_TYPE,
         r1_21_11::BLOCK_ENTITY_TYPE,
@@ -245,14 +265,40 @@ fn block_entity_type(id: i32) -> Option<i32> {
         r1_20_6::BLOCK_ENTITY_TYPE,
         r1_20_4::BLOCK_ENTITY_TYPE,
         r1_20_2::BLOCK_ENTITY_TYPE,
+        r26_2::BLOCK_ENTITY_TYPE,
+        r26_1::BLOCK_ENTITY_TYPE,
     ];
-    static T: [OnceLock<Vec<Option<u32>>>; 10] = [const { OnceLock::new() }; 10];
+    static T: [OnceLock<Vec<Option<u32>>>; 12] = [const { OnceLock::new() }; 12];
     let k = ver();
     T[k].get_or_init(|| build_remap(SRC[k], r26_3::BLOCK_ENTITY_TYPE))
         .get(usize::try_from(id).ok()?)
         .copied()
         .flatten()
         .map(|v| v as i32)
+}
+
+/// NBT блок-сущности с каноническим типом `ty`: таблички до 1.21.5 несут строки JSON.
+fn block_entity_tag(
+    w: &mut Writer,
+    ty: i32,
+    tag: Option<ezzmc_protocol::nbt::Tag>,
+    raw: &[u8],
+) -> ProtocolResult<()> {
+    let sign = usize::try_from(ty)
+        .ok()
+        .and_then(|i| ezzmc_protocol::generated::r26_3::BLOCK_ENTITY_TYPE.get(i))
+        .is_some_and(|n| n.ends_with("sign"));
+    match tag.filter(|_| sign && pre_1_21_5(ver())) {
+        Some(tag) => {
+            let mut out = Vec::new();
+            ezzmc_protocol::nbt::write_network(&mut out, Some(&crate::block_entity::sign(tag)))?;
+            w.bytes(&out);
+        }
+        None => {
+            w.bytes(raw);
+        }
+    }
+    Ok(())
 }
 
 /// Измерение игрока (из `login`/`respawn`) — нужно для `set_default_spawn_position` 1.21.8,
@@ -693,6 +739,11 @@ fn entity_data_value(r: &mut Reader, w: &mut Writer, ser: &str) -> ProtocolResul
         | "COW_VARIANT"
         | "WOLF_VARIANT"
         | "WOLF_SOUND_VARIANT"
+        // VANILLA: *SoundVariant#STREAM_CODEC (26.1) — holderRegistry, id реестра.
+        | "CAT_SOUND_VARIANT"
+        | "COW_SOUND_VARIANT"
+        | "PIG_SOUND_VARIANT"
+        | "CHICKEN_SOUND_VARIANT"
         | "FROG_VARIANT"
         | "PIG_VARIANT"
         | "CHICKEN_VARIANT"
@@ -768,6 +819,10 @@ fn entity_data_value(r: &mut Reader, w: &mut Writer, ser: &str) -> ProtocolResul
                 w.string(&r.string(32767)?).bytes(r.bytes(8)?);
             }
         }
+        // VANILLA: до 1.20.6 включительно — id реестра, дальше Holder (id + 1).
+        "PAINTING_VARIANT" if ezzmc_protocol::version::current().protocol <= 766 => {
+            w.var_int(r.var_int()?.saturating_add(1));
+        }
         "PAINTING_VARIANT" => return same(r, w, &PAINTING),
         "RESOLVABLE_PROFILE" => return same(r, w, &ezzmc_protocol::item::RESOLVABLE_PROFILE),
         _ => {
@@ -797,7 +852,42 @@ fn slot_display(r: &mut Reader, w: &mut Writer, depth: u32) -> ProtocolResult<()
         });
     }
     let d = depth + 1;
-    match r.var_int()? {
+    let mut kind = r.var_int()?;
+    if is_26(ver()) {
+        // VANILLA: SlotDisplays#bootstrap (26.1) — номера типов уже как в 26.3; отличаются
+        // только `tag` (TagKey вместо HolderSet) и id предметов/компонентов.
+        match kind {
+            2 => {
+                w.var_int(2);
+                return slot_display(r, w, d);
+            }
+            3 => {
+                let mut source = Writer::new();
+                slot_display(r, &mut source, d)?;
+                let source = source.into_vec();
+                match tr().id(ClientRegistry::DataComponentType, r.var_int()?) {
+                    Some(c) => {
+                        w.var_int(3).bytes(&source).var_int(c);
+                    }
+                    None => {
+                        w.bytes(&source);
+                    }
+                }
+                return Ok(());
+            }
+            4..=6 => kind -= 2,
+            7 => {
+                w.var_int(7);
+                slot_display(r, w, d)?;
+                return slot_display(r, w, d);
+            }
+            8..=10 => kind -= 3,
+            0 | 1 => {}
+            // номера вне реестра 26.x: ветка ошибки ниже
+            _ => kind = -1,
+        }
+    }
+    match kind {
         t @ (0 | 1) => {
             w.var_int(t);
         }
@@ -811,7 +901,12 @@ fn slot_display(r: &mut Reader, w: &mut Writer, depth: u32) -> ProtocolResult<()
         },
         3 => {
             let mut t = Writer::new();
-            if tr().value(r, &mut t, &Shape::Stack, &Shape::ItemTemplate)? {
+            let from = if is_26(ver()) {
+                &Shape::ItemTemplate
+            } else {
+                &Shape::Stack
+            };
+            if tr().value(r, &mut t, from, &Shape::ItemTemplate)? {
                 w.var_int(5).bytes(&t.into_vec());
             } else {
                 w.var_int(0);
@@ -821,6 +916,15 @@ fn slot_display(r: &mut Reader, w: &mut Writer, depth: u32) -> ProtocolResult<()
         4 => {
             w.var_int(6).var_int(0);
             str_id(r, w)?;
+        }
+        // VANILLA: SlotDisplay.SmithingTrimDemoSlotDisplay (1.21.4) — до 1.21.5 `pattern` тоже
+        // SlotDisplay (предмет-шаблон), holder'а узора в пакете нет. Клиент берёт из этого
+        // дисплея только `base`, поэтому остаётся он один.
+        5 if pre_1_21_5(ver()) => {
+            slot_display(r, w, d)?;
+            let mut skipped = Writer::new();
+            slot_display(r, &mut skipped, d)?;
+            slot_display(r, &mut skipped, d)?;
         }
         5 => {
             w.var_int(8);
@@ -1020,6 +1124,9 @@ fn set_entity_data(r: &mut Reader, w: &mut Writer, k: usize) -> ProtocolResult<(
         SERIALIZERS_1_21_4,
         SERIALIZERS_1_20_4,
         SERIALIZERS_1_20_4,
+        // VANILLA: EntityDataSerializers (26.1/26.2) — 26.3 без последнего DYE_COLOR.
+        SERIALIZERS_26_3.split_at(SERIALIZERS_26_3.len() - 1).0,
+        SERIALIZERS_26_3.split_at(SERIALIZERS_26_3.len() - 1).0,
     ][k];
     // VANILLA: HangingEntity#DATA_DIRECTION (#8) появился в 1.21.6 — поля рамок/картин 1.21.5
     // с #8 сдвигаются на 1 (направление приходит в add_entity, как и в 1.21.6).
@@ -1143,7 +1250,10 @@ fn set_entity_data(r: &mut Reader, w: &mut Writer, k: usize) -> ProtocolResult<(
             }
             continue;
         }
-        match (k != 2).then(|| retyped_1_21_10(ty, idx)).flatten() {
+        match (k != 2 && !is_26(k))
+            .then(|| retyped_1_21_10(ty, idx))
+            .flatten()
+        {
             Some("HUMANOID_ARM") if *ser == "BYTE" => {
                 // HumanoidArm: 0 = LEFT, 1 = RIGHT.
                 let arm = i32::from(r.u8()? != 0);
@@ -1181,15 +1291,23 @@ static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
 /// Пакет клиента (собран в каноне, id из таблицы версии) → пакеты для сервера 1.21.5–1.21.11
 /// (id, тело) в порядке отправки. `None` — пакет без изменений.
 pub fn serverbound_1_21_11(id: i32, body: &[u8]) -> ProtocolResult<Option<Vec<Packet>>> {
-    // VANILLA: книга рецептов 1.21.1 — id рецептов строками (ResourceLocation), в каноне —
-    // RecipeDisplayId; перевести нечем, пакеты не отправляются.
-    if pre_1_21_2(ver())
-        && matches!(
-            packet_name(id),
-            Some("place_recipe" | "recipe_book_seen_recipe")
-        )
-    {
-        return Ok(Some(Vec::new()));
+    // VANILLA: книга рецептов 1.20.2–1.21.1 — id рецептов строками (ResourceLocation), в каноне —
+    // RecipeDisplayId. Неизвестный рецепт не отправляется.
+    if pre_1_21_2(ver()) {
+        let mut r = Reader::new(body);
+        let mut w = Writer::new();
+        let known = match packet_name(id) {
+            Some("place_recipe") => Some(crate::recipes::place_from_canon(&mut r, &mut w)?),
+            Some("recipe_book_seen_recipe") => {
+                Some(crate::recipes::seen_from_canon(&mut r, &mut w)?)
+            }
+            _ => None,
+        };
+        match known {
+            Some(true) => return Ok(Some(vec![(id, w.into_vec())])),
+            Some(false) => return Ok(Some(Vec::new())),
+            None => {}
+        }
     }
     let b = serverbound_body(id, body)?;
     let mut out = Vec::new();
@@ -1438,7 +1556,67 @@ fn hashed_to_stack_1_21_4(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> 
 
 /// Пакет сервера 1.21.4, которого нет в 1.21.5+, → пакеты 1.21.4 (id, тело), которые затем
 /// переводятся обычным путём. `None` — пакет не разворачивается.
+/// 1.9.4/1.10: тело свежего пакета сервера → формат 1.11 (тип `add_mob` зависит от метаданных
+/// спавна). Только для пакетов из сокета, один раз: пакеты, которые вернул `expand`, уже
+/// в формате 1.11 и повторно не переводятся. `None` — без изменений.
+pub fn to_1_11(name: Option<&str>, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
+    let Some(n) = name else { return Ok(None) };
+    let protocol = ezzmc_protocol::version::current().protocol;
+    if protocol >= 315 {
+        return Ok(None);
+    }
+    // 1.7: сначала → формат 1.8.
+    let v18 = if protocol < 47 {
+        crate::v17::to_1_8(n, body)?
+    } else {
+        None
+    };
+    let v19 = if protocol < 107 {
+        // 1.8: → формат 1.9.
+        crate::v18::to_1_9(n, v18.as_deref().unwrap_or(body))?.or(v18)
+    } else {
+        v18
+    };
+    let body = v19.as_deref().unwrap_or(body);
+    Ok(from_1_9(n, body)?.or(v19))
+}
+
+/// Тело пакета формата 1.9–1.10 → 1.11 (см. `to_1_11`). `None` — без изменений.
+pub(crate) fn from_1_9(n: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
+    let protocol = ezzmc_protocol::version::current().protocol;
+    if protocol >= 315 {
+        return Ok(None);
+    }
+    // 1.9.4: сначала → формат 1.10.
+    let v110 = if protocol < 210 {
+        crate::v194::to_1_10(n, body)?
+    } else {
+        None
+    };
+    let body = v110.as_deref().unwrap_or(body);
+    Ok(crate::v1102::to_1_11(n, body)?.or(v110))
+}
+
 pub fn expand(name: Option<&str>, body: &[u8]) -> ProtocolResult<Option<Vec<Packet>>> {
+    // 1.8: пакеты без пары в 1.9 → пакеты формата 1.11.
+    if ezzmc_protocol::version::current().protocol < 107 {
+        if let Some(parts) =
+            crate::v18::expand(name.unwrap_or_default(), body, current_clientbound_id)?
+        {
+            return Ok(Some(parts));
+        }
+    }
+    // 1.9–1.9.2: табличка приходит отдельным пакетом → блок-сущность формата 1.9.4.
+    if name == Some("update_sign") {
+        return Ok(Some(match current_clientbound_id("block_entity_data") {
+            Some(id) => vec![(id, crate::v194::update_sign(body)?)],
+            None => Vec::new(),
+        }));
+    }
+    expand_1_11(name, body)
+}
+
+fn expand_1_11(name: Option<&str>, body: &[u8]) -> ProtocolResult<Option<Vec<Packet>>> {
     if crate::v1201::is_1_13() {
         let parts = crate::v1132::expand(name.unwrap_or_default(), body)?;
         if parts.is_some() {
@@ -1493,6 +1671,15 @@ pub fn expand(name: Option<&str>, body: &[u8]) -> ProtocolResult<Option<Vec<Pack
     let mut d = Writer::new();
     d.var_int(id).u8(8).var_int(1).var_int(value).u8(0xFF);
     Ok(Some(vec![(add, a.into_vec()), (data, d.into_vec())]))
+}
+
+/// Id клиентского пакета Play по таблице версии текущего соединения.
+fn current_clientbound_id(name: &str) -> Option<i32> {
+    ezzmc_protocol::version::current()
+        .packets
+        .iter()
+        .find(|p| p.state == State::Play && p.dir == Direction::Clientbound && p.name == name)
+        .map(|p| p.id as i32)
 }
 
 fn clientbound_id(name: &str) -> Option<i32> {
@@ -1567,6 +1754,23 @@ pub fn to_canon(name: Option<&str>, body: Vec<u8>) -> ProtocolResult<Option<Vec<
         Some(b) => Ok(Some(b)),
         None => Ok(Some(body)),
     }
+}
+
+/// Пакет с JSON-текстом в формате 1.20.1 → канон: отличия от 1.20.2 в этих пакетах нет, дальше
+/// общий путь 1.20.2 → 1.20.4 → канон. `None` — отбросить.
+pub(crate) fn text_from_1_20_1(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
+    let canon = canon_name_1_20_2(name, body);
+    FROM_1_20_1.set(true);
+    let out = (|| {
+        let body = match from_1_20_2(name, body)? {
+            Some(b) if b.is_empty() => return Ok(None),
+            Some(b) => b,
+            None => body.to_vec(),
+        };
+        Ok(Some(clientbound_1_21_11(canon, &body)?.unwrap_or(body)))
+    })();
+    FROM_1_20_1.set(false);
+    out
 }
 
 /// Имя пакета 1.20.2 в каноне (тело переводит `from_1_20_2`).
@@ -1717,7 +1921,8 @@ fn from_1_20_2(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<u8>>> {
             }
             return Ok(Some(w.into_vec()));
         }
-        "set_player_team" => {
+        // VANILLA: Parameters.STREAM_CODEC (26.2) — порядок полей 26.3.
+        "set_player_team" if ver() != 10 => {
             w.string(&r.string(32767)?);
             let method = r.u8()?;
             w.u8(method);
@@ -1929,7 +2134,17 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
                 return Ok(Some(Vec::new()));
             };
             let name = CANON.entity_type.get(canon as usize).copied().unwrap_or("");
-            layouts().insert(id, (DataLayout::of(name), name));
+            let layout = match ver() {
+                // индексы SynchedEntityData 26.2 совпадают с 26.3
+                10 => DataLayout::Same,
+                // VANILLA: Slime extends Mob (26.1) — отличаются только слизни и магмовые кубы.
+                11 => match DataLayout::of(name) {
+                    DataLayout::CubeMob => DataLayout::CubeMob,
+                    _ => DataLayout::Same,
+                },
+                _ => DataLayout::of(name),
+            };
+            layouts().insert(id, (layout, name));
             w.var_int(id).bytes(uuid).var_int(canon as i32);
             if pre_1_21_9(ver()) {
                 // VANILLA: ClientboundAddEntityPacket (1.21.8): x, y, z, xRot, yRot, yHeadRot,
@@ -2050,9 +2265,10 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
                 let head = r.bytes(3)?;
                 let ty = block_entity_type(r.var_int()?);
                 let tag = r.pos();
-                ezzmc_protocol::nbt::read_network(&mut r)?;
+                let nbt = ezzmc_protocol::nbt::read_network(&mut r)?;
                 if let Some(ty) = ty {
-                    list.bytes(head).var_int(ty).bytes(r.since(tag));
+                    list.bytes(head).var_int(ty);
+                    block_entity_tag(&mut list, ty, nbt, r.since(tag))?;
                     kept += 1;
                 }
             }
@@ -2070,7 +2286,10 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
             let Some(ty) = block_entity_type(r.var_int()?) else {
                 return Ok(Some(Vec::new()));
             };
-            w.var_int(ty).bytes(r.rest());
+            w.var_int(ty);
+            let tag = r.pos();
+            let nbt = ezzmc_protocol::nbt::read_network(&mut r)?;
+            block_entity_tag(&mut w, ty, nbt, r.since(tag))?;
         }
         // VANILLA: ClientboundRecipeBookAddPacket — List<Entry(RecipeDisplayEntry, u8 flags)>, replace.
         "recipe_book_add" => {
@@ -2121,7 +2340,12 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
                         }
                         count > 0
                     } else {
-                        tr().value(&mut r, &mut icon, &Shape::Stack, &Shape::ItemTemplate)?
+                        let from = if is_26(ver()) {
+                            &Shape::ItemTemplate
+                        } else {
+                            &Shape::Stack
+                        };
+                        tr().value(&mut r, &mut icon, from, &Shape::ItemTemplate)?
                     };
                     if !ok {
                         icon = Writer::new();
@@ -2352,10 +2576,19 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
         "set_carried_item" => {
             w.var_int(i32::from(r.u8()?));
         }
-        // VANILLA: книга рецептов и рецепты 1.21.1 (ClientboundRecipePacket, полные Recipe в
-        // update_recipes, id рецепта в place_ghost_recipe) несовместимы с RecipeDisplay 1.21.2.
-        "recipe" | "update_recipes" | "place_ghost_recipe" if pre_1_21_2(ver()) => {
+        // VANILLA: книга рецептов 1.20.2–1.21.1 (полные Recipe в update_recipes, id строками в
+        // recipe и place_ghost_recipe) → RecipeDisplay канона, см. `recipes`.
+        "update_recipes" if pre_1_21_2(ver()) => {
+            crate::recipes::update(body)?;
             return Ok(Some(Vec::new()));
+        }
+        "recipe" if pre_1_21_2(ver()) => {
+            return Ok(Some(crate::recipes::recipe_to_canon(body)?));
+        }
+        "place_ghost_recipe" if pre_1_21_2(ver()) => {
+            return Ok(Some(
+                crate::recipes::ghost_to_canon(body)?.unwrap_or_default(),
+            ));
         }
         // VANILLA: ClientboundCooldownPacket (1.21.1) — id предмета; в 1.21.2 группа (Identifier,
         // по умолчанию id предмета).
@@ -2659,7 +2892,8 @@ pub fn clientbound_1_21_11(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec
             w.var_int(kept).bytes(&list.into_vec());
         }
         // 1.21.11: gameTime, dayTime, tickDayTime → 26.3: gameTime, {часы overworld: total, 0, rate}.
-        "set_time" => {
+        // VANILLA: ClientboundSetTimePacket (26.1) — уже карта WorldClock, как в 26.3.
+        "set_time" if !is_26(ver()) => {
             let (game, day) = (r.i64()?, r.i64()?);
             // VANILLA: ClientLevel#setDayTime (1.21.1) — отрицательное время = doDaylightCycle false;
             // в 1.21.2 отдельный bool tickDayTime.

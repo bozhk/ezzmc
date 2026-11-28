@@ -1,4 +1,5 @@
 //! TCP, фрейминг, компрессия, состояния соединения.
+pub mod block_entity;
 pub mod chunkbatch;
 pub mod conn;
 pub mod crypt;
@@ -8,16 +9,24 @@ pub mod error;
 pub mod frame;
 pub mod legacy;
 pub mod play;
+pub mod recipes;
 pub mod replay;
 pub mod session;
 pub mod srv;
+pub mod stats;
 pub mod status;
+mod v1102;
 pub mod v1122;
 mod v1122_gen;
 pub mod v1132;
 pub mod v1152;
 pub mod v1165;
 pub mod v1201;
+mod v1201_fx;
+pub mod v16;
+mod v17;
+mod v18;
+mod v194;
 
 pub use conn::{Connection, Intent};
 pub use error::{NetError, NetResult};

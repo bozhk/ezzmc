@@ -53,6 +53,8 @@ pub enum TabEvt {
     Update(Vec<(u128, Delta)>),
     Remove(Vec<u128>),
     HeaderFooter(Box<(Option<Component>, Option<Component>)>),
+    /// custom_chat_completions: действие (0 ADD, 1 REMOVE, 2 SET) и строки.
+    Completions(i32, Vec<String>),
 }
 
 #[derive(Default)]
@@ -60,6 +62,8 @@ pub struct TabList {
     pub entries: HashMap<u128, Entry>,
     /// Имена профилей, пережившие remove (VANILLA: сущность игрока держит GameProfile со спавна).
     pub profiles: HashMap<u128, String>,
+    /// Дополнения обычного чата, присланные сервером.
+    completions: std::collections::HashSet<String>,
     pub header: Option<Component>,
     pub footer: Option<Component>,
     /// VANILLA: PlayerTabOverlay#healthStates (ключ — имя профиля).
@@ -86,6 +90,25 @@ fn component(r: &mut Reader) -> ProtocolResult<Component> {
         Some(t) => Component::from_nbt(&t),
         None => Ok(Component::text("")),
     }
+}
+
+/// VANILLA: ClientboundCustomChatCompletionsPacket — неизвестное действие = ADD.
+pub fn parse_completions(body: &[u8]) -> ProtocolResult<(i32, Vec<String>)> {
+    let mut r = Reader::new(body);
+    let action = r.var_int()?;
+    let n = r.length("chat completions", 1 << 16)?;
+    let entries = (0..n)
+        .map(|_| r.string(32767))
+        .collect::<ProtocolResult<_>>()?;
+    Ok((action, entries))
+}
+
+/// VANILLA: SharedSuggestionProvider#matchesSubStr — начало строки или части после `.`, `_`, `/`.
+fn matches_sub_str(pattern: &str, input: &str) -> bool {
+    input.starts_with(pattern)
+        || input
+            .match_indices(['.', '_', '/'])
+            .any(|(i, _)| input[i + 1..].starts_with(pattern))
 }
 
 /// VANILLA: ClientboundPlayerInfoUpdatePacket.Action (порядок битов = ordinal).
@@ -203,8 +226,37 @@ impl HealthState {
 pub type Icon = (f32, f32, &'static str, f32, f32);
 
 impl TabList {
+    /// Подсказки обычного чата для слова `word`: ники и присланные сервером строки.
+    /// VANILLA: CommandSuggestions#updateCommandInfo → ClientSuggestionProvider#getCustomTabSuggestions.
+    pub fn chat_completions(&self, word: &str) -> Vec<String> {
+        let prefix = word.to_lowercase();
+        let mut out: Vec<String> = self
+            .entries
+            .values()
+            .map(|e| &e.name)
+            .chain(&self.completions)
+            // VANILLA: SuggestionsBuilder#suggest пропускает уже набранное целиком.
+            .filter(|s| *s != word && matches_sub_str(&prefix, &s.to_lowercase()))
+            .cloned()
+            .collect();
+        out.sort_by_cached_key(|s| (s.to_lowercase(), s.clone()));
+        out.dedup();
+        out
+    }
+
     pub fn apply(&mut self, e: TabEvt) {
         match e {
+            TabEvt::Completions(action, list) => match action {
+                1 => list.iter().for_each(|s| {
+                    self.completions.remove(s);
+                }),
+                a => {
+                    if a == 2 {
+                        self.completions.clear();
+                    }
+                    self.completions.extend(list);
+                }
+            },
             TabEvt::Update(v) => {
                 for (id, d) in v {
                     // VANILLA: ADD_PLAYER создаёт запись; остальные действия без неё игнорируются.
@@ -512,6 +564,27 @@ impl TabList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_completions_match_names_and_server_entries() {
+        let mut tab = TabList::default();
+        for (id, name) in [(1, "Steve"), (2, "Ezz_Bot"), (3, "alex")] {
+            let d = Delta {
+                name: Some(name.to_owned()),
+                ..Delta::default()
+            };
+            tab.apply(TabEvt::Update(vec![(id, d)]));
+        }
+        tab.apply(TabEvt::Completions(0, vec![":smile:".to_owned()]));
+        assert_eq!(tab.chat_completions("st"), ["Steve"]);
+        assert_eq!(tab.chat_completions("bo"), ["Ezz_Bot"]);
+        assert_eq!(
+            tab.chat_completions(""),
+            [":smile:", "alex", "Ezz_Bot", "Steve"]
+        );
+        tab.apply(TabEvt::Completions(2, Vec::new()));
+        assert!(tab.chat_completions(":").is_empty());
+    }
 
     #[test]
     fn remove_parses() {

@@ -30,12 +30,18 @@ const NORMALS: [[i32; 3]; 6] = [
     [1, 0, 0],
 ];
 
+/// Кадров от поворота камеры задачей до того, как `target`/`place_target` ему соответствуют.
+const AIM_FRAMES: u32 = 3;
+
 /// Текущая задача агента (одна за раз): отвечает на запрос, когда завершится.
 pub struct Task {
     pub kind: Kind,
     pub reply: Sender<Value>,
     pub started: Instant,
     pub until: Instant,
+    /// Сколько кадров задача уже выполнялась: прицел отстаёт от взгляда на кадр, и при низком
+    /// FPS одного ожидания по времени мало.
+    frames: u32,
     /// Нажатые задачей ввод-кнопки (чтобы отпустить в конце и не дёргать каждый кадр).
     held: [bool; 4],
 }
@@ -204,11 +210,17 @@ fn block_json(l: &Level, p: P) -> Value {
     let loaded = l.chunks.get(p[0] >> 4, p[2] >> 4).is_some();
     let (block_light, sky_light) =
         crate::particles::light_at(l, f64::from(p[0]), f64::from(p[1]), f64::from(p[2]));
-    json!({
+    let mut out = json!({
         "pos": p, "block": name_of(s), "props": props_json(s), "loaded": loaded,
         "air": s.is_air(), "solid": top(s) > 0.0, "water": is_water(s), "hazard": hazard(s),
         "block_light": block_light, "sky_light": sky_light,
-    })
+    });
+    // Только у табличек: строки обеих сторон, как их разобрал клиент из блок-сущности.
+    if name_of(s).ends_with("sign") {
+        let side = |front| crate::sign::edit_info(l, p, front).map(|(_, lines, _)| lines);
+        out["sign"] = json!({"front": side(true), "back": side(false)});
+    }
+    out
 }
 
 /// Углы (yaw, pitch) от точки `from` на точку `to` (ваниль: yaw 0 = юг +Z, 90 = запад −X).
@@ -1085,6 +1097,7 @@ impl App {
             reply: reply.clone(),
             started: now,
             until: now + Duration::from_millis(timeout),
+            frames: 0,
             held: [false; 4],
         });
         None
@@ -1108,6 +1121,7 @@ impl App {
             return;
         }
         let Some(mut kind) = self.control_task.as_mut().map(|t| {
+            t.frames = t.frames.saturating_add(1);
             std::mem::replace(
                 &mut t.kind,
                 Kind::Attack {
@@ -1271,6 +1285,9 @@ impl App {
                 let (yaw, pitch) = angles(eye, c);
                 self.yaw = self.yaw + wrap180(yaw - self.yaw); // кратчайший поворот: без скачка ≈360° (Grim AimModulo360)
                 self.pitch = pitch;
+                if self.control_task.as_ref()?.frames < AIM_FRAMES {
+                    return None; // прицел ещё от прежнего взгляда
+                }
                 // Если на линии взгляда другой блок — копаем его вместо стены (сообщаем в ответе при ошибке).
                 let tgt = self.view.as_ref().and_then(|v| v.target.map(|t| t.pos));
                 if let Some(t) = tgt {
@@ -1313,7 +1330,9 @@ impl App {
                 match *phase {
                     0 => {
                         // даём тику физики выбрать place_target по новому взгляду
-                        if now.duration_since(*at) > Duration::from_millis(160) {
+                        if now.duration_since(*at) > Duration::from_millis(160)
+                            && self.control_task.as_ref()?.frames >= AIM_FRAMES
+                        {
                             let hit = self.view.as_ref().and_then(|v| v.place_target);
                             *placed_at = hit.map(|t| {
                                 [

@@ -6,12 +6,12 @@
 use crate::error::{ProtocolError, ProtocolResult};
 use crate::generated::{
     r1_20_2, r1_20_4, r1_20_6, r1_21_1, r1_21_10, r1_21_11, r1_21_3, r1_21_4, r1_21_5, r1_21_6,
-    r1_21_8, r26_3 as canon,
+    r1_21_8, r26_1, r26_2, r26_3 as canon,
 };
 use crate::item::{
     components, components_1_20_6, components_1_21_1, components_1_21_10, components_1_21_11,
-    components_1_21_3, components_1_21_4, components_1_21_5, components_1_21_8, ClientRegistry,
-    Shape, MAX_DEPTH,
+    components_1_21_3, components_1_21_4, components_1_21_5, components_1_21_8, components_26_1,
+    components_26_2, ClientRegistry, Shape, MAX_DEPTH,
 };
 use crate::version::build_remap;
 use crate::wire::{Reader, Writer};
@@ -55,6 +55,8 @@ macro_rules! src_names {
         }
     };
 }
+src_names!(names_26_2, r26_2);
+src_names!(names_26_1, r26_1);
 src_names!(names_1_21_11, r1_21_11);
 src_names!(names_1_21_10, r1_21_10);
 src_names!(names_1_21_8, r1_21_8);
@@ -130,6 +132,14 @@ struct Source {
     components: Comps,
 }
 
+const SRC_26_2: Source = Source {
+    names: names_26_2,
+    components: components_26_2,
+};
+const SRC_26_1: Source = Source {
+    names: names_26_1,
+    components: components_26_1,
+};
 const SRC_1_21_11: Source = Source {
     names: names_1_21_11,
     components: components_1_21_11,
@@ -192,7 +202,7 @@ const SRC_1_21_3: Source = Source {
 };
 
 /// Источник перевода для версии соединения: 766 — 1.20.5/1.20.6, 767 — 1.21/1.21.1, 768 — 1.21.2/1.21.3, 769 — 1.21.4, 770 — 1.21.5, 771 — 1.21.6, 772 — 1.21.7/1.21.8,
-/// 773 — 1.21.9/1.21.10, остальное — 1.21.11.
+/// 773 — 1.21.9/1.21.10, 775 — 26.1, 776 — 26.2, остальное — 1.21.11.
 fn source_index(protocol: i32) -> usize {
     match protocol {
         764 => 10,
@@ -205,10 +215,12 @@ fn source_index(protocol: i32) -> usize {
         771 => 3,
         772 => 0,
         773 => 1,
+        775 => 12,
+        776 => 11,
         _ => 2,
     }
 }
-const SOURCES: [Source; 11] = [
+const SOURCES: [Source; 13] = [
     SRC_1_21_8,
     SRC_1_21_10,
     SRC_1_21_11,
@@ -220,6 +232,8 @@ const SOURCES: [Source; 11] = [
     SRC_1_20_6,
     SRC_1_20_4,
     SRC_1_20_2,
+    SRC_26_2,
+    SRC_26_1,
 ];
 
 fn canon_names(reg: ClientRegistry) -> &'static [&'static str] {

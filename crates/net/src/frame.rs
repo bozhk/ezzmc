@@ -23,6 +23,8 @@ pub struct Codec {
     inbuf: Vec<u8>,
     comp: Compressor,
     decomp: Decompressor,
+    /// 1.6.x: поток без кадров, пакеты переводятся в 1.7 (`v16`).
+    pre_netty: bool,
 }
 
 impl Default for Codec {
@@ -39,7 +41,18 @@ impl Codec {
             // VANILLA: Deflater() — уровень по умолчанию (6)
             comp: Compressor::new(CompressionLvl::default()),
             decomp: Decompressor::new(),
+            pre_netty: false,
         }
+    }
+
+    /// 1.6.x: дальше поток без кадров (`v16`).
+    pub fn set_pre_netty(&mut self) {
+        self.pre_netty = true;
+    }
+
+    /// Ещё не разобранные байты (их нужно расшифровать при включении шифрования).
+    pub fn pending_mut(&mut self) -> &mut [u8] {
+        &mut self.inbuf
     }
 
     /// Включить сжатие (Login: set_compression). `threshold < 0` — выключить.
@@ -57,6 +70,19 @@ impl Codec {
 
     /// Достать следующий пакет, если он целиком в буфере.
     pub fn next_packet(&mut self) -> NetResult<Option<Packet>> {
+        if self.pre_netty {
+            loop {
+                match crate::v16::decode(&self.inbuf)? {
+                    None => return Ok(None),
+                    Some((n, p)) => {
+                        self.inbuf.drain(..n);
+                        if p.is_some() {
+                            return Ok(p);
+                        }
+                    }
+                }
+            }
+        }
         // длина кадра — до 3 байт; без полного префикса ждём ещё
         let mut r = Reader::new(&self.inbuf);
         let mut len = 0usize;
@@ -143,6 +169,9 @@ impl Codec {
 
     /// Закодировать пакет в кадр, дописав в `out`.
     pub fn encode(&mut self, id: i32, body: &[u8], out: &mut Vec<u8>) -> NetResult<()> {
+        if self.pre_netty {
+            return Ok(crate::v16::encode(id, body, out)?);
+        }
         let mut inner = Writer::with_capacity(body.len() + 5);
         inner.var_int(id).bytes(body);
         let inner = inner.into_vec();

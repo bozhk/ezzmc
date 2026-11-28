@@ -620,6 +620,13 @@ pub struct Options {
     kv: Vec<(String, String)>,
 }
 
+/// Файл настроек игры из `dir`. EZZMC_OPTIONS подменяет его для автотестов, чтобы они не читали
+/// и не писали файл игрока.
+pub fn path_in(dir: &Path) -> std::path::PathBuf {
+    std::env::var_os("EZZMC_OPTIONS")
+        .map_or_else(|| dir.join("options.txt"), std::path::PathBuf::from)
+}
+
 impl Options {
     pub fn load(path: &Path) -> Self {
         let kv = std::fs::read_to_string(path)

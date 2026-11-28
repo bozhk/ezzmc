@@ -44,7 +44,7 @@ fn tag(s: BlockState, t: &str) -> bool {
     in_tag(BLOCK_TAGS, t, s.block_id() as u32)
 }
 
-fn is_solid(s: BlockState) -> bool {
+pub(crate) fn is_solid(s: BlockState) -> bool {
     s.props().is_some_and(|p| p.has(FLAG_SOLID))
 }
 
@@ -290,7 +290,7 @@ fn is_signal_source(s: BlockState) -> bool {
 }
 
 /// VANILLA: RedStoneWireBlock#shouldConnectTo(state, direction); `dir` — индекс 2..5 или None.
-fn wire_connects(s: BlockState, dir: Option<u8>) -> bool {
+pub(crate) fn wire_connects(s: BlockState, dir: Option<u8>) -> bool {
     match s.name() {
         "redstone_wire" => true,
         "repeater" => {

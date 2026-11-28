@@ -337,6 +337,16 @@ impl ChunkCache {
         }
     }
 
+    /// Заменить состояние без пересчёта света и без изменения block entity — для свойств,
+    /// выведенных клиентом по соседям (свет приходит с сервера). false — чанка нет/вне высоты.
+    pub fn set_shape(&mut self, x: i32, y: i32, z: i32, state: BlockState) -> bool {
+        self.get_mut(x >> 4, z >> 4).is_some_and(|c| {
+            c.chunk
+                .set_block((x & 15) as usize, y, (z & 15) as usize, state)
+                .is_some()
+        })
+    }
+
     /// VANILLA: ClientLevel#setServerVerifiedBlockState (только данные). false — чанка нет.
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, state: BlockState) -> bool {
         let (cx, cz) = (x >> 4, z >> 4);

@@ -114,7 +114,7 @@ fn axis(d: u8) -> u8 {
     }
 }
 
-fn clockwise(d: u8) -> u8 {
+pub(crate) fn clockwise(d: u8) -> u8 {
     match d {
         2 => 5,
         5 => 3,

@@ -236,7 +236,7 @@ impl WorldBorder {
                 self.center_z = r.f64()?;
                 let old = r.f64()?;
                 let new = r.f64()?;
-                let lerp = r.var_long()?;
+                let lerp = lerp_ticks(r.var_long()?);
                 if lerp > 0 {
                     self.lerp_size_between(old, new, lerp, game_time);
                 } else {
@@ -253,7 +253,7 @@ impl WorldBorder {
             "set_border_lerp_size" => {
                 let old = r.f64()?;
                 let new = r.f64()?;
-                let lerp = r.var_long()?;
+                let lerp = lerp_ticks(r.var_long()?);
                 self.lerp_size_between(old, new, lerp, game_time);
             }
             "set_border_size" => self.set_size(r.f64()?),
@@ -262,6 +262,16 @@ impl WorldBorder {
             _ => return Ok(false),
         }
         Ok(true)
+    }
+}
+
+/// VANILLA: до 1.21.11 (протокол 774) длительность изменения размера в пакетах — миллисекунды,
+/// с 1.21.11 — игровые тики.
+fn lerp_ticks(raw: i64) -> i64 {
+    if ezzmc_protocol::version::current().protocol < 774 {
+        raw / 50
+    } else {
+        raw
     }
 }
 

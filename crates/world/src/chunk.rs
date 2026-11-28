@@ -47,9 +47,13 @@ impl Section {
     /// VANILLA: LevelChunkSection#read (26.3) — short blockCount, short fluidCount, states, biomes.
     pub fn read(f: &ChunkFormat, r: &mut Reader<'_>) -> ProtocolResult<Self> {
         let non_empty_block_count = r.i16()?;
-        // VANILLA (1.21.11): LevelChunkSection#write без fluidCount; id состояний → канон.
+        // VANILLA (≤1.21.11): LevelChunkSection#write без fluidCount (есть с 26.1); id состояний → канон.
         let legacy = crate::legacy::is_legacy();
-        let fluid_count = if legacy { 1 } else { r.i16()? };
+        let fluid_count = if ezzmc_protocol::version::current().since_26_1() {
+            r.i16()?
+        } else {
+            1
+        };
         let mut states = PalettedContainer::read(Kind::BlockStates, f.block_global_bits, r)?;
         if legacy {
             states.map_values(crate::legacy::state_to_canon);

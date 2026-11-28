@@ -1470,6 +1470,32 @@ pub(crate) fn components_1_21_10() -> &'static [&'static Shape] {
     &T
 }
 
+/// Component shapes of 26.1/26.2 (`names`: that version's component registry).
+fn shapes_26_x(names: &'static [&'static str]) -> Vec<&'static Shape> {
+    names
+        .iter()
+        .map(|name| {
+            COMPONENTS_26_2
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, s)| s)
+                .unwrap_or(&Shape::Nbt)
+        })
+        .collect()
+}
+
+pub(crate) fn components_26_2() -> &'static [&'static Shape] {
+    static T: std::sync::LazyLock<Vec<&'static Shape>> =
+        std::sync::LazyLock::new(|| shapes_26_x(crate::generated::r26_2::DATA_COMPONENT_TYPE));
+    &T
+}
+
+pub(crate) fn components_26_1() -> &'static [&'static Shape] {
+    static T: std::sync::LazyLock<Vec<&'static Shape>> =
+        std::sync::LazyLock::new(|| shapes_26_x(crate::generated::r26_1::DATA_COMPONENT_TYPE));
+    &T
+}
+
 /// Component shapes of 1.21.11 by its own component type id.
 pub(crate) fn components_1_21_11() -> &'static [&'static Shape] {
     static T: std::sync::LazyLock<Vec<&'static Shape>> = std::sync::LazyLock::new(|| {

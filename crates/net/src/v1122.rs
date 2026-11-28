@@ -85,19 +85,62 @@ const ENCHANTMENTS: &[(i16, &str)] = &[
     (71, "vanishing_curse"),
 ];
 
+/// Строка с кодами `§` → JSON-компонент 1.13.
+fn text(w: &mut Writer, s: &str) {
+    w.string(&serde_json::json!({ "text": s }).to_string());
+}
+
+/// Последний запрос подсказок: ответ ≤1.12.2 не несёт ни номера, ни диапазона замены.
+static SUGGEST_REQUEST: Mutex<(i32, String)> = Mutex::new((0, String::new()));
+
+fn suggest_request() -> MutexGuard<'static, (i32, String)> {
+    SUGGEST_REQUEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Serverbound `command_suggestion` 1.13 (номер, строка) → 1.12.2 (строка, assumeCommand,
+/// позиция блока под прицелом). VANILLA: RequestCommandCompletionsC2SPacket#write (1.12.2).
+/// В чате assumeCommand = false; позиция не передаётся.
+pub(crate) fn suggestion_request_to_1_12(body: &[u8]) -> ProtocolResult<Vec<u8>> {
+    let mut r = Reader::new(body);
+    let id = r.var_int()?;
+    let text = r.string(32767)?;
+    let mut w = Writer::with_capacity(text.len() + 5);
+    w.string(&text).bool(false).bool(false);
+    *suggest_request() = (id, text);
+    Ok(w.into_vec())
+}
+
+/// Ответ 1.12.2 (список строк) → 1.13 (номер, начало, длина, строки без подсказок).
+/// VANILLA: ClientPlayNetworkHandler#onCommandSuggestions (1.12.2) сортирует список;
+/// заменяется слово перед курсором (после последнего пробела).
+fn suggestions_to_1_13(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    let n = r.length("suggestions", 1 << 16)?;
+    let mut items = Vec::new();
+    for _ in 0..n {
+        let s = r.string(32767)?;
+        if !s.is_empty() {
+            items.push(s);
+        }
+    }
+    items.sort();
+    let (id, text) = suggest_request().clone();
+    let total = text.chars().count();
+    let start = text.rfind(' ').map_or(0, |i| text[..i].chars().count() + 1);
+    w.var_int(id)
+        .var_int(start as i32)
+        .var_int((total - start) as i32)
+        .var_int(items.len() as i32);
+    for s in &items {
+        w.string(s).bool(false);
+    }
+    Ok(())
+}
+
 /// Пакеты, формат которых отличается и пока не переводится.
 pub(crate) fn is_untranslated(name: &str) -> bool {
-    matches!(
-        name,
-        "award_stats"
-            | "command_suggestions"
-            | "custom_payload"
-            | "map_item_data"
-            | "recipe"
-            | "set_objective"
-            | "set_player_team"
-            | "update_advancements"
-    )
+    matches!(name, "custom_payload")
 }
 
 /// id сущности → тип 1.13.2 (из спавна) — для индексов метаданных.
@@ -131,10 +174,16 @@ fn metadata(kind: &str, r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
         .and_then(|at| REMAP_1_12.get(at))
         .map(|(_, m)| *m)
         .unwrap_or_default();
+    // VANILLA: EvocationIllagerEntity (1.11.2) — заклинание байтом в индексе 12; в 1.12 индекс 12
+    // занял общий флаг иллагеров (class_3162), заклинание — 13.
+    let evoker_1_11 = kind == "evoker" && ezzmc_protocol::version::current().protocol < 335;
     loop {
-        let idx = r.u8()?;
+        let mut idx = r.u8()?;
         if idx == 0xFF {
             break;
+        }
+        if evoker_1_11 && idx == 12 {
+            idx = 13;
         }
         let ser = r.var_int()?;
         let mut v = Writer::new();
@@ -320,12 +369,82 @@ fn particles(r: &mut Reader, w: &mut Writer) -> ProtocolResult<bool> {
     Ok(true)
 }
 
+/// VANILLA: WorldRenderer#processWorldEvent 2000 (1.12.2): data = (dx+1) + (dz+1)*3 →
+/// Direction 3D (1.13+). VANILLA-UNSURE: диагонали сводятся к оси x, центр — вверх.
+fn smoke_direction(data: i32) -> i32 {
+    match (data.rem_euclid(3) - 1, (data / 3).rem_euclid(3) - 1) {
+        (-1, _) => 4,
+        (1, _) => 5,
+        (_, -1) => 2,
+        (_, 1) => 3,
+        _ => 1,
+    }
+}
+
+/// Ответ keep_alive: ниже 340 сервер ждёт varint вместо long.
+pub(crate) fn keep_alive_reply(body: &[u8]) -> ProtocolResult<Vec<u8>> {
+    if ezzmc_protocol::version::current().protocol >= 340 {
+        return Ok(body.to_vec());
+    }
+    let mut w = Writer::new();
+    w.var_int(Reader::new(body).i64()? as i32);
+    Ok(w.into_vec())
+}
+
 /// Тело клиентского пакета 1.12.2 → формат 1.13.2.
 pub(crate) fn to_1_13_2(name: &str, body: &[u8]) -> ProtocolResult<Pre18> {
     let mut r = Reader::new(body);
     let mut w = Writer::with_capacity(body.len() + 16);
     let version = ezzmc_protocol::version::current();
     match name {
+        "command_suggestions" => suggestions_to_1_13(&mut r, &mut w)?,
+        // VANILLA: MapUpdateS2CPacket: значок 1.12.2 — байт `тип<<4|поворот`, x, z; 1.13.2 —
+        // тип, x, z, поворот, необязательное имя.
+        "map_item_data" => {
+            w.var_int(r.var_int()?).u8(r.u8()?).bool(r.bool()?);
+            let n = r.length("map icons", 1 << 16)?;
+            w.var_int(n as i32);
+            for _ in 0..n {
+                let packed = r.u8()?;
+                w.var_int(i32::from(packed >> 4))
+                    .bytes(r.bytes(2)?)
+                    .u8(packed & 15)
+                    .bool(false);
+            }
+            w.bytes(r.rest());
+        }
+        // VANILLA: ScoreboardObjectiveUpdateS2CPacket: 1.12.2 — строки заголовка и типа;
+        // 1.13.2 — Component и enum (INTEGER, HEARTS).
+        "set_objective" => {
+            w.string(&r.string(16)?);
+            let mode = r.u8()?;
+            w.u8(mode);
+            if mode == 0 || mode == 2 {
+                text(&mut w, &r.string(32)?);
+                w.var_int(i32::from(r.string(16)? == "hearts"));
+            }
+        }
+        // VANILLA: TeamS2CPacket: 1.13.2 — заголовок-Component, флаги, правила, цвет (varint,
+        // 21 = RESET), приставка и суффикс-Component; 1.12.2 — три строки перед флагами.
+        "set_player_team" => {
+            w.string(&r.string(16)?);
+            let mode = r.u8()?;
+            w.u8(mode);
+            if mode == 0 || mode == 2 {
+                let (title, prefix, suffix) = (r.string(32)?, r.string(16)?, r.string(16)?);
+                text(&mut w, &title);
+                w.u8(r.u8()?).string(&r.string(32)?).string(&r.string(32)?);
+                let color = r.u8()?;
+                w.var_int(if color < 16 { i32::from(color) } else { 21 });
+                text(&mut w, &prefix);
+                text(&mut w, &suffix);
+            }
+            w.bytes(r.rest());
+        }
+        // VANILLA: KeepAlivePacket (до 1.12.2 — varint, байткод jar 1.12/1.12.1).
+        "keep_alive" if version.protocol < 340 => {
+            w.i64(i64::from(r.var_int()?));
+        }
         // VANILLA: MobSpawnS2CPacket (1.12.2): id, uuid, varint тип, xyz, 3 угла, скорость,
         // метаданные. Хвост метаданных к этому месту уже отделён в `set_entity_data`
         // (`v1152::expand_1_14`).
@@ -397,7 +516,9 @@ pub(crate) fn to_1_13_2(name: &str, body: &[u8]) -> ProtocolResult<Pre18> {
             let event = r.i32()?;
             w.i32(event).bytes(r.bytes(8)?);
             let mut data = r.i32()?;
-            if event == 2001 {
+            if event == 2000 {
+                data = smoke_direction(data);
+            } else if event == 2001 {
                 data = state(data);
             } else if event == 1010 && data != 0 {
                 data = u16::try_from(data)
@@ -439,6 +560,54 @@ pub(crate) fn to_1_13_2(name: &str, body: &[u8]) -> ProtocolResult<Pre18> {
     Ok(Pre18::Replace(w.into_vec()))
 }
 
+/// Блок-энтити 1.12.2 из `level_chunk` или `block_entity_data`.
+#[derive(Debug, Default)]
+pub struct LegacyBlockEntities {
+    /// Пришла полная колонка (x, z): прежние записи о ней больше не действуют.
+    pub full_column: Option<(i32, i32)>,
+    pub entries: Vec<([i32; 3], Tag)>,
+}
+
+/// Разбор блок-энтити из сырого пакета 1.12.2; `None` — в этом пакете их не бывает.
+/// VANILLA: ChunkDataS2CPacket#read, BlockEntityUpdateS2CPacket#read,
+/// PacketByteBuf#readBlockPos, BlockPos#fromLong (1.12.2).
+pub fn block_entities(name: &str, body: &[u8]) -> ProtocolResult<Option<LegacyBlockEntities>> {
+    let mut r = Reader::new(body);
+    let mut out = LegacyBlockEntities::default();
+    match name {
+        "level_chunk" => {
+            let column = (r.i32()?, r.i32()?);
+            out.full_column = r.bool()?.then_some(column);
+            r.var_int()?;
+            let len = r.length("chunk data", 1 << 21)?;
+            r.bytes(len)?;
+            for _ in 0..r.length("block entities", 1 << 16)? {
+                let Some((_, tag)) = nbt::read_named(&mut r)? else {
+                    continue;
+                };
+                let at = |k: &str| tag.get(k).and_then(Tag::as_i64).map(|v| v as i32);
+                if let (Some(x), Some(y), Some(z)) = (at("x"), at("y"), at("z")) {
+                    out.entries.push(([x, y, z], tag));
+                }
+            }
+        }
+        "block_entity_data" => {
+            let v = r.i64()?;
+            let pos = [
+                (v >> 38) as i32,
+                ((v >> 26) & 0xFFF) as i32,
+                ((v << 38) >> 38) as i32,
+            ];
+            r.u8()?;
+            if let Some((_, tag)) = nbt::read_named(&mut r)? {
+                out.entries.push((pos, tag));
+            }
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(out))
+}
+
 /// `level_chunk` 1.12.2 → 1.13.2: у прямой палитры убирается пустой счётчик, биомы byte → int.
 /// VANILLA: ChunkDataS2CPacket#writeData, PaletteContainer#write, RegistryPalette#write (1.12.2).
 pub(crate) fn chunk_to_1_13(body: &[u8], sky: bool) -> ProtocolResult<Vec<u8>> {
@@ -457,7 +626,9 @@ pub(crate) fn chunk_to_1_13(body: &[u8], sky: bool) -> ProtocolResult<Vec<u8>> {
         if bits <= 8 {
             out.var_int(palette as i32);
             for _ in 0..palette {
-                out.var_int(data.var_int()?);
+                // VANILLA: PaletteContainer#get (1.9.4) — состояние без id (сервер 1.9 шлёт -1)
+                // читается как воздух.
+                out.var_int(data.var_int()?.max(0));
             }
         }
         let n = data.length("section longs", SECTION_BLOCKS)?;
@@ -762,5 +933,40 @@ mod tests {
         let len = r.var_int().unwrap() as usize;
         assert_eq!(len, 1 + 2 + 832 * 8 + LIGHT_BYTES * 2 + BIOMES * 4);
         assert!(chunk_to_1_13(&body.buf[..40], true).is_err());
+    }
+
+    #[test]
+    fn command_suggestions_roundtrip() {
+        let mut w = Writer::new();
+        w.var_int(7).string("/give Bot sto");
+        let out = suggestion_request_to_1_12(&w.buf).unwrap();
+        let mut r = Reader::new(&out);
+        assert_eq!(r.string(32767).unwrap(), "/give Bot sto");
+        assert!(!r.bool().unwrap());
+        assert!(!r.bool().unwrap());
+
+        let mut w = Writer::new();
+        w.var_int(2).string("stone_bricks").string("stone");
+        let Pre18::Replace(out) = to_1_13_2("command_suggestions", &w.buf).unwrap() else {
+            panic!("not replaced");
+        };
+        let mut r = Reader::new(&out);
+        for expected in [7, 10, 3, 2] {
+            assert_eq!(r.var_int().unwrap(), expected);
+        }
+        assert_eq!(r.string(32767).unwrap(), "stone");
+        assert!(!r.bool().unwrap());
+        assert_eq!(r.string(32767).unwrap(), "stone_bricks");
+    }
+
+    #[test]
+    fn map_icons_to_1_13() {
+        let mut w = Writer::new();
+        w.var_int(3).u8(1).bool(true).var_int(1);
+        w.u8(0x42).u8(10).u8(20).u8(0);
+        let Pre18::Replace(out) = to_1_13_2("map_item_data", &w.buf).unwrap() else {
+            panic!("not replaced");
+        };
+        assert_eq!(out, [3, 1, 1, 1, 4, 10, 20, 2, 0, 0]);
     }
 }

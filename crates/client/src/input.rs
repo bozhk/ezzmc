@@ -80,6 +80,14 @@ impl Default for Mouse {
     }
 }
 
+/// EZZMC_NO_USER_INPUT: автотесты управляют клиентом только через control. Мышь, клавиатура и
+/// смена фокуса окна игнорируются, курсор не захватывается: иначе параллельные окна мешают
+/// друг другу и пользователю.
+pub fn test_input_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("EZZMC_NO_USER_INPUT").is_some())
+}
+
 impl Mouse {
     /// Сырая дельта (DeviceEvent::MouseMotion). Вне захвата игнорируется, как в ванили.
     pub fn on_motion(&mut self, dx: f64, dy: f64) {
@@ -136,7 +144,7 @@ impl Mouse {
         }
         // Без фокуса XGrabPointer (X11/XWayland) не получает ответа и вешает поток навсегда;
         // захват повторит обработчик Focused(true).
-        if !w.has_focus() {
+        if !w.has_focus() || test_input_off() {
             return;
         }
         self.locked = w.set_cursor_grab(CursorGrabMode::Locked).is_ok();

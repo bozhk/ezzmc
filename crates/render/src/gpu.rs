@@ -145,6 +145,12 @@ impl Gpu {
                         & (crate::terrain::TerrainArena::WANTED_FEATURES
                             | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
                     required_limits: adapter.limits(),
+                    // EZZMC_LOW_VRAM: автотесты запускают много клиентов на одной видеокарте.
+                    memory_hints: if std::env::var_os("EZZMC_LOW_VRAM").is_some() {
+                        wgpu::MemoryHints::MemoryUsage
+                    } else {
+                        wgpu::MemoryHints::Performance
+                    },
                     ..Default::default()
                 }))
                 .map_err(|e| GpuError::Device(e.to_string()))?;

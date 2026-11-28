@@ -61,6 +61,17 @@ const MAX_SECTIONS: u32 = 65_536;
 const MAX_PENDING: usize = 128;
 /// Предел пересортировок прозрачных слоёв за кадр.
 const RESORT_PER_FRAME: usize = 16;
+/// EZZMC_ARENA_VERTICES: уменьшенная арена для автотестов (несколько клиентов в одной видеопамяти);
+/// индексов — вчетверо меньше.
+fn arena_capacity() -> (u32, u32) {
+    match std::env::var("EZZMC_ARENA_VERTICES")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+    {
+        Some(v) => (v.min(VERTEX_CAPACITY), (v / 4).min(INDEX_ARENA_CAPACITY)),
+        None => (VERTEX_CAPACITY, INDEX_ARENA_CAPACITY),
+    }
+}
 /// Повторных попыток загрузки секции в арену при нехватке места, прежде чем сдаться.
 const ARENA_RETRIES: u8 = 3;
 
@@ -703,14 +714,15 @@ impl WorldView {
             ..Default::default()
         });
         // Не больше, чем позволяет видеокарта (вершина = 16 байт); дальность 127 требует десятков млн вершин.
-        let vertex_capacity = VERTEX_CAPACITY
+        let (vertices, indices) = arena_capacity();
+        let vertex_capacity = vertices
             .min((gpu.device.limits().max_buffer_size / 16).min(u64::from(u32::MAX)) as u32);
         tracing::info!("арена террейна: {vertex_capacity} вершин");
         let arena = TerrainArena::new(
             &gpu.device,
             &gpu.queue,
             vertex_capacity,
-            INDEX_ARENA_CAPACITY
+            indices
                 .min((gpu.device.limits().max_buffer_size / 4).min(u64::from(u32::MAX)) as u32 / 2),
             MAX_SECTIONS,
         );
@@ -1445,7 +1457,7 @@ impl WorldView {
 
     fn make_renderer(gpu: &Gpu, color: wgpu::TextureFormat) -> Option<Renderer> {
         let mode = RenderPipelineMode::ComputeIndirect;
-        let r = Renderer::new(gpu, mode, color, VERTEX_CAPACITY, MAX_SECTIONS);
+        let r = Renderer::new(gpu, mode, color, arena_capacity().0, MAX_SECTIONS);
         match &r {
             Some(r) => tracing::info!("compute-рендер включён (compact={})", r.is_compact()),
             None => tracing::warn!("compute-рендер не поддерживается GPU — ванильный путь"),
@@ -2258,7 +2270,7 @@ impl WorldView {
         }
     }
 
-    /// Клиентские тики частиц по росту `game_time` (VANILLA: ParticleEngine#tick + tickWeatherEffects).
+    /// Клиентские тики частиц по росту `client_ticks` (VANILLA: ParticleEngine#tick + tickWeatherEffects).
     /// VANILLA: Minecraft#getSituationalMusic: босс Энда (Musics.END_BOSS), иначе BACKGROUND_MUSIC
     /// в позиции камеры.
     pub fn situational_music(&self) -> Option<crate::music::Music> {
@@ -2308,7 +2320,7 @@ impl WorldView {
             let Some(level) = g.as_mut() else { return };
             let now = level.game_time;
             let n = match self.last_piston_tick.replace(now) {
-                Some(prev) => (now - prev).clamp(0, 10),
+                Some(prev) => (level.client_ticks - prev).clamp(0, 10),
                 None => 0,
             };
             if level.pistons.is_empty() {
@@ -2378,8 +2390,10 @@ impl WorldView {
             level.day_time,
             now,
         );
-        let n = match self.last_particle_tick.replace(now) {
-            Some(prev) => (now - prev).clamp(0, 10),
+        // VANILLA: Minecraft#tick → ParticleEngine#tick каждый клиентский тик. Не game_time: его
+        // перезаписывает set_time, и при лаге сервера время откатывается — частицы замирали.
+        let n = match self.last_particle_tick.replace(level.client_ticks) {
+            Some(prev) => (level.client_ticks - prev).clamp(0, 10),
             None => 0,
         };
         if n > 0 {
@@ -2925,6 +2939,19 @@ impl WorldView {
                                 }
                             }
                         }
+                        let vehicle = l
+                            .riders
+                            .vehicle_of
+                            .get(&l.own_id)
+                            .and_then(|v| l.entities.map.get(v))
+                            .and_then(|v| ezzmc_protocol::generated::r26_3::ENTITY_TYPE.get(v.ty));
+                        if let Some(vehicle) = vehicle {
+                            let delta = std::array::from_fn(|i| pos[i] - p.pos[i]);
+                            // первый тик — пересадка на транспорт, а не поездка
+                            if was_riding {
+                                crate::legacystats::ride_tick(vehicle, delta);
+                            }
+                        }
                         p.prev_pos = p.pos;
                         p.pos = pos;
                         p.vel = [0.0; 3];
@@ -2953,7 +2980,19 @@ impl WorldView {
                         }
                         p.glider = glider;
                         self.psound.before_tick(p);
+                        let fall_before = p.fall_distance;
                         p.tick(l, input, yaw);
+                        crate::legacystats::walk_tick(&crate::legacystats::Move {
+                            delta: std::array::from_fn(|i| p.pos[i] - p.prev_pos[i]),
+                            under_water: p.under_water,
+                            in_water: p.in_water,
+                            climbing: p.on_climbable(l),
+                            on_ground: p.on_ground,
+                            was_ground,
+                            jumped: p.jumped,
+                            fall_before,
+                            may_fly: p.mayfly,
+                        });
                         fall_fly_req = p.fall_fly_request;
                         // VANILLA: FireworkRocketEntity#tick — ракеты, привязанные к нам (DATA_ATTACHED_TO_TARGET #9,
                         // OptionalInt: id+1), тикают после игрока и разгоняют его в полёте на элитрах.
@@ -5499,6 +5538,16 @@ impl WorldView {
             // Скин игрока: слот атласа по URL из свойства `textures` (нет/не скачан — Стив, слот 0).
             let first = player_data.len();
             model.bake(root, [255; 4], light, player_data);
+            // VANILLA: LivingEntityRenderer#getOverlayCoords — тело красное, пока hurtTime>0;
+            // EquipmentLayerRenderer (броня) — NO_OVERLAY. Флаг оверлея: uv2.x += 4096 (смещение 24).
+            if e.hurt_at
+                .is_some_and(|t| t.elapsed().as_secs_f32() < e.hurt_dur)
+            {
+                for v in player_data[first..].chunks_exact_mut(32) {
+                    let x = i32::from_le_bytes([v[24], v[25], v[26], v[27]]) + 4096;
+                    v[24..28].copy_from_slice(&x.to_le_bytes());
+                }
+            }
             for v in player_data[first..].chunks_exact_mut(32) {
                 let t = f32::from_le_bytes([v[16], v[17], v[18], v[19]]);
                 let t = (slot as f32 + t) / SKIN_SLOTS as f32;
@@ -7142,8 +7191,11 @@ impl WorldView {
         let mut consumed = false;
         // VANILLA: Minecraft#startUseItem → MultiPlayerGameMode#interact — ПКМ по сущности
         // (ServerboundInteractPacket с точкой попадания относительно сущности).
+        // Цель клика одна: у сущности блок за ней не трогается (ENTITY вместо BLOCK).
+        let mut on_entity = false;
         if let Some(id) = self.entity_target {
             if self.entity_dist <= self.entity_reach() {
+                on_entity = true;
                 let d = look_dir(self.yaw, self.pitch);
                 let hit = [
                     self.cam[0] + f64::from(d[0]) * self.entity_dist,
@@ -7156,17 +7208,23 @@ impl WorldView {
                             .get(e.ty)
                             .copied()
                             .unwrap_or("");
-                        (e.pos, n.ends_with("_boat") || n.ends_with("_raft"))
+                        // VANILLA: ItemFrame#interact (клиент) — SUCCESS, если рамка или рука
+                        // не пусты; AbstractBoat#interact — SUCCESS.
+                        let success = n.ends_with("_boat")
+                            || n.ends_with("_raft")
+                            || (n.ends_with("item_frame")
+                                && (e.item.is_some() || held_name.is_some()));
+                        (e.pos, success)
                     })
                 });
-                if let Some(Some((epos, vehicle))) = info {
+                if let Some(Some((epos, success))) = info {
                     self.send(crate::netthread::NetCmd::Interact {
                         entity_id: id,
                         loc: [hit[0] - epos[0], hit[1] - epos[1], hit[2] - epos[2]],
                         secondary: self.player.crouching,
                     });
-                    if vehicle {
-                        // VANILLA: AbstractBoat#interact → InteractionResult.SUCCESS → player.swing(hand).
+                    if success {
+                        // VANILLA: InteractionResult.SUCCESS → player.swing(hand).
                         self.player.swing();
                         let _ = self.net.cmd.send(crate::netthread::NetCmd::Swing);
                         return;
@@ -7174,7 +7232,7 @@ impl WorldView {
                 }
             }
         }
-        if let Some(t) = self.place_target {
+        if let Some(t) = self.place_target.filter(|_| !on_entity) {
             let seq = self.next_seq();
             let rel = [
                 (t.hit[0] - f64::from(t.pos[0])) as f32,
@@ -7306,6 +7364,10 @@ impl WorldView {
             {
                 // VANILLA: EnderEyeItem#useOn — пустая рамка: клиент сразу SUCCESS (взмах), глаз
                 // вставляет сервер (level event 1503 + блок).
+                consumed = true;
+                self.player.swing();
+                let _ = self.net.cmd.send(crate::netthread::NetCmd::Swing);
+            } else if held_name.is_some_and(|n| self.predict_hanging(n, t.state, t.pos, t.face)) {
                 consumed = true;
                 self.player.swing();
                 let _ = self.net.cmd.send(crate::netthread::NetCmd::Swing);
@@ -7770,6 +7832,54 @@ impl WorldView {
                 }
             }
         }
+    }
+
+    /// Рамка/картина на грани блока: клиент сам тратит предмет (в творческом — нет).
+    /// VANILLA: HangingEntityItem#useOn. Серверы ≤1.8 при опустевшей руке слот не присылают.
+    /// VANILLA-UNSURE: из survives() проверены только опора и занятость (без коллизий и размера
+    /// картины); картина предсказывается лишь на ≤1.8, где ошибку исправит сервер.
+    fn predict_hanging(
+        &mut self,
+        name: &str,
+        support: BlockState,
+        pos: [i32; 3],
+        face: u8,
+    ) -> bool {
+        let painting =
+            name == "painting" && face >= 2 && ezzmc_protocol::version::current().protocol <= 47;
+        if !painting && !matches!(name, "item_frame" | "glow_item_frame") {
+            return false;
+        }
+        let diode = matches!(support.name(), "repeater" | "comparator");
+        if self.game_mode == 2 || !(diode || crate::support::is_solid(support)) {
+            return false;
+        }
+        let mut cell = pos;
+        let axis = [1, 1, 2, 2, 0, 0][usize::from(face.min(5))];
+        cell[axis] += if face % 2 == 1 { 1 } else { -1 };
+        let taken = self
+            .with_level(|l| {
+                l.entities.map.values().any(|e| {
+                    ezzmc_protocol::generated::r26_3::ENTITY_TYPE.get(e.ty) == Some(&name)
+                        && e.frame_dir() == i32::from(face)
+                        && (0..3).all(|i| e.pos[i].floor() as i32 == cell[i])
+                })
+            })
+            .unwrap_or(false);
+        if taken {
+            return false;
+        }
+        if self.game_mode != 1 {
+            let i = crate::inventory::HOTBAR_START + usize::from(self.inv.selected);
+            if let Some(st) = self.inv.slots[i].as_mut() {
+                if st.count <= 1 {
+                    self.inv.slots[i] = None;
+                } else {
+                    st.count -= 1;
+                }
+            }
+        }
+        true
     }
 
     fn next_seq(&self) -> i32 {

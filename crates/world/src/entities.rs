@@ -375,6 +375,12 @@ impl Entity {
         let direct = self.snap || self.proj != 0;
         if let Some(p) = pos {
             self.target = p;
+            if is_frame(self.ty) {
+                // VANILLA: setPos у рамки пересчитывает бокс у стены; target — база дельт.
+                self.pos = hanging_center(p, self.frame_dir());
+                self.steps = 0;
+                return;
+            }
             if direct {
                 self.pos = p;
             }
@@ -557,6 +563,78 @@ impl Entities {
     }
 }
 
+/// Размеры (ширина, высота) вариантов картин в порядке реестра сервера.
+/// Мотивы картин серверов ≤1.18.2 из пакета спавна: id сущности → значение метаданных #9.
+static SPAWN_MOTIVES: std::sync::Mutex<Vec<(i32, i32)>> = std::sync::Mutex::new(Vec::new());
+
+/// Запоминает мотив до добавления сущности (`Level::add_entity`).
+pub fn set_spawn_motive(id: i32, holder: i32) {
+    let mut m = SPAWN_MOTIVES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    m.retain(|(i, _)| *i != id);
+    m.push((id, holder));
+}
+
+pub(crate) fn take_spawn_motive(id: i32) -> Option<i32> {
+    let mut m = SPAWN_MOTIVES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let at = m.iter().position(|(i, _)| *i == id)?;
+    Some(m.swap_remove(at).1)
+}
+
+static PAINTING_SIZES: std::sync::Mutex<Vec<(i32, i32)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_painting_sizes(sizes: Vec<(i32, i32)>) {
+    *PAINTING_SIZES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = sizes;
+}
+
+/// Единичный вектор Direction по 3D-номеру (0 D, 1 U, 2 N, 3 S, 4 W, 5 E).
+fn dir_step(dir: i32) -> [f64; 3] {
+    match dir {
+        0 => [0.0, -1.0, 0.0],
+        1 => [0.0, 1.0, 0.0],
+        2 => [0.0, 0.0, -1.0],
+        3 => [0.0, 0.0, 1.0],
+        4 => [-1.0, 0.0, 0.0],
+        _ => [1.0, 0.0, 0.0],
+    }
+}
+
+/// Центр висящего предмета у стены: `pos` — любая точка его блока.
+/// VANILLA: ItemFrame#createBoundingBox — центр блока, сдвинутый против направления на 0.46875.
+pub fn hanging_center(pos: [f64; 3], dir: i32) -> [f64; 3] {
+    let step = dir_step(dir);
+    std::array::from_fn(|i| pos[i].floor() + 0.5 - step[i] * 0.46875)
+}
+
+pub(crate) fn is_frame(ty: usize) -> bool {
+    matches!(
+        ezzmc_protocol::generated::r26_3::ENTITY_TYPE.get(ty),
+        Some(&("item_frame" | "glow_item_frame"))
+    )
+}
+
+/// Бокс с центром `c`: толщина 1/16 вдоль направления, иначе ширина и высота.
+fn flat_box(c: [f64; 3], dir: i32, w: f64, h: f64) -> ([f64; 3], [f64; 3]) {
+    let step = dir_step(dir);
+    let size = [w, h, w];
+    let half: [f64; 3] = std::array::from_fn(|i| {
+        if step[i] == 0.0 {
+            size[i] / 2.0
+        } else {
+            0.031_25
+        }
+    });
+    (
+        std::array::from_fn(|i| c[i] - half[i]),
+        std::array::from_fn(|i| c[i] + half[i]),
+    )
+}
+
 /// Типы без выбираемого хитбокса (Entity#isPickable = false / не цель луча).
 const NOT_PICKABLE: &[&str] = &[
     // EnderDragon#isPickable = false: бьются 8 EnderDragonPart (см. mobs.rs).
@@ -585,8 +663,50 @@ impl Entity {
         self.hitbox()
     }
 
+    /// Направление рамки. VANILLA: HangingEntity#DATA_DIRECTION (#8), иначе data из add_entity.
+    pub fn frame_dir(&self) -> i32 {
+        self.int_meta(8).unwrap_or(self.data)
+    }
+
+    /// Центр картины и её размер; `pos` — блок из пакета, вариант — метаданные #9.
+    /// VANILLA: Painting#calculateBoundingBox — чётный размер сдвигает на 0.5 влево и вверх.
+    pub fn painting_shape(&self) -> Option<([f64; 3], i32, i32)> {
+        let variant = usize::try_from(self.int_meta(9)?.checked_sub(1)?).ok()?;
+        let (w, h) = *PAINTING_SIZES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(variant)?;
+        let even = |size: i32| if size % 2 == 0 { 0.5 } else { 0.0 };
+        let mut c = hanging_center(self.pos, self.data);
+        // Direction#getCounterClockWise: N → W, S → E, W → S, E → N.
+        let left = dir_step(match self.data {
+            2 => 4,
+            3 => 5,
+            4 => 3,
+            _ => 2,
+        });
+        for (v, step) in c.iter_mut().zip(left) {
+            *v += step * even(w);
+        }
+        c[1] += even(h);
+        Some((c, w, h))
+    }
+
     /// Бокс по размерам типа без учёта выбираемости (F3+B рисует и дракона, и предметы).
     pub fn hitbox(&self) -> Option<([f64; 3], [f64; 3])> {
+        if is_frame(self.ty) {
+            // VANILLA: ItemFrame#createBoundingBox — с картой 1×1, иначе 0.75×0.75.
+            let map = self.item.as_ref().is_some_and(|s| {
+                ezzmc_protocol::generated::r26_3::ITEM.get(s.item as usize) == Some(&"filled_map")
+            });
+            let size = if map { 1.0 } else { 0.75 };
+            return Some(flat_box(self.pos, self.frame_dir(), size, size));
+        }
+        if ezzmc_protocol::generated::r26_3::ENTITY_TYPE.get(self.ty) == Some(&"painting") {
+            if let Some((c, w, h)) = self.painting_shape() {
+                return Some(flat_box(c, self.data, f64::from(w), f64::from(h)));
+            }
+        }
         let (w, mut h) = size_by_type(self.ty)?;
         if Some(self.ty) == player_type() {
             if self.flags & 16 != 0 {
@@ -636,6 +756,34 @@ mod tests {
         assert_eq!(e.pos, [1.0, 0.2, -0.5]);
         assert_eq!(e.vel, [0.5, 0.1, -0.25]);
         assert!(!e.stuck);
+    }
+
+    #[test]
+    fn item_frame_sits_on_the_wall() {
+        // рамка на северной грани блока (8, 1, 11): сама в блоке (8, 1, 10)
+        let c = hanging_center([8.0, 1.0, 10.0], 2);
+        assert_eq!(c, [8.5, 1.5, 10.96875]);
+        // повторное применение ничего не меняет
+        assert_eq!(hanging_center(c, 2), c);
+        assert_eq!(
+            flat_box(c, 2, 0.75, 0.75),
+            ([8.125, 1.125, 10.9375], [8.875, 1.875, 11.0])
+        );
+    }
+
+    #[test]
+    fn frame_stays_on_the_wall_after_move_packet() {
+        let ty = ezzmc_protocol::generated::r26_3::ENTITY_TYPE
+            .iter()
+            .position(|n| *n == "item_frame")
+            .unwrap();
+        let block = [8.0, 1.0, 10.0];
+        let mut e = Entity::new(1, 0, ty, block, 0.0, 0.0, 0.0);
+        e.data = 2;
+        e.set_target(Some(block), None);
+        assert_eq!(e.pos, [8.5, 1.5, 10.96875]);
+        // база дельт остаётся такой, какой её прислал сервер
+        assert_eq!(e.target_pos(), block);
     }
 
     #[test]

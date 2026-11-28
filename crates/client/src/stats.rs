@@ -51,6 +51,30 @@ impl Stats {
         self.received = true;
     }
 
+    /// Ненулевые значения по именам `тип:значение` (состояние для агента).
+    pub fn named(&self) -> std::collections::BTreeMap<String, i32> {
+        let types: [(&str, &[&str]); 9] = [
+            ("mined", reg::BLOCK),
+            ("crafted", reg::ITEM),
+            ("used", reg::ITEM),
+            ("broken", reg::ITEM),
+            ("picked_up", reg::ITEM),
+            ("dropped", reg::ITEM),
+            ("killed", reg::ENTITY_TYPE),
+            ("killed_by", reg::ENTITY_TYPE),
+            ("custom", reg::CUSTOM_STAT),
+        ];
+        self.map
+            .iter()
+            .filter(|(_, &amount)| amount != 0)
+            .filter_map(|(&(ty, value), &amount)| {
+                let (ty, names) = types.get(ty as usize)?;
+                let name = names.get(value as usize)?;
+                Some((format!("{ty}:{name}"), amount))
+            })
+            .collect()
+    }
+
     /// VANILLA: StatsCounter#getValue(Stat) — по умолчанию 0.
     pub fn get(&self, ty: u32, value: u32) -> i32 {
         self.map.get(&(ty, value)).copied().unwrap_or(0)

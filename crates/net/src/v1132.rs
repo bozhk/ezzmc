@@ -1,4 +1,4 @@
-//! Отличия протоколов 1.12.2–1.13.2 (340–404) от 1.14.4: тела приводятся к формату 1.14.4, дальше идут
+//! Отличия протоколов 1.12.2–1.13.2 (335–404) от 1.14.4: тела приводятся к формату 1.14.4, дальше идут
 //! общим путём `v1152`/`v1165`/`v1201`. Пакеты, которых общий путь не разбирает, не переводятся.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,7 +100,7 @@ fn item_id_out(id: i32) -> Option<i32> {
 /// Предмет 1.13/1.13.1 (`short id`, -1 — пусто, byte count, NBT) → формат 1.13.2.
 /// VANILLA: PacketByteBuf#readItemStack (1.13.2: bool, varint id).
 pub(crate) fn item_to_1_13_2(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
-    if current() == 340 {
+    if current() <= 340 {
         return crate::v1122::item_to_1_13_2(r, w);
     }
     let id = r.i16()?;
@@ -123,9 +123,50 @@ pub(crate) fn item_to_1_13_2(r: &mut Reader, w: &mut Writer) -> ProtocolResult<(
     Ok(())
 }
 
+/// VANILLA: AdvancementDisplay#writeTo (1.12.2/1.13): переписывает только иконки.
+fn advancement_icons(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
+    w.bool(r.bool()?);
+    let n = r.length("advancements", 1 << 16)?;
+    w.var_int(n as i32);
+    for _ in 0..n {
+        w.string(&r.string(32767)?);
+        let parent = r.bool()?;
+        w.bool(parent);
+        if parent {
+            w.string(&r.string(32767)?);
+        }
+        let display = r.bool()?;
+        w.bool(display);
+        if display {
+            w.string(&r.string(262_144)?).string(&r.string(262_144)?);
+            item_to_1_13_2(r, w)?;
+            w.var_int(r.var_int()?);
+            let flags = r.i32()?;
+            w.i32(flags);
+            if flags & 1 != 0 {
+                w.string(&r.string(32767)?);
+            }
+            w.bytes(r.bytes(8)?);
+        }
+        // критерии и требования
+        let at = r.pos();
+        for _ in 0..r.length("criteria", 1 << 16)? {
+            r.string(32767)?;
+        }
+        for _ in 0..r.length("requirements", 1 << 16)? {
+            for _ in 0..r.length("requirement", 1 << 16)? {
+                r.string(32767)?;
+            }
+        }
+        w.bytes(r.since(at));
+    }
+    w.bytes(r.rest());
+    Ok(())
+}
+
 /// Обратный перевод для serverbound.
 fn item_from_1_13_2(r: &mut Reader, w: &mut Writer) -> ProtocolResult<()> {
-    if current() == 340 {
+    if current() <= 340 {
         return crate::v1122::item_from_1_13_2(r, w);
     }
     if !r.bool()? {
@@ -384,7 +425,7 @@ fn light_to_1_14(c: &Chunk, sky: bool) -> Vec<u8> {
 
 /// `level_chunk` → тот же пакет под внутренним id и синтезированный `light_update`.
 pub fn expand(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<Packet>>> {
-    let legacy = current() == 340;
+    let legacy = current() <= 340;
     if legacy && crate::v1122::is_untranslated(name) {
         return Ok(Some(Vec::new()));
     }
@@ -413,7 +454,7 @@ pub fn expand(name: &str, body: &[u8]) -> ProtocolResult<Option<Vec<Packet>>> {
 
 /// Тело клиентского пакета 1.13.x → формат 1.14.4.
 pub fn from_1_13(name: &str, body: &[u8]) -> ProtocolResult<Pre18> {
-    if current() != 340 {
+    if current() > 340 {
         return from_1_13_2(name, body);
     }
     match crate::v1122::to_1_13_2(name, body)? {
@@ -452,8 +493,16 @@ fn from_1_13_2(name: &str, body: &[u8]) -> ProtocolResult<Pre18> {
             let chunk = parse_chunk(body, SKY_LIGHT.load(Ordering::Relaxed))?;
             return Ok(Pre18::Replace(chunk_to_1_14(&chunk)?));
         }
-        "block_update" => {
+        "block_update" | "block_event" => {
             w.i64(pos_to_1_14(r.i64()?)).bytes(r.rest());
+        }
+        "level_event" => {
+            w.i32(r.i32()?).i64(pos_to_1_14(r.i64()?)).bytes(r.rest());
+        }
+        "block_destruction" => {
+            w.var_int(r.var_int()?)
+                .i64(pos_to_1_14(r.i64()?))
+                .bytes(r.rest());
         }
         // varint id, uuid, varint motive, позиция, byte направление
         "add_painting" => {
@@ -496,6 +545,8 @@ fn from_1_13_2(name: &str, body: &[u8]) -> ProtocolResult<Pre18> {
             w.u8(r.u8()?).i16(r.i16()?);
             item_to_1_13_2(&mut r, &mut w)?;
         }
+        // Иконки в достижениях ≤1.13.1 — в старом формате предмета.
+        "update_advancements" if current() < 404 => advancement_icons(&mut r, &mut w)?,
         "set_equipment" if current() < 404 => {
             w.var_int(r.var_int()?).var_int(r.var_int()?);
             item_to_1_13_2(&mut r, &mut w)?;
@@ -528,15 +579,28 @@ pub(crate) fn to_1_13(name: &str, body: &mut Vec<u8>) -> ProtocolResult<()> {
     let mut r = Reader::new(body);
     let mut w = Writer::with_capacity(body.len());
     match name {
+        "command_suggestion" if current() <= 340 => {
+            *body = crate::v1122::suggestion_request_to_1_12(body)?;
+            return Ok(());
+        }
         // VANILLA: PlayerInteractBlockC2SPacket (1.13.2): позиция, сторона, рука, 3 float.
         "use_item_on" => {
             let hand = r.var_int()?;
             let pos = r.i64()?;
             let face = r.var_int()?;
-            w.i64(pos_to_1_13(pos))
-                .var_int(face)
-                .var_int(hand)
-                .bytes(r.bytes(12)?);
+            w.i64(pos_to_1_13(pos)).var_int(face).var_int(hand);
+            if current() < 315 {
+                // VANILLA: PlayerInteractBlockC2SPacket (1.10.2): точка на грани — байты (×16).
+                for _ in 0..3 {
+                    w.u8((r.f32()? * 16.0) as u8);
+                }
+            } else {
+                w.bytes(r.bytes(12)?);
+            }
+        }
+        // VANILLA: ResourcePackStatusC2SPacket (1.9.4): хеш из запроса, затем статус.
+        "resource_pack" if current() < 210 => {
+            w.string(&crate::v194::resource_pack_hash()).bytes(r.rest());
         }
         "player_action" => {
             w.var_int(r.var_int()?)

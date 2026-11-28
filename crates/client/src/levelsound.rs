@@ -42,7 +42,21 @@ fn entry(ty: i32) -> Option<(&'static str, Cat, f32, P)> {
         1000 => ("block.dispenser.dispense", B, 1.0, P::Fixed(1.0)),
         1001 => ("block.dispenser.fail", B, 1.0, P::Fixed(1.2)),
         1002 => ("block.dispenser.launch", B, 1.0, P::Fixed(1.2)),
+        // VANILLA: LevelRenderer#levelEvent (1.20.1) 1003; в 26.3 этого номера нет.
+        1003 => ("entity.ender_eye.launch", N, 1.0, P::Fixed(1.2)),
         1004 => ("entity.firework_rocket.shoot", N, 1.0, P::Fixed(1.2)),
+        // VANILLA: LevelRenderer#levelEvent (1.19.2) — двери, люки, калитки; отрицательные номера
+        // ставит перевод протокола (`net::v1201_fx`).
+        -1005 => ("block.iron_door.open", B, 1.0, P::Anvil),
+        -1006 => ("block.wooden_door.open", B, 1.0, P::Anvil),
+        -1007 => ("block.wooden_trapdoor.open", B, 1.0, P::Anvil),
+        -1008 => ("block.fence_gate.open", B, 1.0, P::Anvil),
+        -1011 => ("block.iron_door.close", B, 1.0, P::Anvil),
+        -1012 => ("block.wooden_door.close", B, 1.0, P::Anvil),
+        -1013 => ("block.wooden_trapdoor.close", B, 1.0, P::Anvil),
+        -1014 => ("block.fence_gate.close", B, 1.0, P::Anvil),
+        -1036 => ("block.iron_trapdoor.close", B, 1.0, P::Anvil),
+        -1037 => ("block.iron_trapdoor.open", B, 1.0, P::Anvil),
         1015 => ("entity.ghast.warn", H, 10.0, P::Mob),
         1016 => ("entity.ghast.shoot", H, 10.0, P::Mob),
         1017 => ("entity.ender_dragon.shoot", H, 10.0, P::Mob),
@@ -157,6 +171,11 @@ pub fn play(ty: i32, pos: [i32; 3], data: i32) {
             1.0,
         ),
         3001 => at("entity.ender_dragon.growl", H, 64.0, 0.8 + rf() * 0.3),
+        // VANILLA: LevelRenderer#levelEvent (1.20.1) — звук воска шёл вместе с частицами
+        // (в 26.3 его присылает сервер).
+        3003 if ezzmc_protocol::version::current().protocol <= 763 => {
+            at("item.honeycomb.wax_on", B, 1.0, 1.0)
+        }
         3020 => at(
             "block.trial_spawner.ominous_activate",
             B,
