@@ -8,7 +8,7 @@
   <sub>ezzmc, render distance 32, GPU-driven (compute) renderer, vanilla 26.3 server.</sub>
 </p>
 
-**Status:** working prototype. Version **26.3** works today; other versions are in progress (see [Version support](#version-support)).
+**Status:** working prototype. Joins servers from **1.5.2 to 26.3**; older versions are less complete than 26.3 (see [Version support](#version-support)).
 
 ## Goals
 
@@ -117,9 +117,14 @@ Useful environment variables: `EZZMC_RENDER_DISTANCE`, `EZZMC_VSYNC=0`, `EZZMC_P
 
 ## Version support
 
-- **Works:** Minecraft **26.3** (latest) — the main target, all development and testing happens here.
-- **Partial:** 1.21.11 — a connection was made, but it has not been tested thoroughly.
-- **Does not connect yet:** everything else from **1.5.2 to 26.2**. Protocol code for older versions is in progress but not verified against live servers. The goal of joining any server from 1.5.2 to latest is **not reached yet**.
+Status as of 2026-11-28.
+
+- **Main target:** **26.3** (protocol 777). All features below are developed and tested here.
+- **Plays (tested on a live server):** 1.21.11 (full), 1.21.1–1.21.10, 1.20.5–1.20.6. Other versions are translated to the 26.3 format.
+- **Join + world, covered by the automated smoke test (`tools/version_smoke.py`) to varying depth:** 1.5.2 up to 1.20.4, plus 26.1 and 26.2. This is not full parity with vanilla.
+- **Not supported:** 1.5–1.5.1 and anything older than 1.5.2.
+
+Known gaps on older versions: placing a recipe from the recipe book on 1.12.0; player head skins; some entity animations and metadata.
 
 ### Implemented (on 26.3)
 
@@ -135,7 +140,7 @@ Useful environment variables: `EZZMC_RENDER_DISTANCE`, `EZZMC_VSYNC=0`, `EZZMC_P
 
 ### Not done yet
 
-- **Other versions (the main goal):** only 26.3 works; 1.5.2–26.2 do not connect yet.
+- **Other versions (the main goal):** 1.5.2–26.2 connect, but feature coverage on them is incomplete.
 - **Singleplayer / integrated server:** not started.
 - **Polish:** the vanilla side-by-side acceptance pass is still in progress; some creative-menu icons are missing; several rarer mob variants (e.g. baby/adult forms of a few animals) are partial.
 - **Known vanilla differences on 26.3:** some newer play packets are ignored (`game_rule_values`, `swing_animation`, `post_effects`, …); fluid counters in sections are not tracked; `force_translucent` texture material flag is not ported; old golden tests are not updated for 26.3.
