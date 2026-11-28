@@ -66,6 +66,15 @@ def block_states():
     return [table.get(i, table.get(i & ~15, 0)) for i in range(4096)], len(table)
 
 
+def legacy_names():
+    """(имя реестра ≤1.12.2, числовой id) блоков и предметов — для статистики 1.8–1.12.2."""
+    pairs = {('air', 0)}
+    for f, d in (('block/Block.java', OLD), ('item/Item.java', OLD)):
+        pairs.update((n, int(i)) for i, n in
+                     re.findall(r'\bregister\((\d+), "(\w+)"', (d / f).read_text()))
+    return sorted(pairs)
+
+
 def numeric_ids():
     blocks = {int(i): n for i, n in
               re.findall(r'\bregister\((\d+), "(\w+)"', (OLD / 'block/Block.java').read_text())}
@@ -120,6 +129,10 @@ def main():
              '/// damage берётся запись damage 0 (там damage — износ или данные).',
              '#[rustfmt::skip]', 'pub const ITEMS: &[(u16, u16, u16)] = &[']
     text += [f'    ({i}, {d}, {n}),' for i, d, n in stacks]
+    text += ['];', '',
+             '/// (имя реестра, числовой id) блоков и предметов ≤1.12.2; отсортировано по имени.',
+             '#[rustfmt::skip]', 'pub const NAMES: &[(&str, u16)] = &[']
+    text += [f'    ("{n}", {i}),' for n, i in legacy_names()]
     text += ['];', '']
     OUT.write_text('\n'.join(text))
     print(f'блоки: {mapped} записей; предметы: {len(stacks)}; без пары: {missing}')

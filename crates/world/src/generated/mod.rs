@@ -20,6 +20,8 @@ pub mod b1_21_3;
 pub mod b1_21_4;
 pub mod b1_21_5;
 pub mod b1_21_8;
+pub mod b26_1;
+pub mod b26_2;
 pub mod b26_3;
 pub mod flattening;
 pub mod p1_21_11;
